@@ -3,18 +3,51 @@ package engine_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/demo"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/engine"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
+	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+type deadlineHandoffProvider struct {
+	calls int
+}
+
+func (p *deadlineHandoffProvider) Name() string                   { return "codex" }
+func (p *deadlineHandoffProvider) Validate(context.Context) error { return nil }
+func (p *deadlineHandoffProvider) Run(ctx context.Context, request provider.Request) (provider.Result, error) {
+	p.calls++
+	if p.calls == 1 {
+		if err := os.WriteFile(filepath.Join(request.Directory, "recovered.txt"), []byte("durable timeout work\n"), 0600); err != nil {
+			return provider.Result{}, err
+		}
+		if err := os.MkdirAll(request.Runtime, 0700); err != nil {
+			return provider.Result{}, err
+		}
+		logLine := `{"type":"item.completed","item":{"type":"command_execution","command":"go test ./internal/engine --api-key=must-not-persist","exit_code":0}}` + "\n"
+		if err := os.WriteFile(filepath.Join(request.Runtime, "output.log"), []byte(logLine), 0600); err != nil {
+			return provider.Result{}, err
+		}
+		<-ctx.Done()
+		return provider.Result{}, &provider.InvocationError{Cause: ctx.Err(), LastActivity: time.Now().UTC(), OutputBytes: len(logLine)}
+	}
+	if p.calls == 2 {
+		<-ctx.Done()
+		return provider.Result{}, ctx.Err()
+	}
+	return provider.Result{}, errors.New("deadline fixture unexpectedly resumed")
+}
 
 func TestPartialGraphRecoversWithoutLocalProject(t *testing.T) {
 	ctx := context.Background()
@@ -106,6 +139,145 @@ func TestPartialGraphRecoversWithoutLocalProject(t *testing.T) {
 	}
 	if recovered.Tasks["c"].Verification == nil {
 		t.Fatal("interruption recovery lost verification retry guard")
+	}
+}
+
+func TestDeadlineCheckpointAndHandoffRecoverTogetherAfterMachineLoss(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Project.WorkerSeconds = 10
+	projectYAML, _ := yaml.Marshal(f.Project)
+	if err = os.WriteFile(filepath.Join(f.Source, ".aih", "project.yaml"), projectYAML, 0600); err != nil {
+		t.Fatal(err)
+	}
+	sourceGit := gitx.Git{Dir: f.Source}
+	if _, err = sourceGit.Run(ctx, "", "add", ".aih/project.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sourceGit.Run(ctx, "", "commit", "-m", "Short deadline fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sourceGit.Run(ctx, "", "push", "origin", "HEAD:main"); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, stateHead, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := f.P.Git.SHA(ctx, "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Objectives["deadline-objective"] = &model.Objective{ID: "deadline-objective", Text: "recover timeout work", Planned: true}
+	snapshot.Tasks["deadline"] = &model.Task{
+		ID:          "deadline",
+		ObjectiveID: "deadline-objective",
+		Title:       "deadline",
+		Objective:   "Write recovered.txt and preserve it across the deadline.",
+		Acceptance:  []string{"recovered.txt is durable"},
+		Areas:       []string{"recovered.txt"},
+		Domains:     []string{"deadline-fixture"},
+		Risk:        "low",
+		State:       model.Ready,
+		Branch:      "aih/deadline",
+		BaseSHA:     base,
+		HeadSHA:     base,
+		Rotations:   23,
+		FixCycles:   map[string]int{},
+	}
+	nextState, err := f.P.Git.StateCommit(ctx, stateHead, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih/deadline", New: base}, {Branch: "aih-state", Old: stateHead, New: nextState}}); err != nil {
+		t.Fatal(err)
+	}
+	worker := &deadlineHandoffProvider{}
+	f.P.Provider = worker
+	done := make(chan error, 1)
+	go func() { done <- engine.New(f.P).Serve(ctx) }()
+
+	for {
+		current, _, loadErr := f.P.DB.Load()
+		if loadErr == nil {
+			task := current.Tasks["deadline"]
+			if task != nil && task.State == model.Blocked && task.Rotations == 24 {
+				break
+			}
+		}
+		select {
+		case serveErr := <-done:
+			t.Fatal("supervisor exited before recovered checkpoint publication", serveErr)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if err = f.P.DB.Submit(store.Command{ID: model.ID(), Kind: "handoff"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	remote, _, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := remote.Tasks["deadline"]
+	branchHead, err := f.P.Git.RemoteHead(ctx, durable.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if durable.HeadSHA == base || durable.HeadSHA != branchHead || !strings.Contains(durable.Summary, "Recovered worker timeout handoff") {
+		t.Fatalf("source and handoff were not atomically published: %#v branch=%s", durable, branchHead)
+	}
+	if strings.Join(durable.ReportedTests, ",") != "go test" || len(durable.Risks) == 0 || len(durable.Decisions) == 0 {
+		t.Fatalf("durable handoff fields are incomplete: %#v", durable)
+	}
+	portable, _ := json.Marshal(durable)
+	if strings.Contains(string(portable), "must-not-persist") || strings.Contains(string(portable), "--api-key") {
+		t.Fatalf("raw command arguments reached durable state: %s", portable)
+	}
+
+	projectDir := f.P.Dir
+	if err = f.P.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(f.Root, projectDir)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		t.Fatal("unsafe test deletion target", projectDir)
+	}
+	if err = os.RemoveAll(projectDir); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := f.Open(ctx, filepath.Join(f.Root, "deadline-machine-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.DB.Close()
+	if err = replacement.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered, _, err := replacement.DB.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredTask := recovered.Tasks["deadline"]
+	if recoveredTask.HeadSHA != durable.HeadSHA || recoveredTask.Summary != durable.Summary || strings.Join(recoveredTask.ReportedTests, ",") != "go test" || len(recoveredTask.Risks) == 0 || len(recoveredTask.Decisions) == 0 {
+		t.Fatalf("attach lost recovered handoff fields: %#v", recoveredTask)
+	}
+	content, err := os.ReadFile(filepath.Join(replacement.TaskPath(recoveredTask), "recovered.txt"))
+	if err != nil || strings.TrimSpace(string(content)) != "durable timeout work" {
+		t.Fatalf("attach lost recovered source: %q %v", content, err)
 	}
 }
 

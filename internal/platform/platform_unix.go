@@ -39,9 +39,9 @@ func supervise(cmd *exec.Cmd) (func(), error) {
 	cmd.ExtraFiles = []*os.File{reader}
 	return func() { _ = writer.Close(); _ = reader.Close() }, nil
 }
-func own(cmd *exec.Cmd) (func(), func(), error) {
-	kill := func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	return kill, kill, nil
+func own(cmd *exec.Cmd) (func(), func() error, error) {
+	kill := func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	return func() { _ = kill() }, kill, nil
 }
 
 type Lock struct{ f *os.File }

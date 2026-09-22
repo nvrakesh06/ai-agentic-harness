@@ -186,6 +186,11 @@ interrupted workers are marked interrupted and eligible tasks are rechecked or
 resumed from retained worktrees/checkpoints. Lost disks lose unpushed edits and
 queued-only commands, not acknowledged remote state. [Recovery details](docs/RECOVERY.md).
 
+Implementation workers use a fixed soft deadline at 80 percent of their configured
+budget. Active work gets one checkpoint/finalizer pass inside the remaining hard
+budget. If that pass times out, AIH checkpoints safe edits and passes a synthetic,
+evidence-backed handoff to the next worker; it never extends the hard deadline again.
+
 There is no HTTP API, management port, browser dashboard, Redis, or external queue.
 See [architecture](docs/ARCHITECTURE.md), [state layout](docs/STATE.md),
 [integration decision](docs/DECISIONS.md), and [custom roles](docs/ROLES.md).

@@ -30,11 +30,29 @@ reconciled and cannot serve as a code-publication fence.
 
 ## Worker lifecycle
 
-Each provider invocation is bounded (default 15 minutes). Structured output reports
-completed, in_progress, blocked, or failed. Code is checkpointed after the writer
-exits, never while it is changing files. Retry/rotation budgets prevent endless
-loops; repeated failures get one Advisor recovery approach before escalation.
-No provider conversation is needed to restart a worker.
+Each implementation budget is bounded (default 15 minutes). The normal worker gets
+80 percent of that budget. If it reaches this soft deadline with recent provider
+output or worktree changes, AIH terminates that process before starting one fresh,
+narrowly prompted checkpoint pass in the remaining budget. The checkpoint pass must
+stop expanding scope, preserve safe edits, run only the smallest relevant check and
+return the normal structured result. There is only one pass and the original hard
+deadline never moves.
+
+If the checkpoint pass still reaches the hard deadline, the supervisor records a
+sanitized `handoff.json` in the local session and synthesizes an `in_progress`
+handoff from changed files, Git status and allowlisted command-family evidence;
+command arguments never enter portable state. One fenced ref transaction publishes
+the safe source checkpoint together with its summary, checks, risks, decision and
+rotation state. `handoff.json` is local diagnostics only. Non-deadline checkpoint
+failures use the ordinary failure/Advisor budget. Idle workers without
+recent output or edits stop at the soft boundary without grace. Deadline phases are
+recorded as lifecycle events and shown by `status`/`watch`.
+
+Structured output reports completed, in_progress, blocked, or failed. Code is
+checkpointed only after the writer process exits, never while it is changing files.
+Retry/rotation budgets prevent endless loops; repeated failures get one Advisor
+recovery approach before escalation. No provider conversation is needed to restart
+a worker.
 
 An implementer blocker with a human question becomes `BLOCKED_HUMAN`. A questionless
 implementer blocker means the source change is complete but the worker environment

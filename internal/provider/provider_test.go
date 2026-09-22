@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"os"
@@ -31,6 +32,12 @@ func init() {
 	if os.Getenv("AIH_HELPER_MODE") == "crash" {
 		os.Exit(2)
 	}
+	if os.Getenv("AIH_HELPER_MODE") == "active-timeout" {
+		for {
+			fmt.Println(`{"type":"command_execution","status":"completed","command":"go test ./internal/provider"}`)
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 	if os.Getenv("AIH_HELPER_MODE") == "timeout" {
 		time.Sleep(10 * time.Second)
 		os.Exit(0)
@@ -49,6 +56,9 @@ func init() {
 	}
 	envelope, _ := json.Marshal(map[string]any{"structured_output": json.RawMessage(b)})
 	fmt.Println(string(envelope))
+	if os.Getenv("AIH_HELPER_MODE") == "stderr-success" {
+		fmt.Fprintln(os.Stderr, "benign provider diagnostic")
+	}
 	os.Exit(0)
 }
 func TestAdaptersLaunchAndFailures(t *testing.T) {
@@ -65,20 +75,28 @@ func TestAdaptersLaunchAndFailures(t *testing.T) {
 			if e := c.Validate(context.Background()); e != nil {
 				t.Fatal(e)
 			}
-			for _, mode := range []string{"success", "malformed", "crash", "timeout"} {
+			for _, mode := range []string{"success", "stderr-success", "malformed", "crash", "timeout", "active-timeout"} {
 				t.Run(mode, func(t *testing.T) {
 					t.Setenv("AIH_HELPER_MODE", mode)
 					r := Request{Directory: t.TempDir(), Runtime: filepath.Join(t.TempDir(), "run"), Role: "reviewer", Prompt: "fixture", Timeout: 2 * time.Second}
-					if mode == "timeout" {
+					if mode == "timeout" || mode == "active-timeout" {
 						r.Timeout = 100 * time.Millisecond
 					}
+					if mode == "active-timeout" {
+						r.Timeout = time.Second
+					}
 					result, e := c.Run(context.Background(), r)
-					if mode == "success" {
+					if mode == "success" || mode == "stderr-success" {
 						if e != nil || result.Summary != "fixture result" {
 							t.Fatal(result, e)
 						}
 					} else if e == nil {
 						t.Fatal("failure not detected", mode)
+					} else if mode == "active-timeout" {
+						var invocation *InvocationError
+						if !errors.As(e, &invocation) || invocation.OutputBytes == 0 || invocation.LastActivity.IsZero() {
+							t.Fatalf("active timeout lost output evidence: %#v %v", invocation, e)
+						}
 					}
 				})
 			}

@@ -401,13 +401,23 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 	}
 	rows, re := p.DB.DB.Query("SELECT id,error FROM commands WHERE status='failed' ORDER BY rowid DESC LIMIT 5")
 	if re == nil {
-		defer rows.Close()
 		for rows.Next() {
 			var id, msg string
 			if rows.Scan(&id, &msg) == nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "Rejected local request %s: %s\n", id, msg)
 			}
 		}
+		_ = rows.Close()
+	}
+	deadlineRows, deadlineErr := p.DB.DB.Query("SELECT at,task,kind,message FROM events WHERE kind IN ('worker_checkpoint_requested','worker_checkpoint_completed','worker_checkpoint_failed','worker_hard_timeout','worker_soft_timeout_idle') ORDER BY id DESC LIMIT 3")
+	if deadlineErr == nil {
+		for deadlineRows.Next() {
+			var at, task, kind, message string
+			if deadlineRows.Scan(&at, &task, &kind, &message) == nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Worker deadline %s %s %s: %s\n", at, task, kind, message)
+			}
+		}
+		_ = deadlineRows.Close()
 	}
 	return e
 }

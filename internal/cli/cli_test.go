@@ -116,6 +116,33 @@ func TestStatusShowsVerificationRetryRoute(t *testing.T) {
 	}
 }
 
+func TestStatusShowsWorkerDeadlineLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	snapshot := model.NewSnapshot("deadline-project")
+	if err = db.Save("0123456789abcdef", snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Event("task", "run", "implementer", "codex", "worker_checkpoint_requested", "soft deadline reached"); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	cmd := New()
+	cmd.SetOut(&out)
+	if err = showStatus(cmd, &engine.Project{DB: db, Dir: dir}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"Worker deadline", "task", "worker_checkpoint_requested", "soft deadline reached"} {
+		if !strings.Contains(out.String(), value) {
+			t.Fatalf("status missing %q: %s", value, out.String())
+		}
+	}
+}
+
 func TestDoctorPolicyDriftIgnoresAdditionalContext(t *testing.T) {
 	local := config.Effective{Files: map[string]string{".aih/project.yaml": "provider: codex\r\nbase_branch: main\r\n"}}
 	canonical := config.Effective{Files: map[string]string{".aih/project.yaml": "provider: codex\nbase_branch: main", "AGENTS.md": "Project instructions"}}

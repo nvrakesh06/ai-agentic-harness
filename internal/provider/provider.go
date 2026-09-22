@@ -19,15 +19,16 @@ import (
 )
 
 type Result struct {
-	Schema       int              `json:"schema_version"`
-	Status       string           `json:"status"`
-	Summary      string           `json:"summary"`
-	Question     string           `json:"question"`
-	ChangedAreas []string         `json:"changed_areas"`
-	Tests        []string         `json:"tests_run"`
-	Risks        []string         `json:"remaining_risks"`
-	Findings     []model.Finding  `json:"findings"`
-	Plan         []model.PlanTask `json:"plan"`
+	Schema                   int              `json:"schema_version"`
+	Status                   string           `json:"status"`
+	Summary                  string           `json:"summary"`
+	Question                 string           `json:"question"`
+	ChangedAreas             []string         `json:"changed_areas"`
+	Tests                    []string         `json:"tests_run"`
+	Risks                    []string         `json:"remaining_risks"`
+	Findings                 []model.Finding  `json:"findings"`
+	Plan                     []model.PlanTask `json:"plan"`
+	RecoveredDeadlineHandoff bool             `json:"-"`
 }
 type Request struct {
 	Directory, Runtime, Prompt, Role, Model string
@@ -40,6 +41,15 @@ type Provider interface {
 	Run(context.Context, Request) (Result, error)
 }
 type CLI struct{ Kind, Executable string }
+
+type InvocationError struct {
+	Cause        error
+	LastActivity time.Time
+	OutputBytes  int
+}
+
+func (e *InvocationError) Error() string { return e.Cause.Error() }
+func (e *InvocationError) Unwrap() error { return e.Cause }
 
 func New(name string) Provider {
 	exe := "codex"
@@ -143,13 +153,15 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 	}
 	ctx, cancel := context.WithTimeout(parent, r.Timeout)
 	defer cancel()
-	out, e := platform.Run(ctx, r.Directory, env, r.Prompt, c.Executable, args...)
+	observed, e := platform.RunObserved(ctx, r.Directory, env, r.Prompt, c.Executable, args...)
+	diagnosticOutput := observed.Output
 	// Keep diagnostics local and redact known credential formats. Prompts are
 	// not written to logs; final results are scanned again before publication.
-	_ = os.WriteFile(filepath.Join(r.Runtime, "output.log"), []byte(safety.Redact(out)), 0600)
+	_ = os.WriteFile(filepath.Join(r.Runtime, "output.log"), []byte(safety.Redact(diagnosticOutput)), 0600)
 	if e != nil {
-		return result, fmt.Errorf("%s invocation failed: %w", c.Kind, e)
+		return result, &InvocationError{Cause: fmt.Errorf("%s invocation failed: %w", c.Kind, e), LastActivity: observed.LastActivity, OutputBytes: len(diagnosticOutput)}
 	}
+	out := observed.Stdout
 	if c.Kind == "codex" {
 		b, re := os.ReadFile(resultPath)
 		if re != nil {

@@ -21,6 +21,11 @@ func init() {
 		b, _ := io.ReadAll(os.Stdin)
 		fmt.Print(string(b))
 		os.Exit(0)
+	case "active":
+		for {
+			fmt.Println("progress")
+			time.Sleep(10 * time.Millisecond)
+		}
 	case "child":
 		for {
 			_ = os.WriteFile(os.Args[2], []byte(time.Now().Format(time.RFC3339Nano)), 0600)
@@ -41,6 +46,47 @@ func init() {
 	}
 	os.Exit(3)
 }
+
+func TestObservedProcessRecordsRecentOutput(t *testing.T) {
+	t.Setenv("AIH_PROCESS_HELPER", "1")
+	exe, _ := os.Executable()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	observed, err := RunObserved(ctx, "", os.Environ(), "", exe, "active")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	if observed.Output == "" || observed.Stdout == "" || observed.Stderr != "" || observed.LastActivity.IsZero() || time.Since(observed.LastActivity) > time.Second {
+		t.Fatalf("missing recent activity evidence: %#v", observed)
+	}
+}
+
+func TestTerminationFailureRemainsObservableAndBounded(t *testing.T) {
+	done := make(chan error, 1)
+	primaryErr := errors.New("job termination failed")
+	fallbackErr := errors.New("root kill failed")
+	started := time.Now()
+	err := stopProcess(done, func() error { return primaryErr }, func() error { return fallbackErr })
+	if !errors.Is(err, primaryErr) || !errors.Is(err, fallbackErr) || !errors.Is(err, errProcessTerminationTimeout) {
+		t.Fatalf("termination errors were lost: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*processTerminationGrace+time.Second {
+		t.Fatalf("termination fallback was not bounded: %s", elapsed)
+	}
+}
+
+func TestRootKillFallbackUnblocksFailedTreeTermination(t *testing.T) {
+	done := make(chan error, 1)
+	primaryErr := errors.New("job termination failed")
+	err := stopProcess(done, func() error { return primaryErr }, func() error {
+		done <- errors.New("process exited after root kill")
+		return nil
+	})
+	if !errors.Is(err, primaryErr) || errors.Is(err, errProcessTerminationTimeout) {
+		t.Fatalf("unexpected bounded fallback result: %v", err)
+	}
+}
+
 func TestPromptStdinAndTimeout(t *testing.T) {
 	t.Setenv("AIH_PROCESS_HELPER", "1")
 	exe, _ := os.Executable()
