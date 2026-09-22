@@ -97,6 +97,28 @@ func TestStructuredResults(t *testing.T) {
 	}
 }
 
+func TestPlanRiskSchemaMatchesValidation(t *testing.T) {
+	var schema map[string]any
+	if err := json.Unmarshal([]byte(Schema()), &schema); err != nil {
+		t.Fatal(err)
+	}
+	properties := schema["properties"].(map[string]any)
+	plan := properties["plan"].(map[string]any)
+	task := plan["items"].(map[string]any)
+	taskProperties := task["properties"].(map[string]any)
+	risk := taskProperties["risk"].(map[string]any)
+	values := risk["enum"].([]any)
+	want := []string{"low", "medium", "high"}
+	if len(values) != len(want) {
+		t.Fatalf("risk enum = %v, want %v", values, want)
+	}
+	for i, value := range values {
+		if value != want[i] {
+			t.Fatalf("risk enum = %v, want %v", values, want)
+		}
+	}
+}
+
 func TestProviderPathAndAuthentication(t *testing.T) {
 	exe, _ := os.Executable()
 	t.Setenv("AIH_PROVIDER_HELPER", "1")
