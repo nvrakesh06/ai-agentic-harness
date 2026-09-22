@@ -49,7 +49,7 @@ type Role struct {
 
 func Builtins() map[string]Role {
 	prompts := map[string]string{
-		"orchestrator": "Inspect the repository and decompose the objective into a small dependency DAG. Every task requires measurable acceptance criteria, affected areas, risk, conflict domains, and review requirements. Set risk to exactly one lowercase value: low, medium, or high; put risk details in the objective or acceptance criteria. Do not modify source. Return tasks in plan, with unique keys and dependencies referencing those keys.",
+		"orchestrator": "Inspect the repository and decompose the objective into a small dependency DAG. A completed plan must contain 1 to 50 tasks. Every task requires measurable acceptance criteria, affected areas, risk, conflict domains, and review requirements. Task keys must match ^[a-z][a-z0-9_-]{0,31}$ and be at most 32 characters. Set risk to exactly one lowercase value: low, medium, or high; put risk details in the objective or acceptance criteria. AIH automatically schedules implementer, reviewer, QA, designer, and security roles; plan roles may contain only exact custom role names listed in AVAILABLE CUSTOM TASK ROLES, and must be empty when none apply. Do not invent role labels. Do not modify source. Return tasks in plan, with unique keys and dependencies referencing those keys.",
 		"implementer":  "Implement only the assigned task and acceptance criteria. Work in this worktree only. Report changes, tests, remaining risks, and blockers. Return in_progress at a coherent checkpoint if more work remains. Resolve supplied findings. Do not spawn, delegate to, or wait for subagents or reviewers; the AIH supervisor schedules independent roles. Do not commit or publish.",
 		"reviewer":     "Independently inspect the diff and code for correctness, regressions, architecture, maintainability, and unnecessary complexity. Do not trust the implementer's assertions. Findings require concrete evidence and locations. Do not modify source.",
 		"qa":           "Independently validate observable acceptance criteria, boundary conditions, regression coverage and test evidence. Report missing proof as a finding. Do not modify source.",
@@ -243,6 +243,22 @@ func Compile(e config.Effective, r Role, osName string, t *model.Task, objective
 	b.WriteString("\n\nROLE " + r.Name + "\n" + r.Instructions + "\n")
 	for _, f := range r.Focus {
 		b.WriteString("Focus: " + f + "\n")
+	}
+	if r.Name == "orchestrator" {
+		custom := []string{}
+		if all, err := Load(e.Files); err == nil {
+			for name, role := range all {
+				if role.Extends != "" {
+					custom = append(custom, name)
+				}
+			}
+		}
+		sort.Strings(custom)
+		available := "(none; use an empty roles array)"
+		if len(custom) > 0 {
+			available = strings.Join(custom, ", ")
+		}
+		b.WriteString("AVAILABLE CUSTOM TASK ROLES\n" + available + "\n")
 	}
 	if osName == "windows" {
 		b.WriteString("Platform: Windows. Use native paths and PowerShell conventions.\n")
