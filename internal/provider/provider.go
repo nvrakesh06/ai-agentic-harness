@@ -217,6 +217,8 @@ func Parse(out, role string) (Result, error) {
 func Schema() string {
 	str := map[string]any{"type": "string"}
 	array := func(item any) any { return map[string]any{"type": "array", "items": item} }
+	nonEmptyString := map[string]any{"type": "string", "minLength": 1}
+	nonEmptyArray := func(item any) any { return map[string]any{"type": "array", "items": item, "minItems": 1} }
 	obj := func(props map[string]any) any {
 		required := []string{}
 		for k := range props {
@@ -226,8 +228,13 @@ func Schema() string {
 	}
 	finding := obj(map[string]any{"severity": map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low", "nit"}}, "category": str, "location": str, "reason": str, "suggested_resolution": str})
 	risk := map[string]any{"type": "string", "enum": []string{"low", "medium", "high"}}
-	task := obj(map[string]any{"key": str, "title": str, "objective": str, "acceptance": array(str), "dependencies": array(str), "areas": array(str), "conflict_domains": array(str), "risk": risk, "ui": map[string]any{"type": "boolean"}, "security": map[string]any{"type": "boolean"}, "roles": array(str)})
-	schema := obj(map[string]any{"schema_version": map[string]any{"type": "integer", "const": 1}, "status": map[string]any{"type": "string", "enum": []string{"completed", "blocked", "in_progress", "failed"}}, "summary": str, "question": str, "changed_areas": array(str), "tests_run": array(str), "remaining_risks": array(str), "findings": array(finding), "plan": array(task)})
+	key := map[string]any{"type": "string", "pattern": model.PlanKeyPattern}
+	task := obj(map[string]any{"key": key, "title": nonEmptyString, "objective": nonEmptyString, "acceptance": nonEmptyArray(str), "dependencies": array(str), "areas": nonEmptyArray(str), "conflict_domains": nonEmptyArray(str), "risk": risk, "ui": map[string]any{"type": "boolean"}, "security": map[string]any{"type": "boolean"}, "roles": array(str)})
+	// All roles share this output schema and non-completed orchestrator results may
+	// have no plan. Parse applies the 1-task minimum to completed orchestrator
+	// results; the schema can still reject oversized plans and malformed tasks.
+	plan := map[string]any{"type": "array", "items": task, "maxItems": model.MaxPlanTasks}
+	schema := obj(map[string]any{"schema_version": map[string]any{"type": "integer", "const": 1}, "status": map[string]any{"type": "string", "enum": []string{"completed", "blocked", "in_progress", "failed"}}, "summary": str, "question": str, "changed_areas": array(str), "tests_run": array(str), "remaining_risks": array(str), "findings": array(finding), "plan": plan})
 	b, _ := json.Marshal(schema)
 	return string(b)
 }

@@ -60,3 +60,18 @@ func TestBuiltinPromptsKeepOrchestrationInSupervisor(t *testing.T) {
 		}
 	}
 }
+
+func TestOrchestratorReceivesExactCustomRoleNames(t *testing.T) {
+	e := config.Effective{Files: map[string]string{
+		".aih/roles/animation.yaml": "name: animation-architecture\nextends: reviewer\n",
+	}}
+	prompt := Compile(e, Builtins()["orchestrator"], "linux", nil, "plan", "", "")
+	for _, value := range []string{"AVAILABLE CUSTOM TASK ROLES", "animation-architecture", "at most 32 characters", "Do not invent role labels"} {
+		if !strings.Contains(prompt, value) {
+			t.Fatalf("orchestrator prompt missing %q: %s", value, prompt)
+		}
+	}
+	if strings.Contains(prompt, "AVAILABLE CUSTOM TASK ROLES\nreviewer") {
+		t.Fatal("builtin review roles were presented as custom task roles")
+	}
+}

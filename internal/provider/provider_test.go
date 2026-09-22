@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,6 +116,34 @@ func TestPlanRiskSchemaMatchesValidation(t *testing.T) {
 	for i, value := range values {
 		if value != want[i] {
 			t.Fatalf("risk enum = %v, want %v", values, want)
+		}
+	}
+}
+
+func TestPlanReadinessSchemaMatchesValidation(t *testing.T) {
+	var schema map[string]any
+	if err := json.Unmarshal([]byte(Schema()), &schema); err != nil {
+		t.Fatal(err)
+	}
+	plan := schema["properties"].(map[string]any)["plan"].(map[string]any)
+	if _, constrained := plan["minItems"]; constrained {
+		t.Fatal("shared schema requires plans from non-orchestrator or blocked results")
+	}
+	if plan["maxItems"] != float64(50) {
+		t.Fatalf("plan maximum = %v", plan["maxItems"])
+	}
+	properties := plan["items"].(map[string]any)["properties"].(map[string]any)
+	if properties["key"].(map[string]any)["pattern"] != model.PlanKeyPattern {
+		t.Fatal("plan key pattern drifted from model validation")
+	}
+	for _, name := range []string{"title", "objective"} {
+		if properties[name].(map[string]any)["minLength"] != float64(1) {
+			t.Fatalf("%s permits an empty value", name)
+		}
+	}
+	for _, name := range []string{"acceptance", "areas", "conflict_domains"} {
+		if properties[name].(map[string]any)["minItems"] != float64(1) {
+			t.Fatalf("%s permits an empty list", name)
 		}
 	}
 }

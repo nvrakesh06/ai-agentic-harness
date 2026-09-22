@@ -329,13 +329,19 @@ type PlanTask struct {
 	Roles        []string `json:"roles"`
 }
 
+const (
+	PlanKeyPattern = `^[a-z][a-z0-9_-]{0,31}$`
+	MinPlanTasks   = 1
+	MaxPlanTasks   = 50
+)
+
 func ValidatePlan(plan []PlanTask) error {
-	if len(plan) == 0 || len(plan) > 50 {
+	if len(plan) < MinPlanTasks || len(plan) > MaxPlanTasks {
 		return errors.New("plan must contain 1..50 tasks")
 	}
 	byKey := map[string]PlanTask{}
 	for _, t := range plan {
-		if !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`).MatchString(t.Key) || t.Title == "" || t.Objective == "" || len(t.Acceptance) == 0 || len(t.Areas) == 0 || len(t.Domains) == 0 {
+		if !regexp.MustCompile(PlanKeyPattern).MatchString(t.Key) || t.Title == "" || t.Objective == "" || len(t.Acceptance) == 0 || len(t.Areas) == 0 || len(t.Domains) == 0 {
 			return errors.New("task lacks readiness fields or has an invalid key")
 		}
 		if _, ok := byKey[t.Key]; ok {
