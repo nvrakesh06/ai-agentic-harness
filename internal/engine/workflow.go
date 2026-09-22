@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -642,11 +643,25 @@ func (c *Controller) verifyReview(id string) error {
 	}); e != nil {
 		return e
 	}
-	for _, role := range required {
-		serialized, _ := json.Marshal(evidence)
-		result, e := c.role(c.ctx, effective, role, t, dir, t.Objective, diff, string(serialized))
-		if e != nil {
-			return e
+	type reviewOutcome struct {
+		result provider.Result
+		err    error
+	}
+	outcomes := make([]reviewOutcome, len(required))
+	serialized, _ := json.Marshal(evidence)
+	var reviews sync.WaitGroup
+	for i, role := range required {
+		reviews.Add(1)
+		go func() {
+			defer reviews.Done()
+			outcomes[i].result, outcomes[i].err = c.role(c.ctx, effective, role, t, dir, t.Objective, diff, string(serialized))
+		}()
+	}
+	reviews.Wait()
+	for i, role := range required {
+		result := outcomes[i].result
+		if outcomes[i].err != nil {
+			return outcomes[i].err
 		}
 		if result.Status == "blocked" {
 			c.block(id, result.Question, result.Summary, model.SyncRequired)
