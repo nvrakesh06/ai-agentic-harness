@@ -14,6 +14,15 @@ loads remote logical state, queries issues/PRs, and recreates checkpoint worktre
 It is observational; it does not steal ownership or run agents until resume.
 `sync` performs the same reconstruction and requires a stopped local supervisor.
 
+For a systemd-managed VM, disable the old service before switching machines:
+`systemctl --user disable --now aih-NAME.service`. An enabled service can try to
+reacquire ownership after reboot. Check logs for successful checkpoint/release;
+preserve local data if shutdown reports unpersisted work.
+
+The user service restarts failed foreground processes every 15 seconds. After an
+unclean stop it retries normal lease acquisition; it does not steal even its own
+machine's live lease. See [VM setup](VM_SETUP.md).
+
 ## Crash, terminal closure or lost disk
 
 Closing the launching terminal does not stop a detached supervisor. Use `aih stop`

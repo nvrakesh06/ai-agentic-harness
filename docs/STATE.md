@@ -15,6 +15,10 @@ projects/<stable-project-id>/
   analysis/ integration/ post-verify/
 ```
 
+With the Linux user service, supervisor stdout/stderr goes to the systemd journal;
+`logs/supervisor.log` is only used by detached CLI starts. Events stay in SQLite
+and worker diagnostics stay in sessions. See the [VM retention/backup runbook](VM_SETUP.md#storage-logs-and-backups).
+
 The application contains only `.aih/project.yaml`, `policies.yaml`, `harness.lock`,
 optional roles/platform files, and project-specific `AGENTS.md` instructions.
 Never place AIH_HOME inside an application checkout or synchronize it between

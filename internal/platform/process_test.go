@@ -115,3 +115,24 @@ func TestExclusiveLock(t *testing.T) {
 	}
 	b.Close()
 }
+
+func TestContextLockWaitsAndCancels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	lock, err := Acquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err = AcquireContext(ctx, path); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	if err = lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lock, err = AcquireContext(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock.Close()
+}

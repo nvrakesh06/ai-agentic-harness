@@ -44,7 +44,7 @@ installation. Providers do not receive GitHub token environment variables.
 
 Windows workers start suspended, join a kill-on-close Job Object, then resume.
 Unix workers use an owned process group and pipe-lifeline guardian so supervisor
-death also kills descendants on macOS. Deliberately daemonizing hostile code is
+death also kills descendants on Linux and macOS. Deliberately daemonizing hostile code is
 outside this trusted-repository boundary. Background supervisors are detached from
 their launching terminal.
 
@@ -76,3 +76,17 @@ edit it; protect access appropriately. Checks execute repository-controlled code
 as the developer, and provider authorization can still read local files. Do not
 run untrusted repositories or keep production credentials in the execution account.
 Secret scanning is heuristic; review initial setup and unusual checkpoints.
+
+## Server operation
+
+`aih service install` renders a systemd **user** service around the unchanged
+`start --foreground` path. Linger supplies boot/logout independence; restart on
+failure retries normal lease acquisition, never overrides it. The supervisor
+still owns all checkpoints and recovery. No queue, state schema, daemon protocol,
+container runtime, or network listener was added. Windows keeps detached CLI
+startup. See [VM setup](VM_SETUP.md).
+
+Machine configuration is process environment plus an explicitly selected literal
+environment file. Credentials remain outside portable project policy. `doctor`
+checks tools/auth status, canonical config and local storage without calling a
+model or executing application checks.

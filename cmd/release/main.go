@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 )
 
@@ -22,8 +23,11 @@ func main() {
 }
 func release() error {
 	publish := flag.Bool("publish", false, "publish assets for an existing v1 tag on HEAD")
-	repo := flag.String("repo", "nvrakesh06/ai-agentic-harness", "release repository")
+	repo := flag.String("repo", config.ReleaseRepository(""), "release repository (or AIH_RELEASE_REPO)")
 	flag.Parse()
+	if !config.ValidRepository(*repo) {
+		return fmt.Errorf("release repository must be owner/repository")
+	}
 	if _, e := os.Stat("go.mod"); e != nil {
 		return fmt.Errorf("run from repository root: %w", e)
 	}
@@ -40,7 +44,7 @@ func release() error {
 			return fmt.Errorf("HEAD must be tagged v%s", model.Version)
 		}
 	}
-	for _, args := range [][]string{{"test", "./...", "-timeout", "6m"}, {"vet", "./..."}} {
+	for _, args := range [][]string{{"test", "./...", "-count=1", "-timeout", "6m"}, {"vet", "./..."}} {
 		if e := run(nil, "go", args...); e != nil {
 			return e
 		}
@@ -50,7 +54,7 @@ func release() error {
 	}
 	assets := []string{}
 	var sums strings.Builder
-	for _, target := range [][2]string{{"windows", "amd64"}, {"darwin", "arm64"}, {"darwin", "amd64"}} {
+	for _, target := range [][2]string{{"windows", "amd64"}, {"darwin", "arm64"}, {"darwin", "amd64"}, {"linux", "amd64"}, {"linux", "arm64"}} {
 		name := "aih_" + target[0] + "_" + target[1]
 		if target[0] == "windows" {
 			name += ".exe"

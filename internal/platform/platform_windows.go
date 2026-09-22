@@ -113,6 +113,9 @@ func Acquire(path string) (*Lock, error) {
 	e = windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &l.ov)
 	if e != nil {
 		f.Close()
+		if e == windows.ERROR_LOCK_VIOLATION {
+			return nil, fmt.Errorf("%w: %v", ErrLocked, e)
+		}
 		return nil, fmt.Errorf("supervisor already active or lock unavailable: %w", e)
 	}
 	return l, nil

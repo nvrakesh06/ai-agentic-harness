@@ -1,20 +1,26 @@
 # Development and configuration
 
-Use Go 1.26+ with automatic toolchain download enabled, Git, and the normal Go
-module cache. Tests use temporary local repositories and fake provider/GitHub
+Use Go 1.21+ to bootstrap the toolchain pinned in go.mod (currently Go 1.27.1;
+module minimum 1.26), Git 2.28+, and the normal Go module cache. `scripts/setup.sh`
+or `scripts/setup.ps1` downloads/verifies modules and builds AIH without installing
+agent CLIs or authenticating. Tests use temporary repositories and fake provider/GitHub
 adapters; no authentication or paid model usage is required for tests.
 
 ```sh
 go test ./... -timeout 6m
 go vet ./...
+go run ./cmd/checkfmt                # formatting lint
 go build -o bin/aih ./cmd/aih          # use bin/aih.exe on Windows
-go run ./cmd/release                 # tests, vet, all three cross-builds, checksums
+go run ./cmd/release                 # tests, vet, five cross-builds, checksums
 ```
 
 The end-to-end suite performs many real Git operations and can take minutes,
 especially with Windows antivirus. Do not replace its durability assertions with
 only in-memory mocks. `internal/platform` tests exercise timeout and parent-death
-cleanup. Run native tests on macOS before claiming macOS runtime validation.
+cleanup. On Linux with GCC, also run `go test -race ./... -timeout 10m`.
+On a loaded/constrained machine, serialize package workers with
+`go test -p 1 ./... -count=1 -timeout 6m`; avoid several concurrent validation runs.
+Run native tests on macOS before claiming macOS runtime validation.
 
 ## Application configuration
 
@@ -48,7 +54,7 @@ checks:
 release_repo: nvrakesh06/ai-agentic-harness
 ```
 
-Checks optionally declare `platforms: [windows]` or `[darwin]`. At least one must
+Checks optionally declare `platforms: [windows]`, `[darwin]` or `[linux]`. At least one must
 apply. They run in the candidate worktree, with credential-like environment keys
 filtered. Output is bounded; failures are redacted before portable recording.
 Checks must leave tracked source and unignored files unchanged. Use check-mode
@@ -58,6 +64,37 @@ Commands are executable plus argv. On Windows, standard npm/npx/Codex/Claude/pnp
 shims are resolved to their Node entrypoints. Other batch scripts require an
 explicit trusted `cmd` or PowerShell check. Prefer portable native executables.
 AIH does not silently install application dependencies or run repository hooks.
+
+### Dependencies in disposable worktrees
+
+Installing dependencies in the original application clone is not enough: checks
+also run in task, integration and post-verify worktrees. Put reproducible setup
+inside a trusted, committed check script (for example `scripts/verify.sh`) that
+runs `npm ci`, lint/tests/build and leaves only ignored build/dependency outputs.
+Use `[sh, scripts/verify.sh]` on Linux/macOS and a corresponding explicit
+PowerShell command on Windows when needed. Avoid `npm test` in watch mode.
+Go checks can download modules into the service user's cache. For offline builds,
+pre-provision all caches/toolchains deliberately.
+
+Do not run checks requiring production credentials. Database-backed application
+tests need their own documented disposable database setup; AIH does not provision
+those services. Run each configured command manually in a fresh worktree before
+submitting paid model work. Doctor checks executable availability, not application
+test correctness or per-package/runtime version compatibility.
+
+### Machine environment
+
+See `.env.example`. Only `--env-file PATH` loads it; process variables override
+file values, and CLI `--home` overrides `AIH_HOME`. Values are literal with no
+shell evaluation/interpolation. Agent paths use `CODEX_BINARY` / `CLAUDE_BINARY`.
+Keep machine paths and secrets out of canonical project policy.
+`AIH_RELEASE_REPO` overrides update provenance for forks. The default upstream
+URL and Go module identity name this public project, not a required login account.
+
+Use `aih doctor --machine` before enabling a project, then `aih doctor` inside the
+application. `--offline` skips authentication/remote checks and explicitly reports
+that it is not a deployment-readiness pass. The doctor never invokes a model or
+runs configured application commands. Server setup is in [VM_SETUP.md](VM_SETUP.md).
 
 `.aih/policies.yaml` defaults:
 

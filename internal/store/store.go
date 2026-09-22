@@ -18,6 +18,14 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
 	}
+	// SQLite otherwise creates a database using the process umask (often 0644).
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err = f.Close(); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", filepath.ToSlash(path))
 	if err != nil {
 		return nil, err

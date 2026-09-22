@@ -68,11 +68,32 @@ func OpenControl(ctx context.Context, dir, remote string) (Git, error) {
 	if actual != remote {
 		return g, errors.New("control repository remote does not match project")
 	}
+	// Fetch supplies an explicit refspec. Leave no configured tracking map:
+	// otherwise a concurrent push also writes origin/* and races the serialized
+	// fetch. Load fetches objects only; remote CAS uses explicit remote revisions.
+	if mapping, err := g.Run(ctx, "", "config", "--local", "--get-all", "remote.origin.fetch"); err == nil && mapping != "" {
+		if _, e = g.Run(ctx, "", "config", "--local", "--unset-all", "remote.origin.fetch"); e != nil {
+			return g, e
+		}
+	}
 	return g, nil
 }
 func (g Git) Fetch(ctx context.Context) error {
-	_, e := g.Run(ctx, "", "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*")
-	return e
+	return g.fetch(ctx, "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*")
+}
+
+func (g Git) fetch(ctx context.Context, args ...string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	// CLI observation/submission can fetch while the supervisor is running.
+	// Protect both tracking refs and FETCH_HEAD across those local processes.
+	lock, err := platform.AcquireContext(ctx, filepath.Join(g.Dir, "aih-fetch.lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	_, err = g.Run(ctx, "", append([]string{"fetch"}, args...)...)
+	return err
 }
 func (g Git) SHA(ctx context.Context, ref string) (string, error) {
 	return g.Run(ctx, "", "rev-parse", "--verify", ref+"^{commit}")
@@ -109,7 +130,7 @@ func (g Git) Load(ctx context.Context) (*model.Snapshot, string, error) {
 	if h == "" {
 		return nil, "", os.ErrNotExist
 	}
-	if _, e = g.Run(ctx, "", "fetch", "origin", "refs/heads/aih-state"); e != nil {
+	if e = g.fetch(ctx, "origin", "refs/heads/aih-state"); e != nil {
 		return nil, "", e
 	}
 	b, e := g.Show(ctx, h, "snapshot.json")

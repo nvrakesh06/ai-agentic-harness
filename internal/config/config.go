@@ -72,7 +72,7 @@ type Effective struct {
 }
 
 func Defaults() Project {
-	return Project{ID: model.ID(), Provider: "codex", Base: "main", MaxWriters: 3, MaxReaders: 2, Models: map[string]string{"orchestrator": "strong", "implementer": "normal", "reviewer": "strong", "qa": "normal", "designer": "strong", "security": "strong", "advisor": "strongest"}, ProviderModels: map[string]string{}, WorkerSeconds: 900, LeaseSeconds: 180, ReleaseRepo: "nvrakesh06/ai-agentic-harness"}
+	return Project{ID: model.ID(), Provider: "codex", Base: "main", MaxWriters: 3, MaxReaders: 2, Models: map[string]string{"orchestrator": "strong", "implementer": "normal", "reviewer": "strong", "qa": "normal", "designer": "strong", "security": "strong", "advisor": "strongest"}, ProviderModels: map[string]string{}, WorkerSeconds: 900, LeaseSeconds: 180, ReleaseRepo: UpstreamRepository}
 }
 func DefaultPolicy() Policy { return Policy{2, 3, 3, 3} }
 func DefaultLock() Lock {
@@ -126,6 +126,9 @@ func Parse(files map[string]string) (Effective, error) {
 var validID = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,80}$`)
 
 func (p Project) Validate() error {
+	if p.ReleaseRepo != "" && !ValidRepository(p.ReleaseRepo) {
+		return errors.New("release_repo must be an owner/repository name")
+	}
 	if !validID.MatchString(p.ID) {
 		return errors.New("invalid project_id")
 	}
@@ -226,6 +229,9 @@ func Register(home string, r Registration) error {
 	return os.WriteFile(filepath.Join(d, "registration.json"), b, 0600)
 }
 func GitHubRepo(remote string) (string, error) {
+	if strings.HasPrefix(remote, "ssh://git@github.com/") {
+		remote = "https://github.com/" + strings.TrimPrefix(remote, "ssh://git@github.com/")
+	}
 	if strings.HasPrefix(remote, "git@github.com:") {
 		remote = "https://github.com/" + strings.TrimPrefix(remote, "git@github.com:")
 	}
@@ -234,7 +240,7 @@ func GitHubRepo(remote string) (string, error) {
 		return "", errors.New("origin must be a github.com HTTPS or SSH URL without embedded credentials")
 	}
 	p := strings.TrimSuffix(strings.Trim(u.Path, "/"), ".git")
-	if len(strings.Split(p, "/")) != 2 {
+	if !ValidRepository(p) {
 		return "", errors.New("invalid GitHub repository URL")
 	}
 	return p, nil

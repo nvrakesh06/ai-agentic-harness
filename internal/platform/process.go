@@ -3,6 +3,7 @@ package platform
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,29 @@ import (
 	"sync"
 	"time"
 )
+
+var ErrLocked = errors.New("lock held by another process")
+
+// AcquireContext serializes short local operations across CLI processes. The
+// supervisor itself still uses fail-fast Acquire to reject duplicate owners.
+func AcquireContext(ctx context.Context, path string) (*Lock, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		lock, err := Acquire(path)
+		if !errors.Is(err, ErrLocked) {
+			return lock, err
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
 
 type limitedBuffer struct {
 	mu sync.Mutex

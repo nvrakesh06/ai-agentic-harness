@@ -164,3 +164,42 @@ func TestWorktreeCheckpointAndRebase(t *testing.T) {
 		t.Fatal("secret path checkpointed")
 	}
 }
+
+func TestPushAndLoadDoNotWriteFetchTrackingRefs(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	g := f.P.Git
+	if err = g.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s, before, err := g.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Revision++
+	next, err := g.StateCommit(ctx, before, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = g.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: before, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = g.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	observed, err := g.SHA(ctx, "refs/remotes/origin/aih-state")
+	if err != nil || observed != before {
+		t.Fatal("push/Load unexpectedly wrote Fetch's tracking refs", observed, err)
+	}
+	if err = g.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	observed, err = g.SHA(ctx, "refs/remotes/origin/aih-state")
+	if err != nil || observed != next {
+		t.Fatal("explicit Fetch did not update tracking ref", observed, err)
+	}
+}

@@ -10,13 +10,11 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/engine"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
-	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/update"
 	"github.com/spf13/cobra"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -24,7 +22,7 @@ import (
 	"time"
 )
 
-type options struct{ home, repo string }
+type options struct{ home, repo, envFile string }
 
 func (o *options) paths() (string, string, error) {
 	home, e := config.Home(o.home)
@@ -44,8 +42,15 @@ func (o *options) open(ctx context.Context, refresh bool) (*engine.Project, erro
 func New() *cobra.Command {
 	o := &options{}
 	root := &cobra.Command{Use: "aih", Short: "A durable local control plane for Codex and Claude Code", SilenceUsage: true, SilenceErrors: true}
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		if o.envFile != "" {
+			return config.LoadEnvironment(o.envFile)
+		}
+		return nil
+	}
 	root.PersistentFlags().StringVar(&o.home, "home", "", "machine AIH directory (or AIH_HOME)")
 	root.PersistentFlags().StringVar(&o.repo, "repo", ".", "application repository")
+	root.PersistentFlags().StringVar(&o.envFile, "env-file", "", "explicit literal KEY=VALUE file; existing environment takes precedence")
 	root.AddCommand(&cobra.Command{Use: "version", Args: cobra.NoArgs, Run: func(cmd *cobra.Command, _ []string) {
 		fmt.Fprintf(cmd.OutOrStdout(), "AIH %s · state %d · roles %d · rules %d\n", model.Version, model.StateSchema, model.RoleSchema, model.RulesVersion)
 	}})
@@ -239,10 +244,12 @@ func New() *cobra.Command {
 			fmt.Fprintln(cmd.OutOrStdout(), string(b))
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "Worker diagnostics:", filepath.Join(p.Dir, "sessions"))
-		fmt.Fprintln(cmd.OutOrStdout(), "Supervisor output:", filepath.Join(p.Dir, "logs", "supervisor.log"))
+		fmt.Fprintln(cmd.OutOrStdout(), "Detached supervisor output (foreground/systemd uses terminal/journal):", filepath.Join(p.Dir, "logs", "supervisor.log"))
 		return rows.Err()
 	}})
 	addInspection(root, o)
+	addDoctor(root, o)
+	addService(root, o)
 	addUpdate(root, o)
 	root.AddCommand(&cobra.Command{Use: "demo", Short: "Run a deterministic workflow and destructive local-cache recovery in a disposable fixture", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		exe, e := os.Executable()
@@ -327,7 +334,7 @@ func checkUpdate(cmd *cobra.Command, p *engine.Project) {
 	if p.Config.Lock.AutoUpdate == "off" {
 		return
 	}
-	latest, e := update.Latest(cmd.Context(), p.Config.Project.ReleaseRepo)
+	latest, e := update.Latest(cmd.Context(), config.ReleaseRepository(p.Config.Project.ReleaseRepo))
 	if e != nil {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Update check unavailable; continuing with", model.Version)
 		return
@@ -348,6 +355,14 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Project %s · durable revision %d (%s)\n", s.Project, s.Revision, shortSHA(h))
 	fmt.Fprintf(cmd.OutOrStdout(), "Controller: %s · lease expires %s\n", s.Controller.Machine, s.Controller.Expires.Format(time.RFC3339))
+	if active(p) {
+		fmt.Fprintln(cmd.OutOrStdout(), "Local supervisor: active (cached state; inspect heartbeat and logs for progress)")
+	} else {
+		fmt.Fprintln(cmd.OutOrStdout(), "Local supervisor: stopped")
+	}
+	if message := p.DB.Get("last_error"); message != "" {
+		fmt.Fprintln(cmd.OutOrStdout(), "Last supervisor error:", message)
+	}
 	for _, t := range model.Ordered(s) {
 		if blockers && t.State != model.Blocked {
 			continue
@@ -493,7 +508,7 @@ func addInspection(root *cobra.Command, o *options) {
 		defer p.DB.Close()
 		for n, canonical := range p.Config.Files {
 			b, re := os.ReadFile(filepath.Join(p.Root, filepath.FromSlash(n)))
-			if re != nil || strings.TrimSpace(string(b)) != strings.TrimSpace(canonical) {
+			if re != nil || normalizedPolicy(string(b)) != normalizedPolicy(canonical) {
 				fmt.Fprintln(cmd.OutOrStdout(), "Local differs from canonical main:", n)
 			}
 		}
@@ -504,77 +519,6 @@ func addInspection(root *cobra.Command, o *options) {
 		return e
 	}})
 	root.AddCommand(rulesCmd)
-	var doctorProvider string
-	doctorCmd := &cobra.Command{Use: "doctor", RunE: func(cmd *cobra.Command, _ []string) error {
-		failed := false
-		for _, name := range []string{"git", "gh"} {
-			if _, e := exec.LookPath(name); e != nil {
-				fmt.Fprintln(cmd.OutOrStdout(), name, ": missing")
-				failed = true
-			} else {
-				fmt.Fprintln(cmd.OutOrStdout(), name, ": installed")
-			}
-		}
-		rootDir, _, pe := o.paths()
-		if pe != nil {
-			return pe
-		}
-		if _, se := os.Stat(filepath.Join(rootDir, ".aih", "project.yaml")); os.IsNotExist(se) {
-			if doctorProvider != "codex" && doctorProvider != "claude-code" {
-				return errors.New("provider must be codex or claude-code")
-			}
-			if e := provider.New(doctorProvider).Validate(cmd.Context()); e != nil {
-				fmt.Fprintln(cmd.OutOrStdout(), e)
-				failed = true
-			} else {
-				fmt.Fprintln(cmd.OutOrStdout(), doctorProvider, ": CLI capabilities available")
-			}
-			if _, e := platform.Run(cmd.Context(), rootDir, nil, "", "gh", "auth", "status"); e != nil {
-				fmt.Fprintln(cmd.OutOrStdout(), "GitHub authentication unavailable")
-				failed = true
-			} else {
-				fmt.Fprintln(cmd.OutOrStdout(), "GitHub authentication available")
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), "No AIH project configuration here; machine checks only.")
-			if failed {
-				return errors.New("doctor found missing requirements")
-			}
-			return nil
-		}
-		p, e := o.open(cmd.Context(), true)
-		if e != nil {
-			return e
-		}
-		defer p.DB.Close()
-		if e = p.Provider.Validate(cmd.Context()); e != nil {
-			fmt.Fprintln(cmd.OutOrStdout(), e)
-			failed = true
-		} else {
-			fmt.Fprintln(cmd.OutOrStdout(), p.Provider.Name(), ": CLI capabilities available")
-		}
-		_, e = platform.Run(cmd.Context(), p.Root, nil, "", "gh", "auth", "status")
-		if e != nil {
-			fmt.Fprintln(cmd.OutOrStdout(), "GitHub authentication unavailable")
-			failed = true
-		} else {
-			fmt.Fprintln(cmd.OutOrStdout(), "GitHub authentication available")
-		}
-		var integrity string
-		if e = p.DB.DB.QueryRow("PRAGMA integrity_check").Scan(&integrity); e != nil || integrity != "ok" {
-			failed = true
-		}
-		fmt.Fprintln(cmd.OutOrStdout(), "SQLite:", integrity)
-		if len(p.Config.Project.Checks) == 0 {
-			fmt.Fprintln(cmd.OutOrStdout(), "No verification commands configured")
-			failed = true
-		}
-		if failed {
-			return errors.New("doctor found missing requirements")
-		}
-		return nil
-	}}
-	doctorCmd.Flags().StringVar(&doctorProvider, "provider", "codex", "provider to check outside an enabled project")
-	root.AddCommand(doctorCmd)
 }
 func addUpdate(root *cobra.Command, o *options) {
 	root.AddCommand(&cobra.Command{Use: "self-update", Short: "Download and verify the latest compatible stable release", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -582,7 +526,7 @@ func addUpdate(root *cobra.Command, o *options) {
 		if e != nil {
 			return e
 		}
-		repo := "nvrakesh06/ai-agentic-harness"
+		repo := config.ReleaseRepository("")
 		latest, e := update.Latest(cmd.Context(), repo)
 		if e != nil {
 			return e

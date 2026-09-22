@@ -2,13 +2,15 @@ param(
     [string]$Source,
     [string]$Version = '1.0.0',
     [string]$Directory = (Join-Path $env:LOCALAPPDATA 'Programs\AIH'),
-    [string]$Repository = 'nvrakesh06/ai-agentic-harness'
+    [string]$Repository = $(if ($env:AIH_RELEASE_REPO) { $env:AIH_RELEASE_REPO } else { 'nvrakesh06/ai-agentic-harness' })
 )
 $ErrorActionPreference = 'Stop'
+if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or $Repository.Contains('..')) { throw 'Repository must be owner/repository.' }
 if ($Version -notmatch '^1\.\d+\.\d+$') { throw 'Install a stable V1 version. Major updates require explicit migration.' }
 if (Get-Process -Name aih -ErrorAction SilentlyContinue) { throw 'Stop all AIH supervisors before installing.' }
 $scratch = Join-Path ([IO.Path]::GetTempPath()) ('aih-install-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
+$pending = $null
 try {
     if (!$Source) {
         $asset = 'aih_windows_amd64.exe'
@@ -35,6 +37,10 @@ try {
     } else { [IO.File]::Move($pending, $target) }
     Write-Host "Installed $target. Add $destination to your user PATH, then run aih install."
 } finally {
+    # Only the unique adjacent temporary file created by this invocation.
+    if ($pending -and (Test-Path -LiteralPath $pending)) {
+        Remove-Item -LiteralPath $pending -Force
+    }
     $resolvedScratch = [IO.Path]::GetFullPath($scratch)
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
     if ($resolvedScratch.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -and

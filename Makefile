@@ -1,6 +1,6 @@
 EXE := $(shell go env GOEXE)
 
-.PHONY: build install test vet demo release
+.PHONY: build install test vet lint demo release
 build:
 	go build -trimpath -o bin/aih$(EXE) ./cmd/aih
 install:
@@ -8,6 +8,9 @@ install:
 test:
 	go test ./... -timeout 6m
 vet:
+	go vet ./...
+lint:
+	go run ./cmd/checkfmt
 	go vet ./...
 demo: build
 	./bin/aih$(EXE) demo

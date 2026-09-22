@@ -43,8 +43,13 @@ type CLI struct{ Kind, Executable string }
 
 func New(name string) Provider {
 	exe := "codex"
+	variable := "CODEX_BINARY"
 	if name == "claude-code" {
 		exe = "claude"
+		variable = "CLAUDE_BINARY"
+	}
+	if configured := os.Getenv(variable); configured != "" {
+		exe = configured
 	}
 	return CLI{name, exe}
 }
@@ -58,7 +63,11 @@ func (c CLI) Validate(ctx context.Context) error {
 	}
 	out, e := platform.Run(ctx, "", nil, "", c.Executable, args...)
 	if e != nil {
-		return fmt.Errorf("%s unavailable: %w", c.Kind, e)
+		variable := "CODEX_BINARY"
+		if c.Kind == "claude-code" {
+			variable = "CLAUDE_BINARY"
+		}
+		return fmt.Errorf("%s CLI unavailable: install it on PATH or set %s to its executable path; see docs/AGENTS_SETUP.md: %w", c.Kind, variable, e)
 	}
 	flags := []string{"--json-schema", "--output-format", "--permission-mode", "--safe-mode"}
 	if c.Kind == "codex" {
@@ -68,6 +77,23 @@ func (c CLI) Validate(ctx context.Context) error {
 		if !strings.Contains(out, flag) {
 			return fmt.Errorf("%s lacks required flag %s; update the provider CLI", c.Kind, flag)
 		}
+	}
+	return nil
+}
+
+// Authentication probes do not run a model or expose account/token output.
+func CheckAuthentication(ctx context.Context, name string) error {
+	c := New(name).(CLI)
+	args := []string{"login", "status"}
+	if name == "claude-code" {
+		args = []string{"auth", "status"}
+	} else if name != "codex" {
+		return errors.New("unsupported provider")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if _, err := platform.Run(ctx, "", nil, "", c.Executable, args...); err != nil {
+		return fmt.Errorf("%s authentication unavailable; follow docs/AGENTS_SETUP.md as this OS user", name)
 	}
 	return nil
 }

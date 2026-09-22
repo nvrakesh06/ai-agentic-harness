@@ -22,6 +22,9 @@ func Compatible(version string) bool {
 	return regexp.MustCompile(`^v?1\.[0-9]+\.[0-9]+$`).MatchString(version)
 }
 func Latest(ctx context.Context, repo string) (string, error) {
+	if !config.ValidRepository(repo) {
+		return "", errors.New("release repository must be owner/repository")
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	out, e := platform.Run(ctx, "", nil, "", "gh", "api", "repos/"+repo+"/releases?per_page=100")
@@ -52,6 +55,9 @@ func Asset() string {
 	return n
 }
 func Stage(ctx context.Context, home, repo, version string) (string, error) {
+	if !config.ValidRepository(repo) {
+		return "", errors.New("release repository must be owner/repository")
+	}
 	if !Compatible(version) {
 		return "", errors.New("automatic update accepts stable V1 releases only; major versions require migration")
 	}

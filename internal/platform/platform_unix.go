@@ -9,7 +9,10 @@ import (
 	"syscall"
 )
 
-func command(name string, args []string) (*exec.Cmd, error) { return exec.Command(name, args...), nil }
+func command(name string, args []string) (*exec.Cmd, error) {
+	cmd := exec.Command(name, args...)
+	return cmd, cmd.Err
+}
 
 func prepare(cmd *exec.Cmd, background bool) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{}
@@ -50,6 +53,9 @@ func Acquire(path string) (*Lock, error) {
 	}
 	if e = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); e != nil {
 		f.Close()
+		if e == syscall.EWOULDBLOCK {
+			return nil, fmt.Errorf("%w: %v", ErrLocked, e)
+		}
 		return nil, fmt.Errorf("supervisor already active or lock unavailable: %w", e)
 	}
 	return &Lock{f}, nil

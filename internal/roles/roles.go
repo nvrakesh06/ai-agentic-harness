@@ -248,6 +248,8 @@ func Compile(e config.Effective, r Role, osName string, t *model.Task, objective
 		b.WriteString("Platform: Windows. Use native paths and PowerShell conventions.\n")
 	} else if osName == "darwin" {
 		b.WriteString("Platform: macOS. Use POSIX paths and shell conventions.\n")
+	} else if osName == "linux" {
+		b.WriteString("Platform: Linux, possibly a headless server. Use POSIX paths and non-interactive commands; do not assume a desktop or sudo access.\n")
 	} else {
 		b.WriteString("Platform: " + osName + "\n")
 	}

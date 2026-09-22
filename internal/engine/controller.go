@@ -10,6 +10,7 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -191,6 +192,7 @@ func (c *Controller) Serve(parent context.Context) error {
 	if e = c.acquire(parent); e != nil {
 		return e
 	}
+	log.Printf("AIH supervisor started: project=%s epoch=%d", c.s.Project, c.s.Controller.Epoch)
 	_ = c.P.DB.Set("pid", strconv.Itoa(os.Getpid()))
 	_ = c.P.DB.Set("last_error", "")
 	defer c.P.DB.Set("pid", "")
@@ -337,6 +339,7 @@ func (c *Controller) Serve(parent context.Context) error {
 		_ = c.P.DB.Event("", "", "", "", "supervisor_stopped", safety.Redact(e.Error()))
 		return fmt.Errorf("stopped with potentially unpersisted work in %s: %w", filepath.Join(c.P.Dir, "worktrees"), e)
 	}
+	log.Printf("AIH supervisor stopped: checkpoints persisted and controller lease released")
 	return nil
 }
 func (c *Controller) launch(fn func()) { c.jobs.Add(1); go func() { defer c.jobs.Done(); fn() }() }

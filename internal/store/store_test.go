@@ -2,7 +2,9 @@ package store
 
 import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -28,6 +30,12 @@ func TestDurabilityAndCommands(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer s.Close()
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(p)
+		if err != nil || info.Mode().Perm() != 0600 {
+			t.Fatal("database permissions", info, err)
+		}
+	}
 	got, h, e := s.Load()
 	if e != nil || got.Project != snap.Project || h != "abc" {
 		t.Fatal(got, h, e)

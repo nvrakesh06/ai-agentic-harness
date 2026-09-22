@@ -1,13 +1,12 @@
 # V1 engineering decisions
 
-The user requested public visibility for the central AIH repository, overriding
-the original specification's private-repository default. Target application
-repositories can remain private; AIH still supports GitHub Free.
+The central AIH repository is public. Target application repositories can remain
+private; AIH supports GitHub Free and does not change their visibility.
 
-## Approved: atomic integration (2026-09-22)
+## Accepted: atomic integration (2026-09-22)
 
-The user approved replacing specification section 43's GitHub merge endpoint
-with atomic Git reference publication. A locally verified merge commit and a
+AIH uses atomic Git reference publication rather than GitHub's merge endpoint.
+A locally verified merge commit and a
 separate orchestration-state commit are published together, conditional on the
 expected main, task, and state revisions. `main` only advances; its history is
 never rewritten. Task checkpoints use the same state fencing. GitHub PRs remain
@@ -29,5 +28,13 @@ base revision. Source worktrees remain task-specific.
 Recovery guarantees cover remotely acknowledged state and pushed checkpoints.
 Unpushed edits on a lost machine cannot be recovered. Workers run in bounded
 invocations so the supervisor can checkpoint without racing a writing process.
-AIH is for trusted repositories on a developer machine; provider permissions
+AIH is for trusted repositories on a dedicated development machine/VM; provider permissions
 are defense in depth, not an OS isolation boundary against hostile code.
+
+## Server deployment
+
+Ubuntu deployment wraps the existing foreground supervisor in a non-root systemd
+user service. Linger supplies boot/logout independence; normal lease acquisition
+and recovery remain authoritative. SQLite and Git state stay on persistent local
+disk and GitHub respectively. A container stack or external queue would add
+dependencies without solving a V1 requirement, so neither is part of deployment.

@@ -16,6 +16,13 @@ func init() {
 		return
 	}
 	args := strings.Join(os.Args, " ")
+	if strings.Contains(args, "login status") || strings.Contains(args, "auth status") {
+		if os.Getenv("AIH_HELPER_MODE") == "unauthenticated" {
+			fmt.Println("secret diagnostic must not escape")
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if strings.Contains(args, "--help") {
 		fmt.Println("--output-schema --output-last-message --sandbox --json-schema --output-format --permission-mode --safe-mode")
 		os.Exit(0)
@@ -86,6 +93,26 @@ func TestStructuredResults(t *testing.T) {
 	for _, input := range []string{`{}`, `{"schema_version":9,"status":"completed","summary":"x"}`, `{"schema_version":1,"status":"blocked","summary":"x","question":""}`, `oops`} {
 		if _, e := Parse(input, "implementer"); e == nil {
 			t.Fatal("malformed output accepted")
+		}
+	}
+}
+
+func TestProviderPathAndAuthentication(t *testing.T) {
+	exe, _ := os.Executable()
+	t.Setenv("AIH_PROVIDER_HELPER", "1")
+	t.Setenv("CODEX_BINARY", exe)
+	t.Setenv("CLAUDE_BINARY", exe)
+	for _, kind := range []string{"codex", "claude-code"} {
+		if New(kind).(CLI).Executable != exe {
+			t.Fatal("binary override ignored")
+		}
+		t.Setenv("AIH_HELPER_MODE", "success")
+		if err := CheckAuthentication(context.Background(), kind); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("AIH_HELPER_MODE", "unauthenticated")
+		if err := CheckAuthentication(context.Background(), kind); err == nil || strings.Contains(err.Error(), "secret diagnostic") {
+			t.Fatal("authentication failure missing or sensitive output leaked", err)
 		}
 	}
 }

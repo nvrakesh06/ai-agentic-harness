@@ -80,7 +80,8 @@ applicable nested `AGENTS.md`, explicit role context, active platform instructio
 the assigned task, public decisions, diff and test evidence. It does not load every
 issue or provider conversation. Reviews use actual changed paths for scoped rules.
 
-Use `.aih/platform/windows.md` or `.aih/platform/darwin.md` for platform deltas.
+Use `.aih/platform/windows.md`, `.aih/platform/darwin.md`, or
+`.aih/platform/linux.md` for platform deltas.
 Only the active platform file is injected. Keep root AGENTS platform-neutral.
 Claude's safe mode and Codex's disabled automatic project-document injection keep
 stale local provider instructions from replacing supplied canonical instructions.

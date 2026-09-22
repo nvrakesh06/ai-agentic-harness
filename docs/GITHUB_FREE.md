@@ -9,7 +9,7 @@ task DAG. Stable `<!-- aih:ID -->` markers reconcile creation after failures. PR
 bodies carry acceptance/check/review/base/policy evidence. No high-frequency
 issue-comment message bus is used.
 
-The laptop runs native application verification, advisory workers and the serialized
+The development machine or VM runs native verification, advisory workers and the serialized
 merge train. `aih-state` stores logical orchestration; source branches store code.
 Atomic Git updates protect current-base and controller comparisons. Remote policy
 that disallows this integration strategy produces a blocker rather than being

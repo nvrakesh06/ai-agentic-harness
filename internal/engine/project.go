@@ -274,9 +274,5 @@ func (p *Project) Attach(ctx context.Context) error {
 func (p *Project) TaskPath(t *model.Task) string { return filepath.Join(p.Dir, "worktrees", t.ID) }
 
 func outsideSource(root, home string) error {
-	rel, e := filepath.Rel(root, home)
-	if e == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return errors.New("AIH_HOME must be outside the source checkout")
-	}
-	return nil
+	return config.OutsideSource(root, home)
 }
