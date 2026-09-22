@@ -202,11 +202,13 @@ func (h *Hub) Pull(ctx context.Context, n int) (github.Pull, error) {
 }
 
 type Worker struct {
-	Active   atomic.Int32
-	Max      atomic.Int32
-	mu       sync.Mutex
-	Reviews  []string
-	Failures map[string]int
+	Active       atomic.Int32
+	Max          atomic.Int32
+	ReviewActive atomic.Int32
+	ReviewMax    atomic.Int32
+	mu           sync.Mutex
+	Reviews      []string
+	Failures     map[string]int
 }
 
 func (w *Worker) Name() string                   { return "codex" }
@@ -262,6 +264,30 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 		return result, nil
 	}
 	if r.Role == "reviewer" || r.Role == "qa" {
+		n := w.ReviewActive.Add(1)
+		defer w.ReviewActive.Add(-1)
+		for {
+			old := w.ReviewMax.Load()
+			if n <= old || w.ReviewMax.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		deadline := time.NewTimer(5 * time.Second)
+		ticker := time.NewTicker(10 * time.Millisecond)
+	waitForPeer:
+		for w.ReviewActive.Load() < 2 {
+			select {
+			case <-ctx.Done():
+				deadline.Stop()
+				ticker.Stop()
+				return result, ctx.Err()
+			case <-deadline.C:
+				break waitForPeer
+			case <-ticker.C:
+			}
+		}
+		deadline.Stop()
+		ticker.Stop()
 		b, e := os.ReadFile(filepath.Join(r.Directory, "feature-"+task.Title+".txt"))
 		if e != nil || strings.TrimSpace(string(b)) != "implemented" {
 			return result, errors.New("mock reviewer observed missing feature")
@@ -346,6 +372,10 @@ func Run(ctx context.Context, out io.Writer, checks []string) (string, error) {
 			}
 		}
 	}
+	if got := f.Provider.ReviewMax.Load(); got != int32(f.Project.MaxReaders) {
+		return root, fmt.Errorf("parallel review roles used %d readers, want configured limit %d", got, f.Project.MaxReaders)
+	}
+	fmt.Fprintf(out, "Independent review roles used %d bounded reader slots.\n", f.Provider.ReviewMax.Load())
 	if e = f.P.DB.Submit(store.Command{ID: model.ID(), Kind: "handoff"}); e != nil {
 		return root, e
 	}
