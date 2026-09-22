@@ -81,6 +81,8 @@ func (c *Controller) integrate(id string) {
 		task.MergeSHA = merge
 		task.HeadSHA = merge
 		task.Evidence.Checks = checks
+		task.Evidence.IntegrationSHA = merge
+		task.Evidence.IntegrationOwner = c.owner
 		task.Evidence.At = time.Now().UTC()
 		return model.Transition(task, model.PostVerify)
 	}, gitx.Update{Branch: "main", Old: base, New: merge}, gitx.Update{Branch: t.Branch, Old: t.HeadSHA, New: merge})
@@ -134,24 +136,29 @@ func (c *Controller) postVerify(id string) {
 		}
 		target = effective.BaseSHA
 	}
-	if e = c.P.Git.Detached(c.ctx, dir, target); e != nil {
-		c.fail(e)
-		return
-	}
-	defer c.P.Git.RemoveWorktree(context.Background(), dir)
-	_, e = c.checks(c.ctx, effective, dir)
-	if c.ctx.Err() != nil {
-		return
-	}
-	if e != nil {
-		_ = c.mutate(func(s *model.Snapshot) error {
-			s.IntegrationBlocked = id
-			s.Tasks[id].RecoveryRequired = true
-			model.Block(s.Tasks[id], "Post-merge verification failed. Repair or authorize a revert, then answer to recheck.", c.portable(e.Error()), model.PostVerify)
-			return nil
-		})
-		c.mirror(id)
-		return
+	reused := !recovering && effective.BaseSHA == target && t.Evidence != nil &&
+		t.Evidence.IntegrationSHA == target && t.Evidence.IntegrationOwner == c.owner &&
+		t.Evidence.Config == effective.Hash && t.Evidence.Rules == roles.Hash() && len(t.Evidence.Checks) > 0
+	if !reused {
+		if e = c.P.Git.Detached(c.ctx, dir, target); e != nil {
+			c.fail(e)
+			return
+		}
+		defer c.P.Git.RemoveWorktree(context.Background(), dir)
+		_, e = c.checks(c.ctx, effective, dir)
+		if c.ctx.Err() != nil {
+			return
+		}
+		if e != nil {
+			_ = c.mutate(func(s *model.Snapshot) error {
+				s.IntegrationBlocked = id
+				s.Tasks[id].RecoveryRequired = true
+				model.Block(s.Tasks[id], "Post-merge verification failed. Repair or authorize a revert, then answer to recheck.", c.portable(e.Error()), model.PostVerify)
+				return nil
+			})
+			c.mirror(id)
+			return
+		}
 	}
 	if recovering && target != t.MergeSHA {
 		result, err := c.role(c.ctx, effective, roles.Builtins()["qa"], t, dir, "Verify acceptance criteria after the human-directed repair/revert on main.", "", "Native checks passed on "+target)
@@ -185,7 +192,11 @@ func (c *Controller) postVerify(id string) {
 	}
 	c.mirror(id)
 	t = c.Snapshot().Tasks[id]
-	_ = c.P.Hub.UpdatePR(c.ctx, t.PR, c.prBody(t)+"\nIntegration commit: `"+t.MergeSHA+"`\nPost-merge verification passed on: `"+target+"`\n")
+	verification := "Post-merge verification passed on"
+	if reused {
+		verification = "Exact-SHA integration verification reused on"
+	}
+	_ = c.P.Hub.UpdatePR(c.ctx, t.PR, c.prBody(t)+"\nIntegration commit: `"+t.MergeSHA+"`\n"+verification+": `"+target+"`\n")
 	s := c.Snapshot()
 	complete := true
 	for _, other := range s.Tasks {
