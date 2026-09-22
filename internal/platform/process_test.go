@@ -1,0 +1,117 @@
+package platform
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func init() {
+	if os.Getenv("AIH_PROCESS_HELPER") != "1" {
+		return
+	}
+	switch os.Args[1] {
+	case "echo":
+		b, _ := io.ReadAll(os.Stdin)
+		fmt.Print(string(b))
+		os.Exit(0)
+	case "child":
+		for {
+			_ = os.WriteFile(os.Args[2], []byte(time.Now().Format(time.RFC3339Nano)), 0600)
+			time.Sleep(20 * time.Millisecond)
+		}
+	case "tree":
+		child := exec.Command(os.Args[0], "child", os.Args[2])
+		child.Env = os.Environ()
+		if child.Start() != nil {
+			os.Exit(2)
+		}
+		for {
+			time.Sleep(time.Second)
+		}
+	case "supervisor":
+		_, _ = Run(context.Background(), "", os.Environ(), "", os.Args[0], "tree", os.Args[2])
+		os.Exit(0)
+	}
+	os.Exit(3)
+}
+func TestPromptStdinAndTimeout(t *testing.T) {
+	t.Setenv("AIH_PROCESS_HELPER", "1")
+	exe, _ := os.Executable()
+	out, e := Run(context.Background(), "", os.Environ(), "hello\nworld", exe, "echo")
+	if e != nil || out != "hello\nworld" {
+		t.Fatalf("stdin corrupted: %q %v", out, e)
+	}
+	marker := filepath.Join(t.TempDir(), "pulse")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, e = Run(ctx, "", os.Environ(), "", exe, "tree", marker)
+	if !errors.Is(e, context.DeadlineExceeded) {
+		t.Fatal(e)
+	}
+	assertStopped(t, marker)
+}
+func TestSupervisorCrashKillsDescendants(t *testing.T) {
+	t.Setenv("AIH_PROCESS_HELPER", "1")
+	exe, _ := os.Executable()
+	marker := filepath.Join(t.TempDir(), "pulse")
+	cmd := exec.Command(exe, "supervisor", marker)
+	cmd.Env = os.Environ()
+	if e := cmd.Start(); e != nil {
+		t.Fatal(e)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, e := os.Stat(marker); e == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("descendant did not start")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if e := cmd.Process.Kill(); e != nil {
+		t.Fatal(e)
+	}
+	_ = cmd.Wait()
+	assertStopped(t, marker)
+}
+func assertStopped(t *testing.T, marker string) {
+	t.Helper()
+	time.Sleep(150 * time.Millisecond)
+	a, e := os.ReadFile(marker)
+	if e != nil {
+		t.Fatal("worker never started", e)
+	}
+	time.Sleep(150 * time.Millisecond)
+	b, e := os.ReadFile(marker)
+	if e != nil || string(a) != string(b) {
+		t.Fatal("descendant outlived its supervisor", e)
+	}
+}
+func TestExclusiveLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	a, e := Acquire(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if b, e := Acquire(path); e == nil {
+		b.Close()
+		t.Fatal("duplicate lock acquired")
+	}
+	if e = a.Close(); e != nil {
+		t.Fatal(e)
+	}
+	b, e := Acquire(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	b.Close()
+}

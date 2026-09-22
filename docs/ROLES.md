@@ -1,0 +1,91 @@
+# Roles and context
+
+Built-ins: Orchestrator (plan), Implementer (sole writer), Reviewer, QA, Designer,
+Security and Advisor. Reviewer and QA are always required for source changes.
+Designer is required for UI tasks; common UI extensions also trigger it. Security
+is triggered by high risk, explicit flags, or sensitive changed paths. Path
+heuristics are conservative aids, not complete semantic detection.
+
+UI tasks receive pre-implementation design guidance and post-implementation design
+review. Visual checks should be configured in the application; lack of screenshots
+or runnable UI evidence must not be reported as a visual pass. Advisor is reserved
+for exhausted normal retry budgets and offers one bounded final approach.
+
+## Custom advisory role
+
+```yaml
+name: market-data-validator
+description: Check timestamps and stale market data
+extends: reviewer
+mode: validator
+stage: review
+permissions: [read]
+capability: strong
+output_schema: worker-v1
+context: [docs/MARKET_DATA.md]
+triggers:
+  paths: ["market-data/**", "providers/**"]
+  risks: [high]
+focus:
+  - timestamp correctness
+  - exchange-session boundaries
+blocking:
+  severities: [critical, high]
+instructions: Cite a concrete source location for each finding.
+```
+
+Store this in `.aih/roles/market-data-validator.yaml` and commit/push to main.
+Triggers are ORed across matching paths/risks. `*` matches one path segment, `**`
+matches across segments. Stages are `review` or `pre-implementation`; modes are
+`validator` or `advisor`. Built-in overrides and custom writers are rejected:
+specialists advise the single implementation writer instead of competing with it.
+Explicit context files must exist on canonical main and are limited to 128 KiB each.
+
+`aih roles assign TASK_ID ROLE` manually adds a specialist to a READY, FIX, or
+unmerged BLOCKED task. A role can also be assigned in the validated plan. Manual
+assignment does not answer an outstanding human blocker.
+
+## Structured result envelope
+
+Every role uses `worker-v1` rather than arbitrary executable schemas:
+
+```json
+{
+  "schema_version": 1,
+  "status": "completed",
+  "summary": "Public outcome, not private reasoning",
+  "question": "",
+  "changed_areas": [],
+  "tests_run": [],
+  "remaining_risks": [],
+  "findings": [],
+  "plan": []
+}
+```
+
+Other statuses: `in_progress`, `blocked`, `failed`. A blocker requires a question.
+Findings require severity (`critical/high/medium/low/nit`) and reason, with category,
+location and suggested_resolution. Orchestrator plans are validated for readiness,
+unique keys, bounded task count, known dependencies and acyclicity. Unknown fields,
+trailing JSON, unsupported versions and secret-like values are rejected.
+
+Critical/high findings block by default. Custom roles can add blocking severities.
+Medium findings create stable-ID follow-up issues; low/nit findings do not create
+churn. Native check success does not replace independent acceptance review.
+
+## Context isolation
+
+The compiler combines embedded core rules, a role delta, canonical root and
+applicable nested `AGENTS.md`, explicit role context, active platform instructions,
+the assigned task, public decisions, diff and test evidence. It does not load every
+issue or provider conversation. Reviews use actual changed paths for scoped rules.
+
+Use `.aih/platform/windows.md` or `.aih/platform/darwin.md` for platform deltas.
+Only the active platform file is injected. Keep root AGENTS platform-neutral.
+Claude's safe mode and Codex's disabled automatic project-document injection keep
+stale local provider instructions from replacing supplied canonical instructions.
+Audit existing CLAUDE.md/Codex configuration when enabling a repository.
+
+`aih rules --role ROLE --task TASK_ID` displays effective compiled context;
+`aih rules --core` works outside a project. `aih rules doctor` reports local versus
+canonical instruction/config differences and validates role configuration.

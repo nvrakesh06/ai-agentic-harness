@@ -1,0 +1,70 @@
+# State and durability
+
+Machine data defaults to `~/.aih` (override with `AIH_HOME` or `--home`):
+
+```text
+machine.yaml
+projects/<stable-project-id>/
+  registration.json
+  state.db (+ WAL/SHM)
+  supervisor.lock
+  control.git/
+  worktrees/<task-id>/
+  sessions/<run-id>/
+  logs/supervisor.log
+  analysis/ integration/ post-verify/
+```
+
+The application contains only `.aih/project.yaml`, `policies.yaml`, `harness.lock`,
+optional roles/platform files, and project-specific `AGENTS.md` instructions.
+Never place AIH_HOME inside an application checkout or synchronize it between
+machines. Install normal Git/provider credentials independently on each machine.
+
+## Remote snapshot
+
+`aih-state:snapshot.json` stores `state_schema`, `created_by_version`, project
+identity, revision, controller lease, objectives, tasks, runs, accepted command IDs,
+improvement candidates and the integration hold. Task records contain dependencies,
+conflict domains, issues/PRs, branch/base/head/merge revisions, retry counters,
+findings, human decisions, blocker/resume state and exact verification evidence.
+No SQLite files or provider sessions are pushed.
+
+Git state commits form an independent append-only ancestry. Source/state changes
+are fenced together; state-only changes use the same compare-and-swap mechanism.
+SQLite is updated after remote acknowledgement. A crash in that gap is recovered
+from the remote snapshot, not by replaying a stale cached state.
+
+SQLite uses WAL, FULL synchronization, and a busy timeout. Its snapshot is a cache;
+commands are a local queue; events and runtime values are local observability.
+A command marked queued is **not yet portable**. After remote acceptance its stable
+ID is in the snapshot, preventing duplicate application after a local crash.
+
+## Task states
+
+`PLANNED -> READY -> RUNNING -> IMPLEMENTED -> SYNC_REQUIRED -> VERIFYING -> REVIEW
+-> MERGE_READY -> MERGE_TRAIN -> POST_VERIFY -> DONE`
+
+Failed checks/reviews take a bounded `FIX -> RUNNING` route. `BLOCKED_HUMAN`
+records a question, reason, impact and resume state. Only that task and dependants
+wait. Recovery maps interrupted writers to READY and interrupted verification to
+SYNC_REQUIRED; POST_VERIFY resumes its exact recorded integration commit.
+
+## Schema compatibility and migrations
+
+V1 uses remote schema 1, role schema 1, rules version 1, and local schema 1.
+Unknown newer schemas fail closed before writes. Legacy schema 0 snapshots gain
+version metadata and missing maps, then undergo validation. The first subsequent
+state commit keeps the original remote commit as its parent, preserving the
+pre-migration backup in Git history. No automatic major-version migration exists.
+
+Remote task identities and branches are constrained before use as filesystem or
+Git targets. Schema changes require tests for old fixtures and new-runtime refusal.
+Snapshots and normal state history are retained in V1; compaction is future work.
+
+## Practical guarantees
+
+Acknowledged remote state and pushed checkpoints survive deletion of all local
+project data. Unpushed changes and queued-only commands on a destroyed disk do not.
+An offline handoff reports failure and leaves local work available; it does not
+pretend the remote is current. GitHub's presentation layer can temporarily lag the
+authoritative snapshot after an API outage.
