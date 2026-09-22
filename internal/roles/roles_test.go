@@ -54,7 +54,7 @@ func TestBuiltinPromptsKeepOrchestrationInSupervisor(t *testing.T) {
 		}
 	}
 	implementer := builtins["implementer"].Instructions
-	for _, value := range []string{"Do not spawn", "subagents or reviewers", "supervisor schedules independent roles"} {
+	for _, value := range []string{"Do not spawn", "subagents or reviewers", "supervisor schedules independent roles", "blocked with an empty question", "supervisor can run canonical native checks"} {
 		if !strings.Contains(implementer, value) {
 			t.Fatalf("implementer prompt does not preserve supervisor ownership: %q", implementer)
 		}

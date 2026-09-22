@@ -11,7 +11,10 @@ import (
 	"testing"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/engine"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
 )
 
 func init() {
@@ -83,6 +86,32 @@ func TestInspectionWithoutProject(t *testing.T) {
 		}
 		if !strings.Contains(b.String(), tc.want) {
 			t.Fatal(tc.args, b.String())
+		}
+	}
+}
+
+func TestStatusShowsVerificationRetryRoute(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	snapshot := model.NewSnapshot("project123")
+	snapshot.Tasks["task"] = &model.Task{ID: "task", Title: "verify", State: model.SyncRequired, Verification: &model.Verification{Environment: "windows/native/check", HeadSHA: strings.Repeat("c", 40), Fingerprint: strings.Repeat("b", 64), Attempts: 1, NativeOnly: true}}
+	if err = db.Save(strings.Repeat("a", 40), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	p := &engine.Project{Dir: dir, DB: db}
+	var out bytes.Buffer
+	cmd := New()
+	cmd.SetOut(&out)
+	if err = showStatus(cmd, p, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"supervisor-native verification only", "windows/native/check", "attempt 1"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("status omitted %q: %s", want, out.String())
 		}
 	}
 }

@@ -80,8 +80,17 @@ type Task struct {
 	Risks            []string       `json:"remaining_risks,omitempty"`
 	Decisions        []string       `json:"decisions,omitempty"`
 	Blocker          *Blocker       `json:"blocker,omitempty"`
+	Verification     *Verification  `json:"verification_retry_guard,omitempty"`
 	Evidence         *Evidence      `json:"evidence,omitempty"`
 	Updated          time.Time      `json:"updated"`
+}
+type Verification struct {
+	Environment       string `json:"environment"`
+	SourceEnvironment string `json:"source_environment,omitempty"`
+	HeadSHA           string `json:"head_sha"`
+	Fingerprint       string `json:"fingerprint"`
+	Attempts          int    `json:"attempts"`
+	NativeOnly        bool   `json:"native_only"`
 }
 type Blocker struct {
 	Question       string `json:"question"`
@@ -209,6 +218,14 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		}
 		if t.State == Blocked && (t.Blocker == nil || t.Blocker.Question == "") {
 			return nil, false, errors.New("blocked task has no question")
+		}
+		if v := t.Verification; v != nil {
+			if v.Environment == "" || v.Attempts < 0 || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Fingerprint) {
+				return nil, false, errors.New("invalid verification retry guard")
+			}
+			if v.HeadSHA != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.HeadSHA) {
+				return nil, false, errors.New("invalid verification retry revision")
+			}
 		}
 		if _, ok := edges[t.State]; !ok && t.State != Done {
 			return nil, false, fmt.Errorf("unknown task state %q", t.State)

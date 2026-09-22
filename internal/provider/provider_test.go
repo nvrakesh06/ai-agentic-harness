@@ -91,7 +91,15 @@ func TestStructuredResults(t *testing.T) {
 	if _, e := Parse(string(b), "implementer"); e != nil {
 		t.Fatal(e)
 	}
-	for _, input := range []string{`{}`, `{"schema_version":9,"status":"completed","summary":"x"}`, `{"schema_version":1,"status":"blocked","summary":"x","question":""}`, `oops`} {
+	verificationOnly := Result{Schema: 1, Status: "blocked", Summary: "implementation complete; native verification unavailable"}
+	b, _ = json.Marshal(verificationOnly)
+	if _, e := Parse(string(b), "implementer"); e != nil {
+		t.Fatal("verification-only implementer result rejected", e)
+	}
+	if _, e := Parse(string(b), "qa"); e == nil {
+		t.Fatal("questionless advisory blocker accepted")
+	}
+	for _, input := range []string{`{}`, `{"schema_version":9,"status":"completed","summary":"x"}`, `oops`} {
 		if _, e := Parse(input, "implementer"); e == nil {
 			t.Fatal("malformed output accepted")
 		}

@@ -30,7 +30,10 @@ machines. Install normal Git/provider credentials independently on each machine.
 identity, revision, controller lease, objectives, tasks, runs, accepted command IDs,
 improvement candidates and the integration hold. Task records contain dependencies,
 conflict domains, issues/PRs, branch/base/head/merge revisions, retry counters,
-findings, human decisions, blocker/resume state and exact verification evidence.
+findings, human decisions, blocker/resume state, verification retry guards and exact
+verification evidence. A guard records only portable environment/command classes,
+the source revision, a normalized fingerprint and attempt count; it contains no
+machine paths or provider conversation state.
 No SQLite files or provider sessions are pushed.
 
 Git state commits form an independent append-only ancestry. Source/state changes
@@ -52,6 +55,10 @@ Failed checks/reviews take a bounded `FIX -> RUNNING` route. `BLOCKED_HUMAN`
 records a question, reason, impact and resume state. Only that task and dependants
 wait. Recovery maps interrupted writers to READY and interrupted verification to
 SYNC_REQUIRED; POST_VERIFY resumes its exact recorded integration commit.
+Questionless implementer blockers transition through IMPLEMENTED to supervisor-native
+verification. Missing native capabilities and repeated failures at the same source
+revision/environment block with resume state SYNC_REQUIRED, so a human can repair the
+environment and recheck without starting another implementer.
 
 ## Schema compatibility and migrations
 

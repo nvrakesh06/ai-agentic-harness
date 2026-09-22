@@ -379,6 +379,13 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		if t.Blocker != nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n  Reason: %s\n", t.Blocker.Question, t.Blocker.Reason)
 		}
+		if t.Verification != nil {
+			route := "guarded native verification retry"
+			if t.Verification.NativeOnly {
+				route = "supervisor-native verification only"
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "  Verification route: %s (%s, attempt %d)\n", route, t.Verification.Environment, t.Verification.Attempts)
+		}
 	}
 	for _, ob := range s.Objectives {
 		if ob.Blocker != "" {
