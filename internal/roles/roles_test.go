@@ -44,3 +44,19 @@ func TestContextFilteringAndCanonicalRules(t *testing.T) {
 		t.Fatal("unrelated context leaked")
 	}
 }
+
+func TestBuiltinPromptsKeepOrchestrationInSupervisor(t *testing.T) {
+	builtins := Builtins()
+	orchestrator := builtins["orchestrator"].Instructions
+	for _, value := range []string{"exactly one lowercase value", "low, medium, or high"} {
+		if !strings.Contains(orchestrator, value) {
+			t.Fatalf("orchestrator prompt does not constrain risk values: %q", orchestrator)
+		}
+	}
+	implementer := builtins["implementer"].Instructions
+	for _, value := range []string{"Do not spawn", "subagents or reviewers", "supervisor schedules independent roles"} {
+		if !strings.Contains(implementer, value) {
+			t.Fatalf("implementer prompt does not preserve supervisor ownership: %q", implementer)
+		}
+	}
+}

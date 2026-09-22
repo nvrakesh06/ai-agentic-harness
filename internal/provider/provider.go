@@ -225,7 +225,8 @@ func Schema() string {
 		return map[string]any{"type": "object", "properties": props, "required": required, "additionalProperties": false}
 	}
 	finding := obj(map[string]any{"severity": map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low", "nit"}}, "category": str, "location": str, "reason": str, "suggested_resolution": str})
-	task := obj(map[string]any{"key": str, "title": str, "objective": str, "acceptance": array(str), "dependencies": array(str), "areas": array(str), "conflict_domains": array(str), "risk": str, "ui": map[string]any{"type": "boolean"}, "security": map[string]any{"type": "boolean"}, "roles": array(str)})
+	risk := map[string]any{"type": "string", "enum": []string{"low", "medium", "high"}}
+	task := obj(map[string]any{"key": str, "title": str, "objective": str, "acceptance": array(str), "dependencies": array(str), "areas": array(str), "conflict_domains": array(str), "risk": risk, "ui": map[string]any{"type": "boolean"}, "security": map[string]any{"type": "boolean"}, "roles": array(str)})
 	schema := obj(map[string]any{"schema_version": map[string]any{"type": "integer", "const": 1}, "status": map[string]any{"type": "string", "enum": []string{"completed", "blocked", "in_progress", "failed"}}, "summary": str, "question": str, "changed_areas": array(str), "tests_run": array(str), "remaining_risks": array(str), "findings": array(finding), "plan": array(task)})
 	b, _ := json.Marshal(schema)
 	return string(b)

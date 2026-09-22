@@ -60,6 +60,20 @@ func TestPlanRejectsCyclesMissingAndUnsafeKeys(t *testing.T) {
 		t.Fatal("unsafe key accepted")
 	}
 }
+
+func TestPlanRiskUsesPortableEnum(t *testing.T) {
+	task := PlanTask{Key: "task", Title: "task", Objective: "task", Acceptance: []string{"works"}, Areas: []string{"src"}, Domains: []string{"source"}}
+	for _, risk := range []string{"low", "medium", "high"} {
+		task.Risk = risk
+		if err := ValidatePlan([]PlanTask{task}); err != nil {
+			t.Fatalf("valid risk %q rejected: %v", risk, err)
+		}
+	}
+	task.Risk = "High: filesystem boundary"
+	if err := ValidatePlan([]PlanTask{task}); err == nil {
+		t.Fatal("descriptive risk accepted")
+	}
+}
 func TestSchemaMigrationAndFutureRejection(t *testing.T) {
 	s := NewSnapshot("project123")
 	s.Schema = 0
