@@ -63,11 +63,18 @@ Every role uses `worker-v1` rather than arbitrary executable schemas:
 }
 ```
 
-Other statuses: `in_progress`, `blocked`, `failed`. A blocker requires a question.
+Other statuses: `in_progress`, `blocked`, `failed`. A human or advisory blocker
+requires a question.
 Findings require severity (`critical/high/medium/low/nit`) and reason, with category,
 location and suggested_resolution. Orchestrator plans are validated for readiness,
 unique keys, bounded task count, known dependencies and acyclicity. Unknown fields,
 trailing JSON, unsupported versions and secret-like values are rejected.
+
+For the Implementer only, `blocked` with an empty question has a narrower meaning:
+implementation is complete and remaining checks require the supervisor's canonical
+native environment. AIH checkpoints the work and attempts those checks directly.
+Human-decision blockers still require a question. Implementers return `failed` for
+code or implementation defects so those continue through the normal fix budget.
 
 Critical/high findings block by default. Custom roles can add blocking severities.
 Medium findings create stable-ID follow-up issues; low/nit findings do not create

@@ -1,7 +1,9 @@
 package model
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -86,5 +88,21 @@ func TestSchemaMigrationAndFutureRejection(t *testing.T) {
 	b, _ = json.Marshal(s)
 	if _, _, e = Decode(b); e == nil {
 		t.Fatal("newer schema accepted")
+	}
+}
+
+func TestVerificationRetryGuardRoundTripsAndValidates(t *testing.T) {
+	s := NewSnapshot("project123")
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte("native verification")))
+	s.Tasks["task"] = &Task{ID: "task", State: SyncRequired, Verification: &Verification{Environment: "windows/native/powershell", HeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Fingerprint: fingerprint, Attempts: 1, NativeOnly: true}}
+	b, _ := json.Marshal(s)
+	decoded, _, err := Decode(b)
+	if err != nil || decoded.Tasks["task"].Verification == nil || !decoded.Tasks["task"].Verification.NativeOnly {
+		t.Fatal("verification retry guard did not round-trip", err)
+	}
+	s.Tasks["task"].Verification.Fingerprint = "not-a-fingerprint"
+	b, _ = json.Marshal(s)
+	if _, _, err = Decode(b); err == nil {
+		t.Fatal("invalid verification retry guard accepted")
 	}
 }

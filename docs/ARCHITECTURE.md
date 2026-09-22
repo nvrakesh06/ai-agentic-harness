@@ -36,6 +36,15 @@ exits, never while it is changing files. Retry/rotation budgets prevent endless
 loops; repeated failures get one Advisor recovery approach before escalation.
 No provider conversation is needed to restart a worker.
 
+An implementer blocker with a human question becomes `BLOCKED_HUMAN`. A questionless
+implementer blocker means the source change is complete but the worker environment
+could not finish verification; the supervisor checkpoints it and proceeds directly
+to canonical native checks. Portable task state records the native environment,
+source revision and normalized failure fingerprint. A missing native executable, or
+a repeated native failure at the same revision and environment after a no-change fix,
+becomes a durable verification blocker instead of launching another equivalent writer.
+Code failures still use the normal bounded `FIX` route.
+
 Codex uses native read-only/workspace-write permission modes and structured result
 files; canonical instructions are supplied explicitly. Claude uses safe mode and
 an explicit read-only or edit tool list, without model shell execution. Native

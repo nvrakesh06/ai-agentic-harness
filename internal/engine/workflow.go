@@ -15,6 +15,7 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -22,6 +23,61 @@ import (
 	"sync"
 	"time"
 )
+
+type checkFailure struct {
+	name, command, output string
+	err                   error
+}
+
+func (e *checkFailure) Error() string {
+	return fmt.Sprintf("%s failed: %v\n%s", e.name, e.err, e.output)
+}
+func (e *checkFailure) Unwrap() error { return e.err }
+
+func applicable(check config.Check) bool {
+	if len(check.Platforms) == 0 {
+		return true
+	}
+	for _, platform := range check.Platforms {
+		if platform == runtime.GOOS {
+			return true
+		}
+	}
+	return false
+}
+
+func nativeEnvironment(e config.Effective) string {
+	commands := []string{}
+	for _, check := range e.Project.Checks {
+		if applicable(check) {
+			commands = append(commands, check.Name+"="+filepath.Base(check.Command[0]))
+		}
+	}
+	sort.Strings(commands)
+	hash := e.Hash
+	if len(hash) > 12 {
+		hash = hash[:12]
+	}
+	return strings.Join([]string{runtime.GOOS, "native", hash, strings.Join(commands, ",")}, "/")
+}
+
+func workerEnvironment(e config.Effective, role roles.Role) string {
+	capability := role.Capability
+	if configured := e.Project.Models[role.Name]; configured != "" {
+		capability = configured
+	}
+	modelName := e.Project.ProviderModels[capability]
+	if modelName == "" {
+		modelName = capability
+	}
+	return strings.Join([]string{runtime.GOOS, e.Project.Provider, role.Name, modelName, "workspace-write"}, "/")
+}
+
+func verificationFingerprint(environment, reason string) string {
+	normalized := strings.ToLower(strings.Join(strings.Fields(reason), " "))
+	hash := sha256.Sum256([]byte(environment + "\n" + normalized))
+	return fmt.Sprintf("%x", hash)
+}
 
 func (c *Controller) effective(ctx context.Context) (config.Effective, error) {
 	if e := c.fetch(ctx); e != nil {
@@ -253,6 +309,9 @@ func (c *Controller) issueBody(t *model.Task) string {
 	if t.Blocker != nil {
 		b.WriteString("\nNeeds human input: " + t.Blocker.Question + "\nReason: " + t.Blocker.Reason + "\n")
 	}
+	if t.Verification != nil {
+		fmt.Fprintf(&b, "\nVerification retry guard: environment `%s`, head `%s`, attempt %d, native-only `%t`.\n", t.Verification.Environment, t.Verification.HeadSHA, t.Verification.Attempts, t.Verification.NativeOnly)
+	}
 	for _, a := range t.Decisions {
 		b.WriteString("\nDecision: " + a + "\n")
 	}
@@ -324,7 +383,12 @@ func (c *Controller) work(id string, write bool) {
 	}
 	if e := c.verifyReview(id); e != nil {
 		if c.ctx.Err() == nil {
-			c.retry(id, "verification", e.Error())
+			var checkErr *checkFailure
+			if errors.As(e, &checkErr) {
+				c.verificationFailure(id, checkErr)
+			} else {
+				c.retry(id, "verification", e.Error())
+			}
 		}
 		return
 	}
@@ -405,6 +469,21 @@ func (c *Controller) implement(id string) bool {
 	}
 	switch r.Status {
 	case "blocked":
+		if strings.TrimSpace(r.Question) == "" {
+			native := nativeEnvironment(effective)
+			source := workerEnvironment(effective, all["implementer"])
+			reason := c.portable(r.Summary + " " + strings.Join(r.Risks, " "))
+			if c.mutate(func(s *model.Snapshot) error {
+				task := s.Tasks[id]
+				task.Verification = &model.Verification{Environment: native, SourceEnvironment: source, HeadSHA: task.HeadSHA, Fingerprint: verificationFingerprint(source, reason), NativeOnly: true}
+				task.Decisions = append(task.Decisions, "Implementation complete; supervisor-native verification requested because the worker environment lacked a required verification capability.")
+				return model.Transition(task, model.Implemented)
+			}) != nil {
+				return false
+			}
+			_ = c.P.DB.Event(id, c.Snapshot().Tasks[id].RunID, "implementer", effective.Project.Provider, "verification_rerouted", source+" -> "+native)
+			return true
+		}
 		c.block(id, r.Question, r.Summary, model.Ready)
 		return false
 	case "in_progress":
@@ -431,6 +510,57 @@ func (c *Controller) implement(id string) bool {
 		c.retry(id, "implementation", "invalid result status")
 		return false
 	}
+}
+
+func (c *Controller) verificationFailure(id string, failure *checkFailure) {
+	if c.ctx.Err() != nil {
+		return
+	}
+	reason := c.portable(failure.Error())
+	effective, err := c.effective(c.ctx)
+	if err != nil {
+		c.block(id, "Restore canonical policy access before retrying verification.", err.Error(), model.SyncRequired)
+		return
+	}
+	environment := nativeEnvironment(effective)
+	task := c.Snapshot().Tasks[id]
+	guard := task.Verification
+	repeated := guard != nil && guard.Environment == environment && guard.HeadSHA == task.HeadSHA
+	nativeOnly := guard != nil && guard.NativeOnly
+	capabilityMissing := errors.Is(failure, exec.ErrNotFound)
+	attempts := 1
+	source := ""
+	if guard != nil {
+		source = guard.SourceEnvironment
+		if repeated {
+			attempts = guard.Attempts + 1
+		}
+	}
+	next := &model.Verification{Environment: environment, SourceEnvironment: source, HeadSHA: task.HeadSHA, Fingerprint: verificationFingerprint(environment+"/"+failure.command, reason), Attempts: attempts, NativeOnly: nativeOnly || capabilityMissing}
+	if nativeOnly || capabilityMissing || repeated {
+		question := "Native verification cannot complete in the current environment. Repair its tools or environment, then answer to retry verification."
+		if repeated && !nativeOnly && !capabilityMissing {
+			question = "Native verification failed again at the same source revision and environment. Diagnose the persistent failure, then answer to retry verification."
+		}
+		if c.mutate(func(s *model.Snapshot) error {
+			t := s.Tasks[id]
+			t.Verification = next
+			model.Block(t, question, reason, model.SyncRequired)
+			return nil
+		}) == nil {
+			_ = c.P.DB.Event(id, task.RunID, "verification", "native", "retry_suppressed", environment+" head="+task.HeadSHA)
+			c.mirror(id)
+		}
+		return
+	}
+	if c.mutate(func(s *model.Snapshot) error {
+		s.Tasks[id].Verification = next
+		return nil
+	}) != nil {
+		return
+	}
+	_ = c.P.DB.Event(id, task.RunID, "verification", "native", "verification_retry_guarded", environment+" head="+task.HeadSHA)
+	c.retry(id, "verification", reason)
 }
 func (c *Controller) retry(id, kind, reason string) {
 	if c.ctx.Err() != nil {
@@ -537,20 +667,14 @@ func cleanEnvironment() []string {
 func Verify(ctx context.Context, e config.Effective, dir string) ([]string, error) {
 	var checked []string
 	for _, check := range e.Project.Checks {
-		applicable := len(check.Platforms) == 0
-		for _, p := range check.Platforms {
-			if p == runtime.GOOS {
-				applicable = true
-			}
-		}
-		if !applicable {
+		if !applicable(check) {
 			continue
 		}
 		checkCtx, cancel := context.WithTimeout(ctx, time.Duration(check.Timeout)*time.Second)
 		out, err := platform.Run(checkCtx, dir, cleanEnvironment(), "", check.Command[0], check.Command[1:]...)
 		cancel()
 		if err != nil {
-			return checked, fmt.Errorf("%s failed: %w\n%s", check.Name, err, short(safety.Redact(out), 8000))
+			return checked, &checkFailure{name: check.Name, command: filepath.Base(check.Command[0]), err: err, output: short(safety.Redact(out), 8000)}
 		}
 		checked = append(checked, check.Name)
 	}
@@ -639,6 +763,7 @@ func (c *Controller) verifyReview(id string) error {
 		s.Tasks[id].UI = t.UI
 		s.Tasks[id].Security = t.Security
 		s.Tasks[id].Findings = nil
+		s.Tasks[id].Verification = nil
 		return nil
 	}); e != nil {
 		return e

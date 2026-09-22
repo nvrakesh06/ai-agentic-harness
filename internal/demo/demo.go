@@ -202,13 +202,21 @@ func (h *Hub) Pull(ctx context.Context, n int) (github.Pull, error) {
 }
 
 type Worker struct {
-	Active       atomic.Int32
-	Max          atomic.Int32
-	ReviewActive atomic.Int32
-	ReviewMax    atomic.Int32
-	mu           sync.Mutex
-	Reviews      []string
-	Failures     map[string]int
+	Active            atomic.Int32
+	Max               atomic.Int32
+	ReviewActive      atomic.Int32
+	ReviewMax         atomic.Int32
+	mu                sync.Mutex
+	Reviews           []string
+	Failures          map[string]int
+	EnvironmentBlocks map[string]int
+	Implementations   map[string]int
+}
+
+func (w *Worker) ImplementationCount(title string) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.Implementations[title]
 }
 
 func (w *Worker) Name() string                   { return "codex" }
@@ -249,9 +257,17 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 		case <-time.After(50 * time.Millisecond):
 		}
 		w.mu.Lock()
+		if w.Implementations == nil {
+			w.Implementations = map[string]int{}
+		}
+		w.Implementations[task.Title]++
 		fail := w.Failures[task.Title] > 0
 		if fail {
 			w.Failures[task.Title]--
+		}
+		environmentBlock := w.EnvironmentBlocks[task.Title] > 0
+		if environmentBlock {
+			w.EnvironmentBlocks[task.Title]--
 		}
 		w.mu.Unlock()
 		if fail {
@@ -261,6 +277,11 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 			return result, e
 		}
 		result.Summary = "Created feature-" + task.Title + ".txt"
+		if environmentBlock {
+			result.Status = "blocked"
+			result.Summary += "; implementation is complete but the worker cannot run the required native verification"
+			result.Risks = []string{"Supervisor-owned native verification remains."}
+		}
 		return result, nil
 	}
 	if r.Role == "reviewer" || r.Role == "qa" {

@@ -2,6 +2,8 @@ package engine_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/demo"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/engine"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
@@ -40,6 +42,10 @@ func TestPartialGraphRecoversWithoutLocalProject(t *testing.T) {
 		s.Tasks[id] = task
 		updates = append(updates, gitx.Update{Branch: task.Branch, New: base})
 	}
+	s.Tasks["c"].Verification = &model.Verification{
+		Environment: "windows/native/check", HeadSHA: base,
+		Fingerprint: fmt.Sprintf("%x", sha256.Sum256([]byte("check failed"))), Attempts: 1,
+	}
 	next, e := f.P.Git.StateCommit(ctx, h, s)
 	if e != nil {
 		t.Fatal(e)
@@ -75,6 +81,9 @@ func TestPartialGraphRecoversWithoutLocalProject(t *testing.T) {
 		if recovered.Tasks[id].State != task.State {
 			t.Fatal("lost state", id)
 		}
+		if task.Verification != nil && (recovered.Tasks[id].Verification == nil || recovered.Tasks[id].Verification.Fingerprint != task.Verification.Fingerprint) {
+			t.Fatal("lost verification retry guard", id)
+		}
 		if task.State != model.Done {
 			if _, e = os.Stat(filepath.Join(p.TaskPath(task), "README.md")); e != nil {
 				t.Fatal("missing recovered source", e)
@@ -94,6 +103,9 @@ func TestPartialGraphRecoversWithoutLocalProject(t *testing.T) {
 	}
 	if recovered.Tasks["b"].State != model.Ready || recovered.Tasks["c"].State != model.SyncRequired || recovered.Tasks["d"].Blocker == nil {
 		t.Fatal("interruption recovery incorrect")
+	}
+	if recovered.Tasks["c"].Verification == nil {
+		t.Fatal("interruption recovery lost verification retry guard")
 	}
 }
 

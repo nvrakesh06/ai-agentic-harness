@@ -199,8 +199,8 @@ func Parse(out, role string) (Result, error) {
 	if r.Summary == "" {
 		return r, errors.New("worker summary is required")
 	}
-	if r.Status == "blocked" && r.Question == "" {
-		return r, errors.New("blocked result requires a question")
+	if r.Status == "blocked" && strings.TrimSpace(r.Question) == "" && role != "implementer" {
+		return r, errors.New("blocked advisory result requires a question")
 	}
 	for _, f := range r.Findings {
 		if !roles.Severity(f.Severity) || f.Reason == "" {
