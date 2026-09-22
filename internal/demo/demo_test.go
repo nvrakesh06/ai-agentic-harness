@@ -15,6 +15,19 @@ import (
 func init() {
 	if os.Getenv("AIH_DEMO_HELPER") == "1" {
 		dir, _ := os.Getwd()
+		if countFile := os.Getenv("AIH_DEMO_CHECK_COUNT_FILE"); countFile != "" {
+			f, e := os.OpenFile(countFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+			if e != nil {
+				os.Exit(1)
+			}
+			_, e = f.WriteString(filepath.ToSlash(dir) + "\n")
+			if closeErr := f.Close(); e == nil {
+				e = closeErr
+			}
+			if e != nil {
+				os.Exit(1)
+			}
+		}
 		if e := Check(dir); e != nil {
 			os.Exit(1)
 		}
@@ -23,6 +36,8 @@ func init() {
 }
 func TestEndToEndRecovery(t *testing.T) {
 	t.Setenv("AIH_DEMO_HELPER", "1")
+	countFile := filepath.Join(t.TempDir(), "check-count.txt")
+	t.Setenv("AIH_DEMO_CHECK_COUNT_FILE", countFile)
 	exe, _ := os.Executable()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -71,5 +86,16 @@ func TestEndToEndRecovery(t *testing.T) {
 	}
 	if len(bases) != 3 {
 		t.Fatal("merge train did not advance and reverify each candidate")
+	}
+	checkRuns, e := os.ReadFile(countFile)
+	if e != nil {
+		t.Fatal(e)
+	}
+	runs := string(checkRuns)
+	if got := strings.Count(runs, "/integration/"); got != 3 {
+		t.Fatalf("exact-merge verification ran %d times, want 3", got)
+	}
+	if got := strings.Count(runs, "/post-verify/"); got != 0 {
+		t.Fatalf("normal integration repeated post-merge verification %d times", got)
 	}
 }

@@ -60,6 +60,12 @@ filtered. Output is bounded; failures are redacted before portable recording.
 Checks must leave tracked source and unignored files unchanged. Use check-mode
 formatters and ignore build outputs in the application itself.
 
+AIH runs configured checks on the synchronized task head and again on the exact
+merge commit before its atomic publication. After publication, the same controller
+confirms that remote `main`, configuration, rules, and recorded integration SHA are
+unchanged and reuses the exact-merge evidence. Recovery, controller restart,
+changed-main, or changed-configuration paths always run fresh post-merge checks.
+
 Commands are executable plus argv. On Windows, standard npm/npx/Codex/Claude/pnpm
 shims are resolved to their Node entrypoints. Other batch scripts require an
 explicit trusted `cmd` or PowerShell check. Prefer portable native executables.
