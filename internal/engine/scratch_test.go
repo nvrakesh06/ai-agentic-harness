@@ -28,3 +28,38 @@ func TestWorkerScratchToolingNeverBecomesCheckpointedSource(t *testing.T) {
 		t.Fatalf("completed task scratch was not cleaned: %v", err)
 	}
 }
+
+func TestAttachKeepsTaskScratchMappingOnTheSameMachine(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedReadyTask(t, ctx, f, "resume-scratch")
+	task := &model.Task{ID: "resume-scratch"}
+	scratch := f.P.TaskScratchPath(task)
+	marker := filepath.Join(scratch, "npm-cache", "cache-marker")
+	if err = os.MkdirAll(filepath.Dir(marker), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(marker, []byte("local cache"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := f.Open(ctx, f.Home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.DB.Close()
+	if err = reopened.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.TaskScratchPath(task); got != scratch {
+		t.Fatalf("scratch mapping changed after attach: got %q want %q", got, scratch)
+	}
+	if _, err = os.Stat(marker); err != nil {
+		t.Fatalf("attach lost task scratch cache: %v", err)
+	}
+}
