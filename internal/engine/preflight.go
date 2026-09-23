@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"slices"
+	"strings"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
@@ -170,7 +171,11 @@ func (c *Controller) preflight(id string) {
 			return
 		}
 		if result.Status == "blocked" {
-			c.block(id, result.Question, result.Summary, model.Ready)
+			question := strings.TrimSpace(result.Question)
+			if question == "" {
+				question = "Resolve the pre-implementation guidance blocker."
+			}
+			c.block(id, question, result.Summary, model.Ready)
 			return
 		}
 		if result.Status != "completed" {
