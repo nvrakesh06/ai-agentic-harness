@@ -238,20 +238,26 @@ func Required(all map[string]Role, t *model.Task, paths []string, stage string) 
 // explain why a parent validator was not scheduled.
 func ReviewRoster(required []Role) ([]string, string) {
 	names := make([]string, 0, len(required))
-	satisfied := map[string]string{}
+	specialists := map[string][]string{}
 	present := map[string]bool{}
 	for _, r := range required {
 		names = append(names, r.Name)
 		present[r.Name] = true
 		if r.Extends == "reviewer" || r.Extends == "designer" {
-			satisfied[r.Extends] = r.Name
+			specialists[r.Extends] = append(specialists[r.Extends], r.Name)
 		}
 	}
 	reasons := []string{}
 	for _, parent := range []string{"reviewer", "designer"} {
-		if specialist := satisfied[parent]; specialist != "" && !present[parent] {
-			reasons = append(reasons, parent+" satisfied by "+specialist+" (inherits parent instructions)")
+		matched := specialists[parent]
+		if len(matched) == 0 {
+			continue
 		}
+		if present[parent] {
+			reasons = append(reasons, parent+" retained with "+strings.Join(matched, ", ")+" (independent_parent_review)")
+			continue
+		}
+		reasons = append(reasons, parent+" satisfied by "+strings.Join(matched, ", ")+" (inherits parent instructions)")
 	}
 	if len(reasons) == 0 {
 		return names, "no triggered extending reviewer/designer validator satisfied a built-in parent"

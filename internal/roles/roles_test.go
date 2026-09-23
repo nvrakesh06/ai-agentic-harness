@@ -109,6 +109,10 @@ func TestRequiredReviewRosterKeepsParentForIndependentOverrideAndNonReviewStage(
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("review roster = %v, want %v", got, want)
 	}
+	_, reason := ReviewRoster(required)
+	if !strings.Contains(reason, "reviewer retained with independent-animation (independent_parent_review)") {
+		t.Fatalf("independent override reason missing: %s", reason)
+	}
 }
 func TestContextFilteringAndCanonicalRules(t *testing.T) {
 	e := config.Effective{Files: map[string]string{"AGENTS.md": "CANONICAL", "backend/AGENTS.md": "BACKEND", "frontend/AGENTS.md": "FRONTEND"}}
