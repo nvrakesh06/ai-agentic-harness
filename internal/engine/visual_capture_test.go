@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
@@ -83,13 +84,23 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	run("add", "source.txt")
 	run("commit", "-m", "base")
 	head := run("rev-parse", "HEAD")
+	var forbiddenRequests atomic.Int32
+	forbidden := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		forbiddenRequests.Add(1)
+		_, _ = w.Write([]byte("forbidden destination reached"))
+	}))
+	defer forbidden.Close()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte(`<!doctype html><div id="root"></div><img src="https://outside.invalid/pixel.png"><script>new WebSocket('ws://outside.invalid/socket')</script><script src="/api-client.ts"></script>`))
+			_, _ = w.Write([]byte(`<!doctype html><div id="root"></div><img src="https://outside.invalid/pixel.png"><img src="/redirect-pixel"><script>new WebSocket('ws://outside.invalid/socket')</script><script src="/api-client.ts"></script>`))
 		case "/api-client.ts":
 			http.NotFound(w, r)
+		case "/redirect-pixel":
+			http.Redirect(w, r, forbidden.URL+"/pixel.png", http.StatusFound)
+		case "/redirect-navigation":
+			http.Redirect(w, r, forbidden.URL+"/navigation", http.StatusFound)
 		default:
 			http.NotFound(w, r)
 		}
@@ -106,8 +117,18 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 		t.Fatalf("capture failed: %#v %v", visual, err)
 	}
 	network, err := os.ReadFile(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "network.txt"))
-	if err != nil || !strings.Contains(string(network), "404 /api-client.ts") || !strings.Contains(string(network), "BLOCKED GET https://outside.invalid") || !strings.Contains(string(network), "BLOCKED WEBSOCKET ws://outside.invalid") {
+	if err != nil || !strings.Contains(string(network), "404 /api-client.ts") || !strings.Contains(string(network), "BLOCKED GET https://outside.invalid") || !strings.Contains(string(network), "BLOCKED WEBSOCKET ws://outside.invalid") || !strings.Contains(string(network), "BLOCKED REDIRECT "+forbidden.URL) {
 		t.Fatalf("real blank-page capture omitted failed module evidence: %q %v", network, err)
+	}
+	if forbiddenRequests.Load() != 0 {
+		t.Fatalf("forbidden subresource redirect reached destination %d times", forbiddenRequests.Load())
+	}
+	navigation := config.Effective{Hash: strings.Repeat("c", 64), Project: config.Project{VisualCapture: &config.VisualCapture{URL: server.URL + "/redirect-navigation", Timeout: 10}}}
+	if _, err := c.captureVisual(context.Background(), navigation, &model.Task{ID: "task-navigation", HeadSHA: head}, worktree); err == nil {
+		t.Fatal("off-origin navigation redirect produced capture evidence")
+	}
+	if forbiddenRequests.Load() != 0 {
+		t.Fatalf("forbidden navigation redirect reached destination %d times", forbiddenRequests.Load())
 	}
 	if !strings.HasPrefix(filepath.Join(state, filepath.FromSlash(visual.Manifest)), state) {
 		t.Fatal("manifest escaped AIH state")
