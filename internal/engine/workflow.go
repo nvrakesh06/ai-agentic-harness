@@ -998,7 +998,8 @@ func (c *Controller) verifyReview(id string) error {
 	if e != nil {
 		return e
 	}
-	evidence := &model.Evidence{Base: t.BaseSHA, Head: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: checks, Reviews: map[string]string{}, At: time.Now().UTC()}
+	roster, rosterReason := roles.ReviewRoster(required)
+	evidence := &model.Evidence{Base: t.BaseSHA, Head: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: checks, Reviews: map[string]string{}, ReviewRoster: roster, ReviewRosterReason: rosterReason, At: time.Now().UTC()}
 	if e = c.mutate(func(s *model.Snapshot) error {
 		task := s.Tasks[id]
 		task.State = model.Review
@@ -1214,6 +1215,9 @@ func (c *Controller) prBody(t *model.Task) string {
 			label = "Accepted verification"
 		}
 		fmt.Fprintf(&b, "\n%s (base `%s`, head `%s`):\n", label, e.Base, e.Head)
+		if len(e.ReviewRoster) > 0 {
+			fmt.Fprintf(&b, "- review roster: %s\n- roster reason: %s\n", strings.Join(e.ReviewRoster, ", "), e.ReviewRosterReason)
+		}
 		for _, n := range e.Checks {
 			b.WriteString("- passed: " + n + "\n")
 		}

@@ -521,7 +521,14 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 			fmt.Fprintf(cmd.OutOrStdout(), "  Verification route: %s (%s, attempt %d)\n", route, t.Verification.Environment, t.Verification.Attempts)
 		}
 		if t.State == model.Review {
-			fmt.Fprintln(cmd.OutOrStdout(), "  Review: independent peer roles are active or waiting for bounded reader slots")
+			review := "independent peer roles are active or waiting for bounded reader slots"
+			if t.Evidence != nil && len(t.Evidence.ReviewRoster) > 0 {
+				review += ": " + strings.Join(t.Evidence.ReviewRoster, ", ")
+				if t.Evidence.ReviewRosterReason != "" {
+					review += " (" + t.Evidence.ReviewRosterReason + ")"
+				}
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "  Review: "+review)
 		}
 	}
 	if len(s.Runs) > 0 {

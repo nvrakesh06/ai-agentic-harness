@@ -26,6 +26,7 @@ context: [docs/MARKET_DATA.md]
 triggers:
   paths: ["market-data/**", "providers/**"]
   risks: [high]
+independent_parent_review: false
 focus:
   - timestamp correctness
   - exchange-session boundaries
@@ -39,6 +40,12 @@ Triggers are ORed across matching paths/risks. `*` matches one path segment, `**
 matches across segments. Stages are `review` or `pre-implementation`; modes are
 `validator` or `advisor`. Built-in overrides and custom writers are rejected:
 specialists advise the single implementation writer instead of competing with it.
+At the `review` stage, a triggered validator that extends `reviewer` or `designer`
+includes the parent instructions and therefore replaces that parent's default pass.
+QA and Security always remain independent. Set `independent_parent_review: true`
+only when the built-in parent and the specialist must perform separate reviews; this
+keeps both passes and their reader cost. A pre-implementation role never replaces a
+review-stage parent.
 Explicit context files must exist on canonical main and are limited to 128 KiB each.
 
 `aih roles assign TASK_ID ROLE` manually adds a specialist to a READY, FIX, or

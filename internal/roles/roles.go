@@ -27,18 +27,19 @@ Use the supplied canonical repository instructions. Do not substitute stale inst
 Return only the versioned structured result. Do not include private reasoning or secrets.`
 
 type Role struct {
-	Name         string   `yaml:"name"`
-	Description  string   `yaml:"description"`
-	Extends      string   `yaml:"extends"`
-	Mode         string   `yaml:"mode"`
-	Stage        string   `yaml:"stage"`
-	Permissions  []string `yaml:"permissions"`
-	Context      []string `yaml:"context"`
-	Schema       string   `yaml:"output_schema"`
-	Capability   string   `yaml:"capability"`
-	Instructions string   `yaml:"instructions"`
-	Focus        []string `yaml:"focus"`
-	Triggers     struct {
+	Name                    string   `yaml:"name"`
+	Description             string   `yaml:"description"`
+	Extends                 string   `yaml:"extends"`
+	Mode                    string   `yaml:"mode"`
+	Stage                   string   `yaml:"stage"`
+	Permissions             []string `yaml:"permissions"`
+	Context                 []string `yaml:"context"`
+	Schema                  string   `yaml:"output_schema"`
+	Capability              string   `yaml:"capability"`
+	IndependentParentReview bool     `yaml:"independent_parent_review"`
+	Instructions            string   `yaml:"instructions"`
+	Focus                   []string `yaml:"focus"`
+	Triggers                struct {
 		Paths []string `yaml:"paths"`
 		Risks []string `yaml:"risks"`
 	} `yaml:"triggers"`
@@ -107,6 +108,7 @@ func Load(files map[string]string) (map[string]Role, error) {
 		base.Name = delta.Name
 		base.Extends = delta.Extends
 		base.Description = delta.Description
+		base.IndependentParentReview = delta.IndependentParentReview
 		base.Focus = delta.Focus
 		base.Triggers = delta.Triggers
 		base.Context = delta.Context
@@ -206,6 +208,22 @@ func Required(all map[string]Role, t *model.Task, paths []string, stage string) 
 			}
 		}
 	}
+	if stage == "review" {
+		for _, parent := range []string{"reviewer", "designer"} {
+			extending := false
+			independent := false
+			for n := range wanted {
+				r := all[n]
+				if r.Extends == parent && r.Stage == "review" && r.Mode == "validator" {
+					extending = true
+					independent = independent || r.IndependentParentReview
+				}
+			}
+			if extending && !independent {
+				delete(wanted, parent)
+			}
+		}
+	}
 	names := []string{}
 	for n := range wanted {
 		if all[n].Stage == stage {
@@ -219,6 +237,49 @@ func Required(all map[string]Role, t *model.Task, paths []string, stage string) 
 	}
 	return out, nil
 }
+
+// ReviewRoster records the selected review roles and any built-in validators that
+// an extending specialist satisfies. It is kept with evidence so status and PRs
+// explain why a parent validator was not scheduled.
+func ReviewRoster(required []Role) ([]string, string) {
+	names := make([]string, 0, len(required))
+	specialists := map[string][]string{}
+	present := map[string]bool{}
+	for _, r := range required {
+		names = append(names, r.Name)
+		present[r.Name] = true
+		if (r.Extends == "reviewer" || r.Extends == "designer") && r.Stage == "review" && r.Mode == "validator" {
+			specialists[r.Extends] = append(specialists[r.Extends], r.Name)
+		}
+	}
+	reasons := []string{}
+	for _, parent := range []string{"reviewer", "designer"} {
+		matched := specialists[parent]
+		if len(matched) == 0 {
+			continue
+		}
+		if present[parent] {
+			independent := []string{}
+			for _, name := range matched {
+				for _, role := range required {
+					if role.Name == name && role.IndependentParentReview {
+						independent = append(independent, name)
+					}
+				}
+			}
+			if len(independent) > 0 {
+				reasons = append(reasons, parent+" retained with "+strings.Join(independent, ", ")+" (independent_parent_review)")
+			}
+			continue
+		}
+		reasons = append(reasons, parent+" satisfied by "+strings.Join(matched, ", ")+" (inherits parent instructions)")
+	}
+	if len(reasons) == 0 {
+		return names, "no triggered extending reviewer/designer validator satisfied a built-in parent"
+	}
+	return names, strings.Join(reasons, "; ")
+}
+
 func Blocking(r Role, findings []model.Finding) bool {
 	for _, f := range findings {
 		if (r.Name == "security" || r.Extends == "security") && (f.Severity == "critical" || f.Severity == "high") {

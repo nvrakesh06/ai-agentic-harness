@@ -14,7 +14,7 @@ func TestCustomRolesAndTriggers(t *testing.T) {
 		t.Fatal(e)
 	}
 	required, e := Required(all, &model.Task{Risk: "low"}, []string{"data/input/file.go"}, "review")
-	if e != nil || len(required) != 3 {
+	if e != nil || len(required) != 2 {
 		t.Fatal(required, e)
 	}
 	r := all["data-validator"]
@@ -24,6 +24,114 @@ func TestCustomRolesAndTriggers(t *testing.T) {
 	files[".aih/roles/data.yaml"] = "name: bad\nextends: reviewer\npermissions: [write]"
 	if _, e = Load(files); e == nil {
 		t.Fatal("writer permissions accepted for reviewer")
+	}
+}
+
+func TestRequiredReviewRosterDeduplicatesExtendingValidators(t *testing.T) {
+	files := map[string]string{
+		".aih/roles/animation.yaml": "name: animation-architecture\nextends: reviewer\ntriggers:\n  paths: [src/animation/**]\nblocking:\n  severities: [medium, high, critical]\n",
+		".aih/roles/visual.yaml":    "name: visual-quality\nextends: designer\ntriggers:\n  risks: [high]\n",
+		".aih/roles/qa.yaml":        "name: qa-specialist\nextends: qa\ntriggers:\n  paths: [src/animation/**]\n",
+		".aih/roles/security.yaml":  "name: security-specialist\nextends: security\ntriggers:\n  risks: [high]\n",
+	}
+	all, err := Load(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	required, err := Required(all, &model.Task{Risk: "high", UI: true}, []string{"src/animation/timeline.go"}, "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, len(required))
+	for i, role := range required {
+		got[i] = role.Name
+	}
+	want := []string{"animation-architecture", "qa", "qa-specialist", "security", "security-specialist", "visual-quality"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("review roster = %v, want %v", got, want)
+	}
+	_, reason := ReviewRoster(required)
+	for _, value := range []string{"reviewer satisfied by animation-architecture", "designer satisfied by visual-quality", "inherits parent instructions"} {
+		if !strings.Contains(reason, value) {
+			t.Fatalf("review roster reason missing %q: %s", value, reason)
+		}
+	}
+	if !Blocking(all["animation-architecture"], []model.Finding{{Severity: "medium"}}) {
+		t.Fatal("specialist blocking severity was not preserved")
+	}
+	if !strings.Contains(all["animation-architecture"].Instructions, Builtins()["reviewer"].Instructions) {
+		t.Fatal("specialist did not retain inherited reviewer instructions")
+	}
+	if !Blocking(all["security"], []model.Finding{{Severity: "high"}}) {
+		t.Fatal("built-in security blocking severity was not preserved")
+	}
+}
+
+func TestRequiredReviewRosterRetainsParentWithoutMatchingValidator(t *testing.T) {
+	all, err := Load(map[string]string{
+		".aih/roles/animation.yaml": "name: animation-architecture\nextends: reviewer\ntriggers:\n  paths: [src/animation/**]\n",
+		".aih/roles/visual.yaml":    "name: visual-quality\nextends: designer\ntriggers:\n  paths: [web/**]\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	required, err := Required(all, &model.Task{Risk: "low", UI: true}, []string{"internal/roles/roles.go"}, "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, len(required))
+	for i, role := range required {
+		got[i] = role.Name
+	}
+	want := []string{"designer", "qa", "reviewer"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("review roster = %v, want %v", got, want)
+	}
+}
+
+func TestRequiredReviewRosterKeepsParentForIndependentOverrideAndNonReviewStage(t *testing.T) {
+	all, err := Load(map[string]string{
+		".aih/roles/independent.yaml": "name: independent-animation\nextends: reviewer\nindependent_parent_review: true\ntriggers:\n  paths: [src/animation/**]\n",
+		".aih/roles/pre.yaml":         "name: pre-visual\nextends: designer\nstage: pre-implementation\ntriggers:\n  paths: [src/animation/**]\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	required, err := Required(all, &model.Task{Risk: "low", UI: true}, []string{"src/animation/timeline.go"}, "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, len(required))
+	for i, role := range required {
+		got[i] = role.Name
+	}
+	want := []string{"designer", "independent-animation", "qa", "reviewer"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("review roster = %v, want %v", got, want)
+	}
+	_, reason := ReviewRoster(required)
+	if !strings.Contains(reason, "reviewer retained with independent-animation (independent_parent_review)") {
+		t.Fatalf("independent override reason missing: %s", reason)
+	}
+}
+func TestIndependentReviewOverrideWinsWithMultipleSpecialists(t *testing.T) {
+	all, err := Load(map[string]string{
+		".aih/roles/independent.yaml": "name: independent-animation\nextends: reviewer\nindependent_parent_review: true\ntriggers:\n  paths: [src/animation/**]\n",
+		".aih/roles/standard.yaml":    "name: standard-animation\nextends: reviewer\ntriggers:\n  paths: [src/animation/**]\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	required, err := Required(all, &model.Task{Risk: "low"}, []string{"src/animation/timeline.go"}, "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, reason := ReviewRoster(required)
+	if strings.Join(names, ",") != "independent-animation,qa,reviewer,standard-animation" {
+		t.Fatalf("independent parent was dropped: %v", names)
+	}
+	if !strings.Contains(reason, "reviewer retained with independent-animation (independent_parent_review)") || strings.Contains(reason, "retained with independent-animation, standard-animation") {
+		t.Fatalf("inaccurate roster reason: %s", reason)
 	}
 }
 func TestContextFilteringAndCanonicalRules(t *testing.T) {
