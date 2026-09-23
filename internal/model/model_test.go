@@ -235,3 +235,20 @@ func TestOperatorGuidanceScopesFixAndDeduplicates(t *testing.T) {
 		}
 	}
 }
+
+func TestOperatorGuidanceUsesBaseBeforeFirstCheckoutAndExpiresByPolicy(t *testing.T) {
+	base, configHash, rules := strings.Repeat("a", 40), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	task := &Task{ID: "fresh", State: Ready, BaseSHA: base}
+	if err := QueueOperatorGuidance(task, "operator", base, configHash, rules, "Start with the supplied contract."); err != nil {
+		t.Fatal(err)
+	}
+	if got := EligibleGuidance(task, configHash, rules); len(got) != 1 {
+		t.Fatalf("fresh READY guidance missing: %#v", got)
+	}
+	if got := EligibleGuidance(task, strings.Repeat("d", 64), rules); len(got) != 0 {
+		t.Fatalf("stale policy guidance delivered: %#v", got)
+	}
+	if got := EligibleGuidance(task, configHash, strings.Repeat("e", 64)); len(got) != 0 {
+		t.Fatalf("stale rule guidance delivered: %#v", got)
+	}
+}

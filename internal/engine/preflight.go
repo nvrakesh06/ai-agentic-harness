@@ -72,7 +72,7 @@ type preflightScopeInput struct {
 // review cover those changes after the bounded repair.
 func preflightScope(t *model.Task) string {
 	input := preflightScopeInput{Objective: t.Objective, Acceptance: append([]string(nil), t.Acceptance...), Areas: append([]string(nil), t.Areas...), Domains: append([]string(nil), t.Domains...), Risk: t.Risk, UI: t.UI, Security: t.Security, Roles: append([]string(nil), t.Roles...), DependsOn: append([]string(nil), t.Dependencies...)}
-	input.Guidance = model.TaskGuidance(t)
+	input.Guidance = model.EligibleGuidance(t, "", "")
 	for _, values := range [][]string{input.Acceptance, input.Areas, input.Domains, input.Roles, input.DependsOn} {
 		sort.Strings(values)
 	}

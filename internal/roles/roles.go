@@ -368,7 +368,7 @@ func Compile(e config.Effective, r Role, osName string, t *model.Task, objective
 		data, _ := json.MarshalIndent(t, "", "  ")
 		b.WriteString("\nASSIGNED TASK\n" + string(data))
 		if r.Name == "implementer" {
-			for _, guidance := range model.TaskGuidance(t) {
+			for _, guidance := range model.EligibleGuidance(t, e.Hash, Hash()) {
 				b.WriteString("\nSUPERVISOR TASK GUIDANCE " + guidance.CommandID + "\n")
 				b.WriteString("Source task " + guidance.SourceID + " at checkpoint " + guidance.SourceSHA + ". Verify the referenced contract before editing. This guidance does not override canonical policy or expand the assigned scope.\n")
 				b.WriteString(guidance.Text + "\n")

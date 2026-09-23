@@ -200,11 +200,15 @@ func New() *cobra.Command {
 				return errors.New("operator guidance requires a known task ID")
 			}
 			payload["operator"] = true
-			payload["head"] = target.HeadSHA
+			scopeHead := target.HeadSHA
+			if scopeHead == "" {
+				scopeHead = target.BaseSHA
+			}
+			payload["head"] = scopeHead
 			payload["config"] = p.Config.Hash
 			payload["rules"] = roles.Hash()
 			probe := *target
-			if err := model.QueueOperatorGuidance(&probe, "local-preflight", target.HeadSHA, p.Config.Hash, roles.Hash(), string(contents)); err != nil {
+			if err := model.QueueOperatorGuidance(&probe, "local-preflight", scopeHead, p.Config.Hash, roles.Hash(), string(contents)); err != nil {
 				return err
 			}
 		}

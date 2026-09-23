@@ -133,6 +133,23 @@ func TaskGuidance(t *Task) []Guidance {
 	return out
 }
 
+// EligibleGuidance keeps cross-task corrections compatible while making
+// operator guidance one-shot exact-scope input. Before first checkout the
+// durable base revision is the task's stable scope head.
+func EligibleGuidance(t *Task, configHash, rules string) []Guidance {
+	head := t.HeadSHA
+	if head == "" {
+		head = t.BaseSHA
+	}
+	var out []Guidance
+	for _, item := range TaskGuidance(t) {
+		if !item.Operator || (item.Head == head && item.Config == configHash && item.Rules == rules) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
 func QueueGuidance(target, source *Task, commandID, message string) error {
 	if target == nil || source == nil || target.ID == source.ID || target.ObjectiveID == "" || target.ObjectiveID != source.ObjectiveID {
 		return errors.New("guidance requires distinct tasks in the same objective")
@@ -162,7 +179,14 @@ func QueueGuidance(target, source *Task, commandID, message string) error {
 // and active policy hashes. It shares the durable delivery/replay mechanism
 // with cross-task guidance, but requires no synthetic source task.
 func QueueOperatorGuidance(target *Task, commandID, head, configHash, rules, message string) error {
-	if target == nil || (target.State != Ready && target.State != Running && target.State != Fix && target.State != SyncRequired) || target.HeadSHA != head || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(head) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(configHash) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(rules) {
+	if target == nil {
+		return errors.New("operator guidance requires a target")
+	}
+	scopeHead := target.HeadSHA
+	if scopeHead == "" {
+		scopeHead = target.BaseSHA
+	}
+	if (target.State != Ready && target.State != Running && target.State != Fix && target.State != SyncRequired) || scopeHead != head || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(head) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(configHash) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(rules) {
 		return errors.New("operator guidance requires a READY, RUNNING, FIX, or SYNC_REQUIRED exact task head and policy scope")
 	}
 	message = strings.TrimSpace(message)
