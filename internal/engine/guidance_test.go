@@ -71,6 +71,25 @@ func TestOperatorGuidanceRejectsStaleScopeAndReplaysLateWorker(t *testing.T) {
 	}
 }
 
+func TestQueuedOperatorGuidanceDuplicateIsVisibleAtAcceptance(t *testing.T) {
+	head, configHash, rules := strings.Repeat("a", 40), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	s := model.NewSnapshot("project123")
+	target := &model.Task{ID: "ui", State: model.Ready, HeadSHA: head}
+	s.Tasks[target.ID] = target
+	payload, _ := json.Marshal(guidanceCommand{Operator: true, Head: head, Config: configHash, Rules: rules, Text: "Keep the recovery bounded."})
+	cmd := store.Command{ID: "one", Kind: "guide", Target: target.ID, Payload: string(payload)}
+	if _, err := validateGuidanceCommand(s, cmd, configHash, rules); err != nil {
+		t.Fatal(err)
+	}
+	if err := model.QueueOperatorGuidance(target, cmd.ID, head, configHash, rules, "Keep the recovery bounded."); err != nil {
+		t.Fatal(err)
+	}
+	cmd.ID = "two"
+	if _, err := validateGuidanceCommand(s, cmd, configHash, rules); err == nil {
+		t.Fatal("duplicate queued operator guidance was accepted")
+	}
+}
+
 func TestCompletedWorkerReplaysLateGuidanceAfterCheckpoint(t *testing.T) {
 	source := &model.Task{ID: "api", ObjectiveID: "objective", State: model.Running, HeadSHA: strings.Repeat("a", 40)}
 	target := &model.Task{ID: "ui", ObjectiveID: "objective", State: model.Running}

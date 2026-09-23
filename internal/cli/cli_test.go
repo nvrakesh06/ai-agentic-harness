@@ -92,6 +92,34 @@ func TestInspectionWithoutProject(t *testing.T) {
 	}
 }
 
+func TestGuideOperatorFlagsAndSizeRejectBeforeProjectOpen(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "guidance.txt")
+	if err := os.WriteFile(file, []byte("use the bounded contract"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"guide", "task", "--operator", "--from", "source", "--file", file}, "exactly one of --from or --operator"},
+		{[]string{"guide", "task", "--file", file}, "exactly one of --from or --operator"},
+	} {
+		cmd := New()
+		cmd.SetArgs(tc.args)
+		if err := cmd.ExecuteContext(context.Background()); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+	}
+	if err := os.WriteFile(file, []byte(strings.Repeat("x", model.MaxGuidanceBytes+1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := New()
+	cmd.SetArgs([]string{"guide", "task", "--operator", "--file", file})
+	if err := cmd.ExecuteContext(context.Background()); err == nil || !strings.Contains(err.Error(), "1..1600 UTF-8 bytes") {
+		t.Fatalf("oversize guidance error = %v", err)
+	}
+}
+
 func TestStatusShowsVerificationRetryRoute(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "state.db"))
