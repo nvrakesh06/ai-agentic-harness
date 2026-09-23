@@ -80,6 +80,20 @@ Critical/high findings block by default. Custom roles can add blocking severitie
 Medium findings create stable-ID follow-up issues; low/nit findings do not create
 churn. Native check success does not replace independent acceptance review.
 
+Review roles run concurrently and decide their own acceptance domain independently.
+An empty peer-review map is intentional and never a reason to wait or block. Native
+check evidence includes the exact task head/config/rules plus the configured check
+identity, executable basename, exit status, and stdout byte/line counts. Successful
+stdout content, command arguments, and environment values do not enter portable
+state or the GitHub PR. A restricted review worker's missing runtime or inability
+to reproduce those checks is not itself a finding when supervisor evidence is
+present. A reviewer that needs refreshed
+supervisor-owned evidence requests it without asking a human to run tools; AIH
+reruns checks and retries that role once. A repeated evidence request becomes a
+bounded verification failure. Only consequential product, risk, credential or
+irreversible decisions become human blockers. Concrete findings are preserved and
+take the configured fix route even when the same result also requests evidence.
+
 ## Context isolation
 
 The compiler combines embedded core rules, a role delta, canonical root and

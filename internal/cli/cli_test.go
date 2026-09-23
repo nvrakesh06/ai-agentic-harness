@@ -200,6 +200,34 @@ func TestStatusBoundsHistoricalWorkerRunsButKeepsActive(t *testing.T) {
 	}
 }
 
+func TestStatusShowsReviewCoordinationAndEvidenceRefresh(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	snapshot := model.NewSnapshot("review-project")
+	snapshot.Tasks["task"] = &model.Task{ID: "task", Title: "review", State: model.Review}
+	if err = db.Save("0123456789abcdef", snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Event("task", "run", "qa", "codex", "review_evidence_refresh_requested", "roles=qa head=abc"); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	cmd := New()
+	cmd.SetOut(&out)
+	if err = showStatus(cmd, &engine.Project{DB: db, Dir: dir}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"independent peer roles", "Review lifecycle", "review_evidence_refresh_requested", "roles=qa"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("review status missing %q: %s", want, out.String())
+		}
+	}
+}
+
 func TestStatusDistinguishesLocalAndDurableLeaseHeartbeats(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "state.db"))

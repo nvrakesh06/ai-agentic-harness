@@ -34,6 +34,152 @@ func (e *checkFailure) Error() string {
 }
 func (e *checkFailure) Unwrap() error { return e.err }
 
+func passedCheckEvidence(check config.Check, output string) string {
+	state := "captured"
+	lines := 0
+	if output == "" {
+		state = "empty"
+	} else {
+		lines = strings.Count(output, "\n")
+		if !strings.HasSuffix(output, "\n") {
+			lines++
+		}
+	}
+	return fmt.Sprintf("check=%q command=%q exit=0 stdout=%s stdout_bytes=%d stdout_lines=%d", check.Name, filepath.Base(check.Command[0]), state, len([]byte(output)), lines)
+}
+
+type reviewOutcome struct {
+	result provider.Result
+	err    error
+}
+
+type reviewAssessment struct {
+	findings []model.Finding
+	blocking int
+	evidence []int
+	human    int
+	failure  error
+}
+
+func supervisorEvidenceText(text string) bool {
+	text = strings.ToLower(text)
+	for _, decision := range []string{"product decision", "choose whether", "accept risk", "authorize an exception", "approve an exception", "production access", "destructive migration", "provide credentials", "threat model", "security boundary", "trusted workspace", "race condition"} {
+		if strings.Contains(text, decision) {
+			return false
+		}
+	}
+	evidence := false
+	for _, marker := range []string{"verification evidence", "native verification", "native check", "native logs", "test output", "validation output", "check output", "runtime evidence", "review evidence", "peer review", "peer approval", "independent review", "exact-head", "current-head", "cannot run", "could not run", "tool unavailable"} {
+		if strings.Contains(text, marker) {
+			evidence = true
+			break
+		}
+	}
+	toolMissing := strings.Contains(text, "node") || strings.Contains(text, "npm") || strings.Contains(text, "bun")
+	environmentMissing := strings.Contains(text, "missing") || strings.Contains(text, "lack") || strings.Contains(text, "unavailable") || strings.Contains(text, "cannot") || strings.Contains(text, "could not")
+	evidence = evidence || (toolMissing && environmentMissing)
+	if !evidence {
+		return false
+	}
+	for _, request := range []string{"provide", "rerun", "run the", "missing", "lack", "unavailable", "cannot", "can't", "could not", "need"} {
+		if strings.Contains(text, request) {
+			return true
+		}
+	}
+	return false
+}
+
+func supervisorEvidenceRequest(result provider.Result) bool {
+	if result.Status != "blocked" && result.Status != "in_progress" {
+		return false
+	}
+	return supervisorEvidenceText(strings.Join([]string{result.Question, result.Summary, strings.Join(result.Risks, " ")}, " "))
+}
+
+func supervisorEvidenceOnlyFinding(result provider.Result, finding model.Finding) bool {
+	if result.Status != "completed" || strings.ToLower(finding.Category) != "verification" {
+		return false
+	}
+	switch strings.ToLower(finding.Severity) {
+	case "medium", "low", "nit":
+		return supervisorEvidenceText(strings.Join([]string{finding.Reason, finding.Resolution}, " "))
+	default:
+		return false
+	}
+}
+
+func assessReviews(required []roles.Role, outcomes []reviewOutcome) reviewAssessment {
+	assessment := reviewAssessment{blocking: -1, human: -1}
+	for i, role := range required {
+		result := outcomes[i].result
+		retained := make([]model.Finding, 0, len(result.Findings))
+		for _, finding := range result.Findings {
+			if supervisorEvidenceOnlyFinding(result, finding) {
+				continue
+			}
+			finding.Role = role.Name
+			assessment.findings = append(assessment.findings, finding)
+			retained = append(retained, finding)
+		}
+		if assessment.blocking == -1 && roles.Blocking(role, retained) {
+			assessment.blocking = i
+		}
+		if outcomes[i].err != nil && assessment.failure == nil {
+			assessment.failure = outcomes[i].err
+		}
+	}
+	for i, role := range required {
+		if outcomes[i].err != nil {
+			continue
+		}
+		result := outcomes[i].result
+		switch result.Status {
+		case "completed":
+		case "blocked", "in_progress":
+			if supervisorEvidenceRequest(result) {
+				assessment.evidence = append(assessment.evidence, i)
+			} else if result.Status == "blocked" && assessment.human == -1 {
+				assessment.human = i
+			} else if assessment.failure == nil {
+				assessment.failure = fmt.Errorf("%s did not complete: %s", role.Name, result.Summary)
+			}
+		default:
+			if assessment.failure == nil {
+				assessment.failure = fmt.Errorf("%s did not complete: %s", role.Name, result.Summary)
+			}
+		}
+	}
+	return assessment
+}
+
+func reviewEvidencePayload(evidence *model.Evidence, attempt int) string {
+	copy := *evidence
+	copy.Reviews = map[string]string{}
+	payload := struct {
+		*model.Evidence
+		Attempt int    `json:"review_attempt"`
+		Policy  string `json:"review_policy"`
+	}{Evidence: &copy, Attempt: attempt, Policy: "Peer reviews are concurrent and independent; the empty reviews map is intentional. Supervisor check evidence is exact-head metadata; successful stdout content, command arguments, and environment values are intentionally omitted."}
+	serialized, _ := json.Marshal(payload)
+	return string(serialized)
+}
+
+func appendUniqueFindings(existing []model.Finding, additions []model.Finding) []model.Finding {
+	for _, addition := range additions {
+		duplicate := false
+		for _, current := range existing {
+			if current.Severity == addition.Severity && current.Category == addition.Category && current.Location == addition.Location && current.Reason == addition.Reason && current.Role == addition.Role {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			existing = append(existing, addition)
+		}
+	}
+	return existing
+}
+
 func applicable(check config.Check) bool {
 	if len(check.Platforms) == 0 {
 		return true
@@ -735,7 +881,7 @@ func Verify(ctx context.Context, e config.Effective, dir string) ([]string, erro
 		if err != nil {
 			return checked, &checkFailure{name: check.Name, command: filepath.Base(check.Command[0]), err: err, output: short(safety.Redact(out), 8000)}
 		}
-		checked = append(checked, check.Name)
+		checked = append(checked, passedCheckEvidence(check, out))
 	}
 	if len(checked) == 0 {
 		return nil, errors.New("no applicable verification checks; configure .aih/project.yaml on main")
@@ -758,6 +904,45 @@ func (c *Controller) checks(ctx context.Context, e config.Effective, dir string)
 	}
 	return Verify(ctx, e, dir)
 }
+
+func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Task, dir, diff string, evidence *model.Evidence, attempt int, required []roles.Role) []reviewOutcome {
+	outcomes := make([]reviewOutcome, len(required))
+	payload := reviewEvidencePayload(evidence, attempt)
+	var reviews sync.WaitGroup
+	for i, role := range required {
+		reviews.Add(1)
+		go func() {
+			defer reviews.Done()
+			outcomes[i].result, outcomes[i].err = c.role(c.ctx, effective, role, task, dir, task.Objective, diff, payload)
+		}()
+	}
+	reviews.Wait()
+	return outcomes
+}
+
+func (c *Controller) preserveReviewFindings(id string, findings []model.Finding) error {
+	if len(findings) == 0 {
+		return nil
+	}
+	return c.mutate(func(s *model.Snapshot) error {
+		s.Tasks[id].Findings = appendUniqueFindings(s.Tasks[id].Findings, findings)
+		return nil
+	})
+}
+
+func (c *Controller) reviewFollowups(task *model.Task, findings []model.Finding) error {
+	for _, finding := range findings {
+		if finding.Severity != "medium" {
+			continue
+		}
+		key := fmt.Sprintf("%s-followup-%x", task.ID, sha256.Sum256([]byte(finding.Role+finding.Location+finding.Reason)))
+		if _, err := c.P.Hub.EnsureIssue(c.ctx, key, "Follow-up: "+short(finding.Reason, 90), fmt.Sprintf("From #%d\n\n%s\n\n%s", task.Issue, finding.Reason, finding.Resolution)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (c *Controller) verifyReview(id string) error {
 	effective, e := c.syncTask(c.ctx, id)
 	if e != nil {
@@ -828,58 +1013,95 @@ func (c *Controller) verifyReview(id string) error {
 		return e
 	}
 	c.mirror(id)
-	type reviewOutcome struct {
-		result provider.Result
-		err    error
+	outcomes := c.runReviewAttempt(effective, t, dir, diff, evidence, 1, required)
+	assessment := assessReviews(required, outcomes)
+	if e = c.preserveReviewFindings(id, assessment.findings); e != nil {
+		return e
 	}
-	outcomes := make([]reviewOutcome, len(required))
-	serialized, _ := json.Marshal(evidence)
-	var reviews sync.WaitGroup
 	for i, role := range required {
-		reviews.Add(1)
-		go func() {
-			defer reviews.Done()
-			outcomes[i].result, outcomes[i].err = c.role(c.ctx, effective, role, t, dir, t.Objective, diff, string(serialized))
-		}()
+		if outcomes[i].result.Status == "completed" {
+			evidence.Reviews[role.Name] = outcomes[i].result.Summary
+		}
 	}
-	reviews.Wait()
-	for i, role := range required {
-		result := outcomes[i].result
-		if outcomes[i].err != nil {
-			return outcomes[i].err
+	if e = c.publishReviewProgress(id, evidence); e != nil {
+		return e
+	}
+	if e = c.reviewFollowups(t, assessment.findings); e != nil {
+		return e
+	}
+	if assessment.blocking >= 0 {
+		role := required[assessment.blocking]
+		_ = c.P.DB.Event(id, t.RunID, role.Name, effective.Project.Provider, "review_finding_fix", outcomes[assessment.blocking].result.Summary)
+		c.retry(id, role.Name, outcomes[assessment.blocking].result.Summary)
+		return c.refreshDraftPR(id)
+	}
+	if assessment.human >= 0 {
+		role := required[assessment.human]
+		result := outcomes[assessment.human].result
+		_ = c.P.DB.Event(id, t.RunID, role.Name, effective.Project.Provider, "human_decision_required", result.Question)
+		c.block(id, result.Question, result.Summary, model.SyncRequired)
+		return c.refreshDraftPR(id)
+	}
+	if assessment.failure != nil {
+		return assessment.failure
+	}
+	if len(assessment.evidence) > 0 {
+		refreshRoles := make([]roles.Role, 0, len(assessment.evidence))
+		names := make([]string, 0, len(assessment.evidence))
+		for _, index := range assessment.evidence {
+			refreshRoles = append(refreshRoles, required[index])
+			names = append(names, required[index].Name)
 		}
-		if result.Status == "blocked" {
-			c.block(id, result.Question, result.Summary, model.SyncRequired)
-			return nil
+		_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_requested", "roles="+strings.Join(names, ",")+" head="+t.HeadSHA)
+		checks, checkErr := c.checks(c.ctx, effective, dir)
+		if checkErr != nil {
+			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_failed", short(checkErr.Error(), 500))
+			return checkErr
 		}
-		if result.Status != "completed" {
-			return fmt.Errorf("%s did not complete: %s", role.Name, result.Summary)
-		}
-		for i := range result.Findings {
-			result.Findings[i].Role = role.Name
-		}
-		if e = c.mutate(func(s *model.Snapshot) error {
-			task := s.Tasks[id]
-			task.Findings = append(task.Findings, result.Findings...)
-			task.Evidence.Reviews[role.Name] = result.Summary
-			return nil
-		}); e != nil {
+		evidence.Checks = checks
+		evidence.At = time.Now().UTC()
+		if e = c.publishReviewProgress(id, evidence); e != nil {
 			return e
 		}
-		c.mirror(id)
-		if roles.Blocking(role, result.Findings) {
-			c.retry(id, role.Name, result.Summary)
-			return nil
+		refreshed := c.runReviewAttempt(effective, t, dir, diff, evidence, 2, refreshRoles)
+		refreshAssessment := assessReviews(refreshRoles, refreshed)
+		if e = c.preserveReviewFindings(id, refreshAssessment.findings); e != nil {
+			return e
 		}
-		evidence.Reviews[role.Name] = result.Summary
-		for _, f := range result.Findings {
-			if f.Severity == "medium" {
-				key := fmt.Sprintf("%s-followup-%x", id, sha256.Sum256([]byte(f.Role+f.Location+f.Reason)))
-				if _, e = c.P.Hub.EnsureIssue(c.ctx, key, "Follow-up: "+short(f.Reason, 90), fmt.Sprintf("From #%d\n\n%s\n\n%s", t.Issue, f.Reason, f.Resolution)); e != nil {
-					return e
-				}
+		for i, role := range refreshRoles {
+			if refreshed[i].result.Status == "completed" {
+				evidence.Reviews[role.Name] = refreshed[i].result.Summary
 			}
 		}
+		if e = c.publishReviewProgress(id, evidence); e != nil {
+			return e
+		}
+		if e = c.reviewFollowups(t, refreshAssessment.findings); e != nil {
+			return e
+		}
+		if refreshAssessment.blocking >= 0 {
+			role := refreshRoles[refreshAssessment.blocking]
+			_ = c.P.DB.Event(id, t.RunID, role.Name, effective.Project.Provider, "review_finding_fix", refreshed[refreshAssessment.blocking].result.Summary)
+			c.retry(id, role.Name, refreshed[refreshAssessment.blocking].result.Summary)
+			return c.refreshDraftPR(id)
+		}
+		if refreshAssessment.human >= 0 {
+			role := refreshRoles[refreshAssessment.human]
+			result := refreshed[refreshAssessment.human].result
+			_ = c.P.DB.Event(id, t.RunID, role.Name, effective.Project.Provider, "human_decision_required", result.Question)
+			c.block(id, result.Question, result.Summary, model.SyncRequired)
+			return c.refreshDraftPR(id)
+		}
+		if refreshAssessment.failure != nil {
+			return refreshAssessment.failure
+		}
+		if len(refreshAssessment.evidence) > 0 {
+			reason := "reviewer requested supervisor-owned evidence again after one exact-head native refresh: " + strings.Join(names, ",")
+			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_failed", reason)
+			c.retry(id, "verification", reason)
+			return c.refreshDraftPR(id)
+		}
+		_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_completed", "roles="+strings.Join(names, ",")+" head="+t.HeadSHA)
 	}
 	if e = c.mutate(func(s *model.Snapshot) error {
 		task := s.Tasks[id]
@@ -896,6 +1118,25 @@ func (c *Controller) verifyReview(id string) error {
 	c.mirror(id)
 	return nil
 }
+
+func (c *Controller) publishReviewProgress(id string, evidence *model.Evidence) error {
+	if err := c.mutate(func(s *model.Snapshot) error {
+		s.Tasks[id].Evidence = evidence
+		return nil
+	}); err != nil {
+		return err
+	}
+	return c.refreshDraftPR(id)
+}
+
+func (c *Controller) refreshDraftPR(id string) error {
+	if err := c.updatePR(id, true); err != nil {
+		return err
+	}
+	c.mirror(id)
+	return nil
+}
+
 func (c *Controller) ensureDraftPR(id string) error {
 	t := c.Snapshot().Tasks[id]
 	if t.PR == 0 {

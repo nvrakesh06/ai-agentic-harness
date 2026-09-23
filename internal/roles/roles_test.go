@@ -61,6 +61,15 @@ func TestBuiltinPromptsKeepOrchestrationInSupervisor(t *testing.T) {
 	}
 }
 
+func TestReviewPromptsRequirePeerIndependenceAndSupervisorEvidenceRouting(t *testing.T) {
+	prompt := Compile(config.Effective{Files: map[string]string{}}, Builtins()["qa"], "windows", &model.Task{ID: "task", Areas: []string{"src"}}, "review", "diff", `{"reviews":{}}`)
+	for _, value := range []string{"Peer reviews run concurrently and independently", "no peer approvals", "Do not wait for, require", "exact-head native evidence", "without asking a human to run tools", "missing Node, npm, Bun", "not a finding", "consequential human decision", "structured finding"} {
+		if !strings.Contains(prompt, value) {
+			t.Fatalf("review prompt missing %q: %s", value, prompt)
+		}
+	}
+}
+
 func TestOrchestratorReceivesExactCustomRoleNames(t *testing.T) {
 	e := config.Effective{Files: map[string]string{
 		".aih/roles/animation.yaml": "name: animation-architecture\nextends: reviewer\n",
