@@ -412,7 +412,14 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 	if asJSON {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
-		return enc.Encode(s)
+		machineHeavy := p.Machine.MaxHeavyChecks
+		if machineHeavy == 0 {
+			machineHeavy = 1
+		}
+		return enc.Encode(struct {
+			*model.Snapshot
+			MachineMaxHeavyChecks int `json:"machine_max_heavy_checks"`
+		}{s, machineHeavy})
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Project %s · durable revision %d (%s)\n", s.Project, s.Revision, shortSHA(h))
 	fmt.Fprintf(cmd.OutOrStdout(), "Controller: %s · durable heartbeat %s · lease expires %s\n", s.Controller.Machine, s.Controller.Heartbeat.Format(time.RFC3339), s.Controller.Expires.Format(time.RFC3339))
@@ -445,7 +452,11 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 			light++
 		}
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Checks: %d heavy / %d max, %d light / %d max\n", heavy, capacity.MaxHeavyChecks, light, capacity.MaxLightChecks)
+	machineHeavy := p.Machine.MaxHeavyChecks
+	if machineHeavy == 0 {
+		machineHeavy = 1
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Checks: %d heavy / %d project max / %d machine max, %d light / %d max\n", heavy, capacity.MaxHeavyChecks, machineHeavy, light, capacity.MaxLightChecks)
 	for _, check := range capacity.Verification {
 		at := check.QueuedAt
 		if check.Phase == "running" {

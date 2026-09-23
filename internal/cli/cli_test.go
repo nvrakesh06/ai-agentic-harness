@@ -286,7 +286,7 @@ func TestStatusShowsMachineReadableCapacityAndHumanReason(t *testing.T) {
 	if err = showStatus(cmd, p, false, false); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Writers: 1 active / 2 target / 3 max", "Readers: 2 active / 4 max", "Checks: 0 heavy / 1 max", "WAITING_CHECK_CAPACITY", "waiting for a verification slot", "dependencies", "Next safe work: task-b after task-a"} {
+	for _, want := range []string{"Writers: 1 active / 2 target / 3 max", "Readers: 2 active / 4 max", "Checks: 0 heavy / 1 project max / 1 machine max", "WAITING_CHECK_CAPACITY", "waiting for a verification slot", "dependencies", "Next safe work: task-b after task-a"} {
 		if !strings.Contains(human.String(), want) {
 			t.Fatalf("human status omitted %q: %s", want, human.String())
 		}
@@ -296,7 +296,7 @@ func TestStatusShowsMachineReadableCapacityAndHumanReason(t *testing.T) {
 	if err = showStatus(cmd, p, false, true); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(machine.String(), `"target_active_writers": 2`) || !strings.Contains(machine.String(), `"underutilization_reason_code": "dependencies"`) || !strings.Contains(machine.String(), `"phase": "queued"`) {
+	if !strings.Contains(machine.String(), `"target_active_writers": 2`) || !strings.Contains(machine.String(), `"underutilization_reason_code": "dependencies"`) || !strings.Contains(machine.String(), `"phase": "queued"`) || !strings.Contains(machine.String(), `"machine_max_heavy_checks": 1`) {
 		t.Fatalf("JSON status omitted capacity fields: %s", machine.String())
 	}
 }
