@@ -16,25 +16,25 @@ func TestGuidanceCommandValidatesSourceAndTarget(t *testing.T) {
 	s.Tasks[source.ID], s.Tasks[target.ID] = source, target
 	payload, _ := json.Marshal(guidanceCommand{Source: "api", Text: "Use cli.ts with --port."})
 	cmd := store.Command{ID: "command", Kind: "guide", Target: "ui", Payload: string(payload)}
-	if _, err := validateGuidanceCommand(s, cmd); err != nil {
+	if _, err := validateGuidanceCommand(s, cmd, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(target.Decisions) != 0 {
 		t.Fatal("prevalidation mutated portable state")
 	}
 	source.HeadSHA = ""
-	if _, err := validateGuidanceCommand(s, cmd); err == nil {
+	if _, err := validateGuidanceCommand(s, cmd, "", ""); err == nil {
 		t.Fatal("uncheckpointed source accepted")
 	}
 	source.HeadSHA = strings.Repeat("a", 40)
 	cmd.Target = "missing"
-	if _, err := validateGuidanceCommand(s, cmd); err == nil {
+	if _, err := validateGuidanceCommand(s, cmd, "", ""); err == nil {
 		t.Fatal("unknown target accepted")
 	}
 	cmd.Target = "ui"
 	secret, _ := json.Marshal(guidanceCommand{Source: "api", Text: "Use token=abcdefghijklmnopqrstuvwxyz123456 in the launcher"})
 	cmd.Payload = string(secret)
-	if _, err := validateGuidanceCommand(s, cmd); err == nil {
+	if _, err := validateGuidanceCommand(s, cmd, "", ""); err == nil {
 		t.Fatal("secret-like guidance accepted for durable state")
 	}
 }
@@ -46,11 +46,17 @@ func TestOperatorGuidanceRejectsStaleScopeAndReplaysLateWorker(t *testing.T) {
 	s.Tasks[target.ID] = target
 	payload, _ := json.Marshal(guidanceCommand{Operator: true, Head: head, Config: configHash, Rules: rules, Text: "Use the owner-provided endpoint."})
 	cmd := store.Command{ID: "operator", Kind: "guide", Target: target.ID, Payload: string(payload)}
-	if _, err := validateGuidanceCommand(s, cmd); err != nil {
+	if _, err := validateGuidanceCommand(s, cmd, configHash, rules); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := validateGuidanceCommand(s, cmd, strings.Repeat("e", 64), rules); err == nil {
+		t.Fatal("stale operator config accepted")
+	}
+	if _, err := validateGuidanceCommand(s, cmd, configHash, strings.Repeat("f", 64)); err == nil {
+		t.Fatal("stale operator rules accepted")
+	}
 	target.HeadSHA = strings.Repeat("d", 40)
-	if _, err := validateGuidanceCommand(s, cmd); err == nil {
+	if _, err := validateGuidanceCommand(s, cmd, configHash, rules); err == nil {
 		t.Fatal("stale operator head accepted")
 	}
 	target.HeadSHA = head

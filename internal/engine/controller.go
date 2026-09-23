@@ -491,7 +491,7 @@ type guidanceCommand struct {
 }
 type guidanceRejection struct{ error }
 
-func validateGuidanceCommand(s *model.Snapshot, cmd store.Command) (guidanceCommand, error) {
+func validateGuidanceCommand(s *model.Snapshot, cmd store.Command, configHash, rulesHash string) (guidanceCommand, error) {
 	var guidance guidanceCommand
 	if err := json.Unmarshal([]byte(cmd.Payload), &guidance); err != nil {
 		return guidance, errors.New("invalid guidance payload")
@@ -501,6 +501,9 @@ func validateGuidanceCommand(s *model.Snapshot, cmd store.Command) (guidanceComm
 	}
 	target := s.Tasks[cmd.Target]
 	if guidance.Operator {
+		if guidance.Config != configHash || guidance.Rules != rulesHash {
+			return guidance, errors.New("operator guidance policy scope is stale")
+		}
 		if target == nil {
 			return guidance, errors.New("operator guidance requires known task ID")
 		}
@@ -574,7 +577,7 @@ func (c *Controller) commands() (bool, error) {
 			}
 		}
 		if cmd.Kind == "guide" {
-			guidance, err := validateGuidanceCommand(s, cmd)
+			guidance, err := validateGuidanceCommand(s, cmd, c.P.Config.Hash, roles.Hash())
 			if err != nil {
 				_ = c.P.DB.Ack(cmd.ID, err.Error())
 				continue

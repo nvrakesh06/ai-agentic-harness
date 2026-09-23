@@ -162,8 +162,8 @@ func QueueGuidance(target, source *Task, commandID, message string) error {
 // and active policy hashes. It shares the durable delivery/replay mechanism
 // with cross-task guidance, but requires no synthetic source task.
 func QueueOperatorGuidance(target *Task, commandID, head, configHash, rules, message string) error {
-	if target == nil || (target.State != Ready && target.State != Fix && target.State != SyncRequired) || target.HeadSHA != head || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(head) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(configHash) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(rules) {
-		return errors.New("operator guidance requires a READY, FIX, or SYNC_REQUIRED exact task head and policy scope")
+	if target == nil || (target.State != Ready && target.State != Running && target.State != Fix && target.State != SyncRequired) || target.HeadSHA != head || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(head) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(configHash) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(rules) {
+		return errors.New("operator guidance requires a READY, RUNNING, FIX, or SYNC_REQUIRED exact task head and policy scope")
 	}
 	message = strings.TrimSpace(message)
 	if message == "" || len(message) > MaxGuidanceBytes || !utf8.ValidString(message) || strings.ContainsRune(message, '\x00') || len(TaskGuidance(target)) >= MaxTaskGuidance {

@@ -225,7 +225,7 @@ func TestGuidanceIsBoundedPortableAndScopedToParallelTasks(t *testing.T) {
 
 func TestOperatorGuidanceScopesFixAndDeduplicates(t *testing.T) {
 	head, configHash, rules := strings.Repeat("a", 40), strings.Repeat("b", 64), strings.Repeat("c", 64)
-	for _, state := range []State{Ready, Fix, SyncRequired} {
+	for _, state := range []State{Ready, Running, Fix, SyncRequired} {
 		task := &Task{ID: "task", State: state, HeadSHA: head}
 		if err := QueueOperatorGuidance(task, "operator-1", head, configHash, rules, "Keep the listener owned by the task."); err != nil {
 			t.Fatalf("%s operator guidance rejected: %v", state, err)
