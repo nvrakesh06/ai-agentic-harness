@@ -87,7 +87,7 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 		switch r.URL.Path {
 		case "/":
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte(`<!doctype html><div id="root"></div><script src="/api-client.ts"></script>`))
+			_, _ = w.Write([]byte(`<!doctype html><div id="root"></div><img src="https://outside.invalid/pixel.png"><script>new WebSocket('ws://outside.invalid/socket')</script><script src="/api-client.ts"></script>`))
 		case "/api-client.ts":
 			http.NotFound(w, r)
 		default:
@@ -106,7 +106,7 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 		t.Fatalf("capture failed: %#v %v", visual, err)
 	}
 	network, err := os.ReadFile(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "network.txt"))
-	if err != nil || !strings.Contains(string(network), "404 /api-client.ts") {
+	if err != nil || !strings.Contains(string(network), "404 /api-client.ts") || !strings.Contains(string(network), "BLOCKED GET https://outside.invalid") || !strings.Contains(string(network), "BLOCKED WEBSOCKET ws://outside.invalid") {
 		t.Fatalf("real blank-page capture omitted failed module evidence: %q %v", network, err)
 	}
 	if !strings.HasPrefix(filepath.Join(state, filepath.FromSlash(visual.Manifest)), state) {
