@@ -253,6 +253,7 @@ type Worker struct {
 	EnvironmentBlocks map[string]int
 	Implementations   map[string]int
 	NoChanges         map[string]bool
+	ScratchTooling    map[string]bool
 }
 
 func (w *Worker) ImplementationCount(title string) int {
@@ -321,6 +322,18 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 		}
 		if e = os.WriteFile(filepath.Join(r.Directory, "feature-"+task.Title+".txt"), []byte("implemented\n"), 0600); e != nil {
 			return result, e
+		}
+		if w.ScratchTooling[task.Title] {
+			if r.Scratch == "" {
+				return result, errors.New("fixture worker was not given external scratch")
+			}
+			tooling := filepath.Join(r.Scratch, "npm-cache", "node_modules", "fixture-tool")
+			if e = os.MkdirAll(tooling, 0700); e != nil {
+				return result, e
+			}
+			if e = os.WriteFile(filepath.Join(tooling, "README.md"), []byte("token=sk-abcdefghijklmnopqrstuvwxyz012345"), 0600); e != nil {
+				return result, e
+			}
 		}
 		result.Summary = "Created feature-" + task.Title + ".txt"
 		if environmentBlock {

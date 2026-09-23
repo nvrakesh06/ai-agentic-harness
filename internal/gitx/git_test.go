@@ -7,6 +7,7 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -231,6 +232,40 @@ func TestWorktreeCheckpointAndRebase(t *testing.T) {
 	}
 	if _, e = g.Checkpoint(ctx, dir, "test"); e == nil {
 		t.Fatal("secret path checkpointed")
+	}
+}
+
+func TestCheckpointExcludesExternalWorkerScratchButNamesSourceSecretCandidate(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	dir := filepath.Join(f.P.Dir, "worktrees", "scratch")
+	if err = f.P.Git.Worktree(ctx, dir, "aih/scratch", "refs/remotes/origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "dashboard.txt"), []byte("implemented\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	scratch := filepath.Join(f.P.Dir, "scratch", "scratch", "npm-cache", "node_modules", "example")
+	if err = os.MkdirAll(scratch, 0700); err != nil {
+		t.Fatal(err)
+	}
+	secret := "token=sk-abcdefghijklmnopqrstuvwxyz012345"
+	if err = os.WriteFile(filepath.Join(scratch, "README.md"), []byte(secret), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.P.Git.Checkpoint(ctx, dir, "scratch"); err != nil {
+		t.Fatalf("external scratch affected checkpoint: %v", err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "credentials.txt"), []byte(secret), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.P.Git.Checkpoint(ctx, dir, "scratch")
+	if err == nil || !strings.Contains(err.Error(), "checkpoint candidate \"credentials.txt\"") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("source secret did not produce a safe candidate diagnostic: %v", err)
 	}
 }
 

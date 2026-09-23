@@ -273,9 +273,17 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 	}
 	runtimeDir := filepath.Join(c.P.Dir, "sessions", id)
 	prompt := roles.Compile(e, r, runtime.GOOS, t, objective, diff, evidence)
-	request := provider.Request{Directory: dir, Runtime: runtimeDir, Prompt: prompt, Role: r.Name, Model: resolved.RequestModel, Write: r.Name == "implementer", Timeout: time.Duration(e.Project.WorkerSeconds) * time.Second}
-	var result provider.Result
 	var err error
+	scratch := ""
+	if t != nil {
+		scratch, err = c.P.PrepareTaskScratch(t)
+		if err != nil {
+			return provider.Result{}, err
+		}
+		prompt += "\nWORKER SCRATCH\nUse the supplied external scratch directory for temporary tooling, package-manager caches, downloads, and generated diagnostics. Do not create worker caches or downloaded tools inside the source worktree. Scratch is local-only and is never checkpointed: " + scratch + "\n"
+	}
+	request := provider.Request{Directory: dir, Runtime: runtimeDir, Scratch: scratch, Prompt: prompt, Role: r.Name, Model: resolved.RequestModel, Write: r.Name == "implementer", Timeout: time.Duration(e.Project.WorkerSeconds) * time.Second}
+	var result provider.Result
 	if r.Name == "implementer" {
 		checkpointPrompt := prompt + "\n\nSOFT DEADLINE CHECKPOINT\nStop expanding scope. Inspect and preserve the existing worktree edits, run only the smallest relevant verification that fits, and immediately return the required structured result. Use completed only if the assigned acceptance criteria are satisfied; otherwise use in_progress and report the exact handoff, tests, and remaining risks. Do not undo safe existing work or begin unrelated improvements."
 		result, err = runWithCheckpoint(ctx, p, request, checkpointPrompt, request.Timeout, deadlineHooks{

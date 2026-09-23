@@ -20,6 +20,13 @@ func init() {
 	if name := os.Getenv("AIH_HELPER_ARGS"); name != "" {
 		_ = os.WriteFile(name, []byte(strings.Join(os.Args, "\n")), 0600)
 	}
+	if name := os.Getenv("AIH_HELPER_SCRATCH_ENV"); name != "" {
+		values := []string{}
+		for _, key := range []string{"AIH_SCRATCH", "TMP", "TEMP", "TMPDIR", "npm_config_cache", "NPM_CONFIG_CACHE"} {
+			values = append(values, key+"="+os.Getenv(key))
+		}
+		_ = os.WriteFile(name, []byte(strings.Join(values, "\n")), 0600)
+	}
 	args := strings.Join(os.Args, " ")
 	if expected := os.Getenv("AIH_EXPECT_MODEL"); expected != "" {
 		actual := ""
@@ -139,6 +146,58 @@ func TestCodexImplementerInvocationDisablesMultiAgentFeature(t *testing.T) {
 	}
 	if !strings.Contains(string(args), "--disable\nmulti_agent") {
 		t.Fatalf("implementer invocation did not disable the multi-agent feature: %s", args)
+	}
+}
+
+func TestWorkerScratchIsExternalAndConfiguresTemporaryToolCaches(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(t.TempDir(), "worktree")
+	scratch := filepath.Join(filepath.Dir(workspace), "scratch", "task")
+	envFile := filepath.Join(t.TempDir(), "scratch-env.txt")
+	if err = os.MkdirAll(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AIH_PROVIDER_HELPER", "1")
+	t.Setenv("AIH_HELPER_SCRATCH_ENV", envFile)
+	if _, err = (CLI{Kind: "codex", Executable: exe}).Run(context.Background(), Request{Directory: workspace, Runtime: filepath.Join(t.TempDir(), "run"), Scratch: scratch, Role: "implementer", Prompt: "fixture", Timeout: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	resolvedScratch, err := resolvedPath(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"AIH_SCRATCH=" + resolvedScratch,
+		"TMP=" + resolvedScratch,
+		"TEMP=" + resolvedScratch,
+		"TMPDIR=" + resolvedScratch,
+		"npm_config_cache=" + filepath.Join(resolvedScratch, "npm-cache"),
+		"NPM_CONFIG_CACHE=" + filepath.Join(resolvedScratch, "npm-cache"),
+	} {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("scratch environment omitted %q: %s", want, got)
+		}
+	}
+	if _, err = os.Stat(filepath.Join(scratch, "npm-cache")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = (CLI{Kind: "codex", Executable: exe}).Run(context.Background(), Request{Directory: workspace, Runtime: filepath.Join(t.TempDir(), "invalid-run"), Scratch: filepath.Join(workspace, "scratch"), Role: "implementer", Prompt: "fixture", Timeout: time.Second}); err == nil {
+		t.Fatal("scratch inside source worktree was accepted")
+	}
+	link := filepath.Join(filepath.Dir(workspace), "scratch-link")
+	if err = os.Symlink(workspace, link); err == nil {
+		if _, err = (CLI{Kind: "codex", Executable: exe}).Run(context.Background(), Request{Directory: workspace, Runtime: filepath.Join(t.TempDir(), "junction-run"), Scratch: link, Role: "implementer", Prompt: "fixture", Timeout: time.Second}); err == nil {
+			t.Fatal("scratch symlink into source worktree was accepted")
+		}
+	} else {
+		t.Logf("symlink fixture unavailable on this machine: %v", err)
 	}
 }
 func TestAdaptersLaunchAndFailures(t *testing.T) {

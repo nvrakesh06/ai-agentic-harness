@@ -274,6 +274,144 @@ func (p *Project) Attach(ctx context.Context) error {
 }
 func (p *Project) TaskPath(t *model.Task) string { return filepath.Join(p.Dir, "worktrees", t.ID) }
 
+// TaskScratchPath is machine-local disposable storage for worker tooling and
+// caches. It intentionally lives outside the checkpointed source worktree and
+// is derived from the durable task identity, so a resumed task keeps its cache.
+func (p *Project) TaskScratchPath(t *model.Task) string {
+	return filepath.Join(p.Dir, "scratch", t.ID)
+}
+
+func (p *Project) ValidTaskScratchPath(t *model.Task) (string, error) {
+	_, target, err := p.taskScratchTarget(t)
+	if err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+// PrepareTaskScratch creates a task's scratch directory only after resolving
+// both the scratch root and target to their intended project-local paths.
+// MkdirAll would follow a root junction before the provider gets a chance to
+// reject it, so the two known path components are created and checked one at a
+// time.
+func (p *Project) PrepareTaskScratch(t *model.Task) (string, error) {
+	root, target, err := p.taskScratchTarget(t)
+	if err != nil {
+		return "", err
+	}
+	if err = os.Mkdir(root, 0700); err != nil && !os.IsExist(err) {
+		return "", fmt.Errorf("create task scratch root: %w", err)
+	}
+	if _, _, err = p.taskScratchTarget(t); err != nil {
+		return "", err
+	}
+	if err = os.Mkdir(target, 0700); err != nil && !os.IsExist(err) {
+		return "", fmt.Errorf("create task scratch directory: %w", err)
+	}
+	_, target, err = p.taskScratchTarget(t)
+	if err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+// RemoveTaskScratch removes only a resolved task directory below this project's
+// scratch root. Task IDs originate in durable state, so a corrupted value must
+// fail closed rather than allow a path traversal or junction escape.
+func (p *Project) RemoveTaskScratch(t *model.Task) error {
+	root, target, err := p.taskScratchTarget(t)
+	if err != nil {
+		return err
+	}
+	if _, err = os.Lstat(root); os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect task scratch root: %w", err)
+	}
+	if _, err = os.Lstat(target); os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect task scratch path: %w", err)
+	}
+	// Resolve again immediately before the recursive operation. RemoveAll does
+	// not receive an unchecked lexical path that a root or task junction can
+	// redirect outside this project.
+	if _, _, err = p.taskScratchTarget(t); err != nil {
+		return err
+	}
+	return os.RemoveAll(target)
+}
+
+func (p *Project) taskScratchTarget(t *model.Task) (string, string, error) {
+	if t == nil || !safeTaskScratchID(t.ID) {
+		return "", "", errors.New("unsafe task scratch identifier")
+	}
+	project, err := filepath.EvalSymlinks(p.Dir)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve project directory: %w", err)
+	}
+	root := filepath.Join(project, "scratch")
+	target := filepath.Join(root, t.ID)
+	if err = mustResolveTo(root, root); err != nil {
+		return "", "", fmt.Errorf("unsafe task scratch root: %w", err)
+	}
+	if err = mustResolveTo(target, target); err != nil {
+		return "", "", fmt.Errorf("unsafe task scratch path: %w", err)
+	}
+	return root, target, nil
+}
+
+// mustResolveTo resolves existing components and appends only genuinely missing
+// suffixes. A direct Lstat rejects dangling links, which EvalSymlinks alone
+// would otherwise report as a missing path.
+func mustResolveTo(path, want string) error {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("symbolic link or junction is not allowed")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	resolved, err := resolvePath(path)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(resolved) != filepath.Clean(want) {
+		return fmt.Errorf("resolves to %q, want %q", resolved, want)
+	}
+	return nil
+}
+
+func resolvePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	missing := []string{}
+	for {
+		resolved, err := filepath.EvalSymlinks(abs)
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return resolved, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return "", err
+		}
+		missing = append(missing, filepath.Base(abs))
+		abs = parent
+	}
+}
+
+func safeTaskScratchID(id string) bool {
+	return id != "" && id != "." && id != ".." && filepath.Base(id) == id && !strings.ContainsAny(id, `/\\:`)
+}
+
 func outsideSource(root, home string) error {
 	return config.OutsideSource(root, home)
 }
