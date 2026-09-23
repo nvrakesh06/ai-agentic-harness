@@ -17,6 +17,16 @@ and expiry. Acquiring and renewing it use explicit expected `aih-state` revision
 Every checkpoint and integration publishes state in the same atomic ref transaction
 as source, so a superseded controller cannot silently publish source afterward.
 
+The supervisor records a machine-local liveness pulse at least every 30 seconds.
+That pulse is observability only and grants no write authority. Durable remote lease
+renewal occurs at half of the configured lease lifetime; every meaningful state
+publication also refreshes the lease and moves that boundary. Duplicate mutations
+and intervening local pulses are semantic no-ops, so they do not create state commits.
+Lease-only renewals keep the current snapshot schema for compatibility but do not
+increment the state revision. This keeps takeover fencing on the remote
+compare-and-swap path while bounding steady-state lease history to two publications
+per lease duration.
+
 Writers are limited to three (configurable downward), each with a branch/worktree.
 Dependencies must be DONE. Active conflict domains exclude overlapping writers.
 Advisory roles and native checks share a separate bounded reader semaphore. A task
@@ -24,7 +34,8 @@ remains reserved across its merge workflow, including fresh-main re-review.
 The scheduler keeps running while only blocked or dependency-waiting tasks remain.
 
 The machine lease is not distributed consensus. Correct clocks and atomic Git push
-are required. An expired controller stops publication even before takeover. GitHub
+are required. An expired controller stops publication even before takeover. The
+machine-local pulse never extends the durable expiry. GitHub
 issue/PR body updates are not part of Git's transaction: they are idempotently
 reconciled and cannot serve as a code-publication fence.
 

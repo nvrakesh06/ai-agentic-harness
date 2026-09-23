@@ -41,6 +41,15 @@ are fenced together; state-only changes use the same compare-and-swap mechanism.
 SQLite is updated after remote acknowledgement. A crash in that gap is recovered
 from the remote snapshot, not by replaying a stale cached state.
 
+Local SQLite also stores a frequent supervisor heartbeat for `aih status`. It is
+not portable and is never consulted for fencing. The durable snapshot heartbeat
+and expiry are refreshed by meaningful saves or at lease half-life, whichever
+comes first. Therefore remote lease information may be older than the local pulse
+by up to half of `lease_seconds`, while the durable expiry remains authoritative.
+At half-life AIH creates a lease-only `aih-state` commit using the existing snapshot
+schema, so compatible older runtimes still observe the renewed fence. Lease-only
+commits do not advance the durable state revision; the next meaningful save does.
+
 SQLite uses WAL, FULL synchronization, and a busy timeout. Its snapshot is a cache;
 commands are a local queue; events and runtime values are local observability.
 A command marked queued is **not yet portable**. After remote acceptance its stable

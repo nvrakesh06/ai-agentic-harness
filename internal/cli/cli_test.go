@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/engine"
@@ -139,6 +140,40 @@ func TestStatusShowsWorkerDeadlineLifecycle(t *testing.T) {
 	for _, value := range []string{"Worker deadline", "task", "worker_checkpoint_requested", "soft deadline reached"} {
 		if !strings.Contains(out.String(), value) {
 			t.Fatalf("status missing %q: %s", value, out.String())
+		}
+	}
+}
+
+func TestStatusDistinguishesLocalAndDurableLeaseHeartbeats(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	snapshot := model.NewSnapshot("project123")
+	snapshot.Controller = model.Lease{Machine: "machine-a", Heartbeat: now.Add(-time.Minute), Expires: now.Add(time.Minute)}
+	if err = db.Save(strings.Repeat("a", 40), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Set(engine.LocalLeaseHeartbeatKey, now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := platform.Acquire(filepath.Join(dir, "supervisor.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	var out bytes.Buffer
+	cmd := New()
+	cmd.SetOut(&out)
+	if err = showStatus(cmd, &engine.Project{Dir: dir, DB: db}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"durable heartbeat 2026-09-23T11:59:00Z", "local heartbeat 2026-09-23T12:00:00Z", "durable renewals are coalesced"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("status omitted %q: %s", want, out.String())
 		}
 	}
 }

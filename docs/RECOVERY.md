@@ -30,6 +30,10 @@ or `aih handoff` to stop it. Foreground operation responds to interruption.
 If the supervisor dies, owned workers are terminated and logical state remains on
 GitHub/Git. Wait for the remote lease to expire plus five seconds, then use
 `aih takeover` (or resume). No command silently overrides a live lease.
+The local status heartbeat may stop before the durable lease expires; it does not
+shorten this wait. During normal operation, meaningful state saves refresh the lease
+immediately and otherwise the supervisor renews it at half-life, so a live owner
+remains fenced without publishing on every local heartbeat.
 
 When the old disk is gone, recovery starts at the last remotely acknowledged
 checkpoint. Unpushed edits cannot be reconstructed. On the same machine, existing

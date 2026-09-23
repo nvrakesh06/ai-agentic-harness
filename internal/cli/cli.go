@@ -354,9 +354,14 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		return enc.Encode(s)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Project %s · durable revision %d (%s)\n", s.Project, s.Revision, shortSHA(h))
-	fmt.Fprintf(cmd.OutOrStdout(), "Controller: %s · lease expires %s\n", s.Controller.Machine, s.Controller.Expires.Format(time.RFC3339))
+	fmt.Fprintf(cmd.OutOrStdout(), "Controller: %s · durable heartbeat %s · lease expires %s\n", s.Controller.Machine, s.Controller.Heartbeat.Format(time.RFC3339), s.Controller.Expires.Format(time.RFC3339))
 	if active(p) {
-		fmt.Fprintln(cmd.OutOrStdout(), "Local supervisor: active (cached state; inspect heartbeat and logs for progress)")
+		local := p.DB.Get(engine.LocalLeaseHeartbeatKey)
+		if heartbeat, err := time.Parse(time.RFC3339Nano, local); err == nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "Local supervisor: active · local heartbeat %s (durable renewals are coalesced)\n", heartbeat.Format(time.RFC3339))
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout(), "Local supervisor: active (cached state; inspect logs for progress)")
+		}
 	} else {
 		fmt.Fprintln(cmd.OutOrStdout(), "Local supervisor: stopped")
 	}

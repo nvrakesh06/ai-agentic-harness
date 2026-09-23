@@ -141,6 +141,21 @@ func (g Git) Load(ctx context.Context) (*model.Snapshot, string, error) {
 	return s, h, e
 }
 func (g Git) StateCommit(ctx context.Context, parent string, s *model.Snapshot) (string, error) {
+	return g.snapshotCommit(ctx, parent, s, fmt.Sprintf("AIH state revision %d\n", s.Revision))
+}
+
+// LeaseCommit advances controller liveness without incrementing the
+// user-significant state revision. It still writes the schema-1 snapshot so
+// older compatible runtimes observe the renewed fence.
+func (g Git) LeaseCommit(ctx context.Context, parent string, s *model.Snapshot) (string, error) {
+	lease := s.Controller
+	if parent == "" || lease.Owner == "" || lease.Machine == "" || lease.Epoch == 0 || !lease.Expires.After(lease.Heartbeat) {
+		return "", errors.New("invalid durable lease renewal")
+	}
+	return g.snapshotCommit(ctx, parent, s, fmt.Sprintf("AIH lease renewal epoch %d\n", lease.Epoch))
+}
+
+func (g Git) snapshotCommit(ctx context.Context, parent string, s *model.Snapshot, message string) (string, error) {
 	b, e := json.MarshalIndent(s, "", "  ")
 	if e != nil {
 		return "", e
@@ -163,7 +178,7 @@ func (g Git) StateCommit(ctx context.Context, parent string, s *model.Snapshot) 
 	if parent != "" {
 		args = append(args, "-p", parent)
 	}
-	return g.Run(ctx, fmt.Sprintf("AIH state revision %d\n", s.Revision), args...)
+	return g.Run(ctx, message, args...)
 }
 
 type Update struct{ Branch, Old, New string }

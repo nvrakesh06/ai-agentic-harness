@@ -8,7 +8,76 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestLeaseCommitKeepsRevisionAndCompatibleSnapshot(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	g := f.P.Git
+	snapshot, initialHead, err := g.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	snapshot.Controller = model.Lease{Machine: "machine-a", Owner: "owner-a", Epoch: 1, Heartbeat: now, Expires: now.Add(3 * time.Minute)}
+	snapshot.Revision++
+	stateHead, err := g.StateCommit(ctx, initialHead, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = g.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: initialHead, New: stateHead}}); err != nil {
+		t.Fatal(err)
+	}
+	renewed := snapshot.Controller
+	renewed.Heartbeat = now.Add(90 * time.Second)
+	renewed.Expires = renewed.Heartbeat.Add(3 * time.Minute)
+	leaseSnapshot := model.Clone(snapshot)
+	leaseSnapshot.Controller = renewed
+	leaseHead, err := g.LeaseCommit(ctx, stateHead, leaseSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = g.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateHead, New: leaseHead}}); err != nil {
+		t.Fatal(err)
+	}
+	beforeTree, err := g.Run(ctx, "", "ls-tree", stateHead, "snapshot.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterTree, err := g.Run(ctx, "", "ls-tree", leaseHead, "snapshot.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeTree == afterTree {
+		t.Fatal("lease renewal did not update the compatible snapshot fence")
+	}
+	loaded, loadedHead, err := g.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedHead != leaseHead || loaded.Revision != snapshot.Revision || loaded.Controller != renewed {
+		t.Fatalf("lease snapshot was not loaded: head=%s snapshot=%#v", loadedHead, loaded)
+	}
+
+	loaded.Applied["meaningful"] = true
+	loaded.Revision++
+	nextHead, err := g.StateCommit(ctx, leaseHead, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = g.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: leaseHead, New: nextHead}}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err = g.Load(ctx)
+	if err != nil || !loaded.Applied["meaningful"] || loaded.Controller != renewed {
+		t.Fatalf("state commit after lease renewal failed: snapshot=%#v err=%v", loaded, err)
+	}
+}
 
 func TestAtomicPublicationRejectsStaleMainAndState(t *testing.T) {
 	ctx := context.Background()
