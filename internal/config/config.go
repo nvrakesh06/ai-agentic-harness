@@ -104,9 +104,23 @@ func (p Project) ResolveModel(role, fallback string) ModelResolution {
 // implicit. A complete mapping is explicit even when several tiers intentionally
 // use the same model ID.
 func (p Project) ModelMappingWarnings() []string {
+	return p.ModelMappingWarningsForRoles(map[string]string{
+		"orchestrator": "strong", "implementer": "normal", "reviewer": "strong", "qa": "normal", "designer": "strong", "security": "strong", "advisor": "strongest",
+	})
+}
+
+// ModelMappingWarningsForRoles applies the same policy to built-in and loaded
+// custom roles. Roles are the source of capability defaults; Project.Models can
+// override either kind by role name.
+func (p Project) ModelMappingWarningsForRoles(roleCapabilities map[string]string) []string {
 	missing := map[string][]string{}
-	for _, role := range []string{"orchestrator", "implementer", "reviewer", "qa", "designer", "security", "advisor"} {
-		resolved := p.ResolveModel(role, "")
+	roles := make([]string, 0, len(roleCapabilities))
+	for role := range roleCapabilities {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		resolved := p.ResolveModel(role, roleCapabilities[role])
 		if resolved.EffectiveModel == ProviderDefaultModel {
 			missing[resolved.Capability] = append(missing[resolved.Capability], role)
 		}

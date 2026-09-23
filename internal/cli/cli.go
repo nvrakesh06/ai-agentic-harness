@@ -75,7 +75,7 @@ func New() *cobra.Command {
 			return e
 		}
 		if cfg, parseErr := config.ParseLocal(r); parseErr == nil {
-			for _, warning := range cfg.Project.ModelMappingWarnings() {
+			for _, warning := range modelMappingWarnings(cfg) {
 				fmt.Fprintln(cmd.OutOrStdout(), "[WARN]", warning)
 			}
 		}
@@ -416,8 +416,23 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		}
 	}
 	if len(s.Runs) > 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "Worker runs:")
-		for _, run := range s.Runs {
+		const recentRunLimit = 10
+		shown := map[int]bool{}
+		for i, run := range s.Runs {
+			if run.Outcome == "running" {
+				shown[i] = true
+			}
+		}
+		for i := len(s.Runs) - recentRunLimit; i < len(s.Runs); i++ {
+			if i >= 0 {
+				shown[i] = true
+			}
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Worker runs (active plus latest %d of %d; full history in status --json):\n", recentRunLimit, len(s.Runs))
+		for i, run := range s.Runs {
+			if !shown[i] {
+				continue
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: capability=%s effective_model=%s outcome=%s\n", run.Role, run.ID, run.Capability, run.EffectiveModel, run.Outcome)
 		}
 	}
@@ -460,6 +475,18 @@ func shortSHA(s string) string {
 		return s[:12]
 	}
 	return s
+}
+
+func modelMappingWarnings(cfg config.Effective) []string {
+	all, err := roles.Load(cfg.Files)
+	if err != nil {
+		return cfg.Project.ModelMappingWarnings()
+	}
+	capabilities := make(map[string]string, len(all))
+	for name, role := range all {
+		capabilities[name] = role.Capability
+	}
+	return cfg.Project.ModelMappingWarningsForRoles(capabilities)
 }
 func addInspection(root *cobra.Command, o *options) {
 	roleCmd := &cobra.Command{Use: "roles", RunE: func(cmd *cobra.Command, _ []string) error {

@@ -174,6 +174,32 @@ func TestStatusShowsResolvedModelInHumanAndJSONOutput(t *testing.T) {
 	}
 }
 
+func TestStatusBoundsHistoricalWorkerRunsButKeepsActive(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	snapshot := model.NewSnapshot("bounded-runs")
+	for i := 0; i < 12; i++ {
+		snapshot.Runs = append(snapshot.Runs, model.Run{ID: fmt.Sprintf("old-%02d", i), Role: "reviewer", Outcome: "completed"})
+	}
+	snapshot.Runs[0].Outcome = "running"
+	if err = db.Save(strings.Repeat("a", 40), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	cmd := New()
+	cmd.SetOut(&out)
+	if err = showStatus(cmd, &engine.Project{DB: db, Dir: dir}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "active plus latest 10 of 12") || !strings.Contains(out.String(), "old-00") || strings.Contains(out.String(), "old-01") {
+		t.Fatalf("historical runs were not bounded correctly: %s", out.String())
+	}
+}
+
 func TestStatusDistinguishesLocalAndDurableLeaseHeartbeats(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "state.db"))

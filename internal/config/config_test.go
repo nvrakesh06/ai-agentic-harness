@@ -33,6 +33,11 @@ func TestModelResolutionAndMappingWarnings(t *testing.T) {
 	if got := p.ResolveModel("advisor", "strongest"); got.EffectiveModel != "model-b" || got.RequestModel != "model-b" {
 		t.Fatalf("explicit resolution = %#v", got)
 	}
+	p.ProviderModels = map[string]string{"normal": "model-a"}
+	warnings = p.ModelMappingWarningsForRoles(map[string]string{"custom-review": "strong", "custom-qa": "normal"})
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "custom-review") {
+		t.Fatalf("custom role warning = %v", warnings)
+	}
 }
 func TestCanonicalValidation(t *testing.T) {
 	f := canonicalFiles()
