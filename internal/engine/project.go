@@ -281,20 +281,24 @@ func (p *Project) TaskScratchPath(t *model.Task) string {
 	return filepath.Join(p.Dir, "scratch", t.ID)
 }
 
+func (p *Project) ValidTaskScratchPath(t *model.Task) (string, error) {
+	root, target, err := p.taskScratchTarget(t)
+	if err != nil {
+		return "", err
+	}
+	if !pathWithin(root, target) {
+		return "", errors.New("unsafe task scratch path")
+	}
+	return target, nil
+}
+
 // RemoveTaskScratch removes only a resolved task directory below this project's
 // scratch root. Task IDs originate in durable state, so a corrupted value must
 // fail closed rather than allow a path traversal or junction escape.
 func (p *Project) RemoveTaskScratch(t *model.Task) error {
-	root, err := filepath.Abs(filepath.Join(p.Dir, "scratch"))
+	root, target, err := p.taskScratchTarget(t)
 	if err != nil {
 		return err
-	}
-	target, err := filepath.Abs(p.TaskScratchPath(t))
-	if err != nil {
-		return err
-	}
-	if !pathWithin(root, target) {
-		return errors.New("unsafe task scratch cleanup path")
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if os.IsNotExist(err) {
@@ -310,10 +314,26 @@ func (p *Project) RemoveTaskScratch(t *model.Task) error {
 	if err != nil {
 		return fmt.Errorf("resolve task scratch path: %w", err)
 	}
-	if !pathWithin(resolvedRoot, resolvedTarget) {
+	rel, err := filepath.Rel(resolvedRoot, resolvedTarget)
+	if err != nil || rel != t.ID {
 		return errors.New("unsafe resolved task scratch cleanup path")
 	}
 	return os.RemoveAll(resolvedTarget)
+}
+
+func (p *Project) taskScratchTarget(t *model.Task) (string, string, error) {
+	if t == nil || !safeTaskScratchID(t.ID) {
+		return "", "", errors.New("unsafe task scratch identifier")
+	}
+	root, err := filepath.Abs(filepath.Join(p.Dir, "scratch"))
+	if err != nil {
+		return "", "", err
+	}
+	return root, filepath.Join(root, t.ID), nil
+}
+
+func safeTaskScratchID(id string) bool {
+	return id != "" && id != "." && id != ".." && filepath.Base(id) == id && !strings.ContainsAny(id, `/\\:`)
 }
 
 func pathWithin(root, target string) bool {

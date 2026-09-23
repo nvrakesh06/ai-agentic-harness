@@ -87,3 +87,43 @@ func TestTaskScratchCleanupRejectsCorruptTaskPath(t *testing.T) {
 		t.Fatalf("unsafe scratch cleanup removed outside content: %v", err)
 	}
 }
+
+func TestTaskScratchPathRejectsCorruptTaskIdentifierBeforeCreation(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	corrupt := &model.Task{ID: ".." + string(filepath.Separator) + "outside"}
+	if _, err = f.P.ValidTaskScratchPath(corrupt); err == nil {
+		t.Fatal("corrupt task identifier was accepted for scratch creation")
+	}
+}
+
+func TestTaskScratchCleanupRejectsSiblingJunction(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	root := filepath.Join(f.P.Dir, "scratch")
+	sibling := filepath.Join(root, "sibling")
+	marker := filepath.Join(sibling, "marker")
+	if err = os.MkdirAll(sibling, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(marker, []byte("must remain"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink(sibling, filepath.Join(root, "task")); err != nil {
+		t.Skipf("symlink fixture unavailable on this machine: %v", err)
+	}
+	if err = f.P.RemoveTaskScratch(&model.Task{ID: "task"}); err == nil {
+		t.Fatal("sibling scratch junction was accepted for cleanup")
+	}
+	if _, err = os.Stat(marker); err != nil {
+		t.Fatalf("scratch cleanup removed sibling content: %v", err)
+	}
+}

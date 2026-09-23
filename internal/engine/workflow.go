@@ -273,9 +273,13 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 	}
 	runtimeDir := filepath.Join(c.P.Dir, "sessions", id)
 	prompt := roles.Compile(e, r, runtime.GOOS, t, objective, diff, evidence)
+	var err error
 	scratch := ""
 	if t != nil {
-		scratch = c.P.TaskScratchPath(t)
+		scratch, err = c.P.ValidTaskScratchPath(t)
+		if err != nil {
+			return provider.Result{}, err
+		}
 		if err := os.MkdirAll(scratch, 0700); err != nil {
 			return provider.Result{}, err
 		}
@@ -283,7 +287,6 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 	}
 	request := provider.Request{Directory: dir, Runtime: runtimeDir, Scratch: scratch, Prompt: prompt, Role: r.Name, Model: resolved.RequestModel, Write: r.Name == "implementer", Timeout: time.Duration(e.Project.WorkerSeconds) * time.Second}
 	var result provider.Result
-	var err error
 	if r.Name == "implementer" {
 		checkpointPrompt := prompt + "\n\nSOFT DEADLINE CHECKPOINT\nStop expanding scope. Inspect and preserve the existing worktree edits, run only the smallest relevant verification that fits, and immediately return the required structured result. Use completed only if the assigned acceptance criteria are satisfied; otherwise use in_progress and report the exact handoff, tests, and remaining risks. Do not undo safe existing work or begin unrelated improvements."
 		result, err = runWithCheckpoint(ctx, p, request, checkpointPrompt, request.Timeout, deadlineHooks{
