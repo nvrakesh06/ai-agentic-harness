@@ -504,7 +504,9 @@ func validateGuidanceCommand(s *model.Snapshot, cmd store.Command) (guidanceComm
 		if target == nil {
 			return guidance, errors.New("operator guidance requires known task ID")
 		}
-		if err := model.QueueOperatorGuidance(target, cmd.ID, guidance.Head, guidance.Config, guidance.Rules, guidance.Text); err != nil {
+		probe := *target
+		probe.Decisions = append([]string(nil), target.Decisions...)
+		if err := model.QueueOperatorGuidance(&probe, cmd.ID, guidance.Head, guidance.Config, guidance.Rules, guidance.Text); err != nil {
 			return guidance, err
 		}
 		return guidance, nil

@@ -39,6 +39,32 @@ func TestGuidanceCommandValidatesSourceAndTarget(t *testing.T) {
 	}
 }
 
+func TestOperatorGuidanceRejectsStaleScopeAndReplaysLateWorker(t *testing.T) {
+	head, configHash, rules := strings.Repeat("a", 40), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	s := model.NewSnapshot("project123")
+	target := &model.Task{ID: "ui", State: model.Fix, HeadSHA: head}
+	s.Tasks[target.ID] = target
+	payload, _ := json.Marshal(guidanceCommand{Operator: true, Head: head, Config: configHash, Rules: rules, Text: "Use the owner-provided endpoint."})
+	cmd := store.Command{ID: "operator", Kind: "guide", Target: target.ID, Payload: string(payload)}
+	if _, err := validateGuidanceCommand(s, cmd); err != nil {
+		t.Fatal(err)
+	}
+	target.HeadSHA = strings.Repeat("d", 40)
+	if _, err := validateGuidanceCommand(s, cmd); err == nil {
+		t.Fatal("stale operator head accepted")
+	}
+	target.HeadSHA = head
+	if err := model.QueueOperatorGuidance(target, cmd.ID, head, configHash, rules, "Use the owner-provided endpoint."); err != nil {
+		t.Fatal(err)
+	}
+	started := 0
+	target.State = model.Running
+	replay, err := completeImplementation(target, started)
+	if err != nil || !replay || target.State != model.Ready {
+		t.Fatalf("late operator guidance did not replay safely: %v %t %s", err, replay, target.State)
+	}
+}
+
 func TestCompletedWorkerReplaysLateGuidanceAfterCheckpoint(t *testing.T) {
 	source := &model.Task{ID: "api", ObjectiveID: "objective", State: model.Running, HeadSHA: strings.Repeat("a", 40)}
 	target := &model.Task{ID: "ui", ObjectiveID: "objective", State: model.Running}
