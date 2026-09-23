@@ -16,6 +16,24 @@ func canonicalFiles() map[string]string {
 	}
 	return f
 }
+
+func TestModelResolutionAndMappingWarnings(t *testing.T) {
+	p := Defaults()
+	if got := p.ResolveModel("implementer", "normal"); got.Capability != "normal" || got.EffectiveModel != ProviderDefaultModel || got.RequestModel != "" {
+		t.Fatalf("default resolution = %#v", got)
+	}
+	warnings := p.ModelMappingWarnings()
+	if len(warnings) != 3 || !strings.Contains(strings.Join(warnings, "\n"), "implementer") || !strings.Contains(strings.Join(warnings, "\n"), "advisor") {
+		t.Fatalf("default warnings = %v", warnings)
+	}
+	p.ProviderModels = map[string]string{"normal": "model-a", "strong": "model-b", "strongest": "model-b"}
+	if warnings := p.ModelMappingWarnings(); len(warnings) != 0 {
+		t.Fatalf("explicit identical mappings warned: %v", warnings)
+	}
+	if got := p.ResolveModel("advisor", "strongest"); got.EffectiveModel != "model-b" || got.RequestModel != "model-b" {
+		t.Fatalf("explicit resolution = %#v", got)
+	}
+}
 func TestCanonicalValidation(t *testing.T) {
 	f := canonicalFiles()
 	if _, e := Parse(f); e != nil {

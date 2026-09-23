@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -75,6 +76,54 @@ type Effective struct {
 	Lock    Lock
 	Files   map[string]string
 	Hash    string
+}
+
+// ModelResolution keeps the configured capability separate from what AIH can
+// actually request from a provider. ProviderDefault is deliberate evidence: AIH
+// did not guess a provider-specific model identifier and omitted --model.
+type ModelResolution struct {
+	Capability     string `json:"capability"`
+	EffectiveModel string `json:"effective_model"`
+	RequestModel   string `json:"-"`
+}
+
+const ProviderDefaultModel = "provider-default"
+
+func (p Project) ResolveModel(role, fallback string) ModelResolution {
+	capability := fallback
+	if configured := p.Models[role]; configured != "" {
+		capability = configured
+	}
+	if requested := p.ProviderModels[capability]; requested != "" {
+		return ModelResolution{Capability: capability, EffectiveModel: requested, RequestModel: requested}
+	}
+	return ModelResolution{Capability: capability, EffectiveModel: ProviderDefaultModel}
+}
+
+// ModelMappingWarnings identifies every configured role whose provider model is
+// implicit. A complete mapping is explicit even when several tiers intentionally
+// use the same model ID.
+func (p Project) ModelMappingWarnings() []string {
+	missing := map[string][]string{}
+	for _, role := range []string{"orchestrator", "implementer", "reviewer", "qa", "designer", "security", "advisor"} {
+		resolved := p.ResolveModel(role, "")
+		if resolved.EffectiveModel == ProviderDefaultModel {
+			missing[resolved.Capability] = append(missing[resolved.Capability], role)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	tiers := make([]string, 0, len(missing))
+	for tier := range missing {
+		tiers = append(tiers, tier)
+	}
+	sort.Strings(tiers)
+	warnings := make([]string, 0, len(tiers))
+	for _, tier := range tiers {
+		warnings = append(warnings, fmt.Sprintf("provider_models omits capability %q; roles %s use provider-default. Add an explicit model ID for this tier (identical IDs are allowed when intentional).", tier, strings.Join(missing[tier], ", ")))
+	}
+	return warnings
 }
 
 func Defaults() Project {

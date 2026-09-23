@@ -18,6 +18,18 @@ func init() {
 		return
 	}
 	args := strings.Join(os.Args, " ")
+	if expected := os.Getenv("AIH_EXPECT_MODEL"); expected != "" {
+		actual := ""
+		for i, arg := range os.Args {
+			if arg == "--model" && i+1 < len(os.Args) {
+				actual = os.Args[i+1]
+			}
+		}
+		if actual != expected {
+			fmt.Fprintf(os.Stderr, "model = %q, want %q", actual, expected)
+			os.Exit(2)
+		}
+	}
 	if strings.Contains(args, "login status") || strings.Contains(args, "auth status") {
 		if os.Getenv("AIH_HELPER_MODE") == "unauthenticated" {
 			fmt.Println("secret diagnostic must not escape")
@@ -60,6 +72,23 @@ func init() {
 		fmt.Fprintln(os.Stderr, "benign provider diagnostic")
 	}
 	os.Exit(0)
+}
+
+func TestAdaptersPassConfiguredModelExactly(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AIH_PROVIDER_HELPER", "1")
+	for _, kind := range []string{"codex", "claude-code"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("AIH_EXPECT_MODEL", "provider-specific-model")
+			_, err := (CLI{Kind: kind, Executable: exe}).Run(context.Background(), Request{Directory: t.TempDir(), Runtime: filepath.Join(t.TempDir(), "run"), Role: "reviewer", Prompt: "fixture", Model: "provider-specific-model", Timeout: time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }
 func TestAdaptersLaunchAndFailures(t *testing.T) {
 	// A tiny Go launcher runs this test executable as a mock CLI; the same CLI

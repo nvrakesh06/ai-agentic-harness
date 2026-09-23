@@ -62,15 +62,8 @@ func nativeEnvironment(e config.Effective) string {
 }
 
 func workerEnvironment(e config.Effective, role roles.Role) string {
-	capability := role.Capability
-	if configured := e.Project.Models[role.Name]; configured != "" {
-		capability = configured
-	}
-	modelName := e.Project.ProviderModels[capability]
-	if modelName == "" {
-		modelName = capability
-	}
-	return strings.Join([]string{runtime.GOOS, e.Project.Provider, role.Name, modelName, "workspace-write"}, "/")
+	resolved := e.Project.ResolveModel(role.Name, role.Capability)
+	return strings.Join([]string{runtime.GOOS, e.Project.Provider, role.Name, resolved.EffectiveModel, "workspace-write"}, "/")
 }
 
 func verificationFingerprint(environment, reason string) string {
@@ -103,28 +96,25 @@ func (c *Controller) role(ctx context.Context, e config.Effective, r roles.Role,
 	if t != nil {
 		taskID = t.ID
 	}
-	capability := r.Capability
-	if configured := e.Project.Models[r.Name]; configured != "" {
-		capability = configured
-	}
+	resolved := e.Project.ResolveModel(r.Name, r.Capability)
 	started := time.Now().UTC()
 	if err := c.mutate(func(s *model.Snapshot) error {
 		if t != nil {
 			s.Tasks[t.ID].RunID = id
 		}
-		s.Runs = append(s.Runs, model.Run{ID: id, Task: taskID, Role: r.Name, Provider: e.Project.Provider, Capability: capability, Version: model.Version, RulesHash: roles.Hash(), Started: started, Epoch: s.Controller.Epoch, Outcome: "running"})
+		s.Runs = append(s.Runs, model.Run{ID: id, Task: taskID, Role: r.Name, Provider: e.Project.Provider, Capability: resolved.Capability, EffectiveModel: resolved.EffectiveModel, Version: model.Version, RulesHash: roles.Hash(), Started: started, Epoch: s.Controller.Epoch, Outcome: "running"})
 		return nil
 	}); err != nil {
 		return provider.Result{}, err
 	}
-	_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "worker_start", capability)
+	_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "worker_start", fmt.Sprintf("capability=%s effective_model=%s", resolved.Capability, resolved.EffectiveModel))
 	p := c.P.Provider
 	if p.Name() != e.Project.Provider {
 		p = provider.New(e.Project.Provider)
 	}
 	runtimeDir := filepath.Join(c.P.Dir, "sessions", id)
 	prompt := roles.Compile(e, r, runtime.GOOS, t, objective, diff, evidence)
-	request := provider.Request{Directory: dir, Runtime: runtimeDir, Prompt: prompt, Role: r.Name, Model: e.Project.ProviderModels[capability], Write: r.Name == "implementer", Timeout: time.Duration(e.Project.WorkerSeconds) * time.Second}
+	request := provider.Request{Directory: dir, Runtime: runtimeDir, Prompt: prompt, Role: r.Name, Model: resolved.RequestModel, Write: r.Name == "implementer", Timeout: time.Duration(e.Project.WorkerSeconds) * time.Second}
 	var result provider.Result
 	var err error
 	if r.Name == "implementer" {
@@ -159,7 +149,7 @@ func (c *Controller) role(ctx context.Context, e config.Effective, r roles.Role,
 			return result, saveErr
 		}
 	}
-	_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "worker_exit", outcome)
+	_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "worker_exit", fmt.Sprintf("outcome=%s capability=%s effective_model=%s", outcome, resolved.Capability, resolved.EffectiveModel))
 	return result, err
 }
 

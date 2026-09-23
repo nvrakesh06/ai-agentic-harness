@@ -50,7 +50,7 @@ models:
   designer: strong
   security: strong
   advisor: strongest
-provider_models: {}  # optional capability -> installed-provider model ID
+provider_models: {}  # omitted tiers use provider-default; doctor lists affected roles
 checks:
   - name: tests
     command: [go, test, ./...]

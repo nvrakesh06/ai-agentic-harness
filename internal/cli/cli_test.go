@@ -144,6 +144,36 @@ func TestStatusShowsWorkerDeadlineLifecycle(t *testing.T) {
 	}
 }
 
+func TestStatusShowsResolvedModelInHumanAndJSONOutput(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	snapshot := model.NewSnapshot("model-project")
+	snapshot.Runs = []model.Run{{ID: "run", Role: "reviewer", Capability: "strong", EffectiveModel: "provider-specific-model", Outcome: "completed"}}
+	if err = db.Save(strings.Repeat("a", 40), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	p := &engine.Project{DB: db, Dir: dir}
+	var human, machine bytes.Buffer
+	cmd := New()
+	cmd.SetOut(&human)
+	if err = showStatus(cmd, p, false, false); err != nil {
+		t.Fatal(err)
+	}
+	cmd.SetOut(&machine)
+	if err = showStatus(cmd, p, false, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, out := range []string{human.String(), machine.String()} {
+		if !strings.Contains(out, "capability=strong") && !strings.Contains(out, `"capability": "strong"`) || !strings.Contains(out, "provider-specific-model") {
+			t.Fatalf("status omitted model evidence: %s", out)
+		}
+	}
+}
+
 func TestStatusDistinguishesLocalAndDurableLeaseHeartbeats(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "state.db"))

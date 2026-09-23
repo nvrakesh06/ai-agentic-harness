@@ -162,8 +162,12 @@ mode `0600` on Unix or your user ACL on Windows. Never commit credentials.
 
 One provider is selected per project. Both integrations are non-interactive,
 disposable processes with strict results and timeouts; no permanent interactive
-terminal or laptop session is needed. Optional `provider_models` maps capability
-tiers to model IDs; otherwise the provider's defaults apply.
+terminal or laptop session is needed. `provider_models` maps capability tiers to
+provider-installed model IDs. Omitted tiers intentionally use `provider-default`:
+AIH does not guess a model ID. `aih init` and `aih doctor` warn about omitted
+tiers and list the affected roles. Map every used tier explicitly to suppress the
+warning; multiple tiers may intentionally use the same model ID. Run records and
+`aih status` show both the logical capability and the effective model.
 
 ## How it works
 

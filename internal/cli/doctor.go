@@ -114,6 +114,9 @@ func addDoctor(root *cobra.Command, o *options) {
 			fmt.Fprintln(d.out, "[INFO] Persistent machine state:", home)
 		}
 		if project {
+			for _, warning := range cfg.Project.ModelMappingWarnings() {
+				d.warn(warning)
+			}
 			checkExecutables(d, cfg, dir)
 			if !offline {
 				if p != nil {

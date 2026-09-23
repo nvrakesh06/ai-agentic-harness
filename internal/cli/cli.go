@@ -74,6 +74,11 @@ func New() *cobra.Command {
 		if e = engine.Init(cmd.Context(), r, h, selected); e != nil {
 			return e
 		}
+		if cfg, parseErr := config.ParseLocal(r); parseErr == nil {
+			for _, warning := range cfg.Project.ModelMappingWarnings() {
+				fmt.Fprintln(cmd.OutOrStdout(), "[WARN]", warning)
+			}
+		}
 		fmt.Fprintln(cmd.OutOrStdout(), "AIH initialized. Review .aih/project.yaml and AGENTS.md, then commit and push the configuration to main. Run aih run \"your objective\" afterward.")
 		return nil
 	}}
@@ -408,6 +413,12 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 				route = "supervisor-native verification only"
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "  Verification route: %s (%s, attempt %d)\n", route, t.Verification.Environment, t.Verification.Attempts)
+		}
+	}
+	if len(s.Runs) > 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "Worker runs:")
+		for _, run := range s.Runs {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: capability=%s effective_model=%s outcome=%s\n", run.Role, run.ID, run.Capability, run.EffectiveModel, run.Outcome)
 		}
 	}
 	for _, ob := range s.Objectives {
