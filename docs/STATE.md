@@ -32,7 +32,10 @@ the ordered authorized objective backlog, capacity policy/status, improvement
 candidates and the integration hold. Capacity state records active/target/maximum
 writer utilization, reader utilization, backlog cursor, grace boundary, latest
 backfill selection, a machine-readable suppression reason and the bounded tail of
-underutilization/selection/suppression transitions. Task records contain dependencies,
+underutilization/selection/suppression transitions. It also records queued and
+running native checks with their task, class, check
+name, queue time and start time. Recovery discards interrupted check ownership
+and follows the ordinary verification retry route. Task records contain dependencies,
 conflict domains, issues/PRs, branch/base/head/merge revisions, retry counters,
 findings, human decisions, blocker/resume state, verification retry guards and exact
 verification evidence. Passed checks record their identity, executable, exit result
@@ -77,7 +80,7 @@ environment and recheck without starting another implementer.
 
 ## Schema compatibility and migrations
 
-V1 uses remote schema 2, role schema 1, rules version 1, and local schema 1.
+V1 uses remote schema 3, role schema 1, rules version 1, and local schema 1.
 Unknown newer schemas fail closed before writes. Legacy schema 0 snapshots gain
 version metadata and missing maps; schema 1 snapshots deterministically reconstruct
 the authorized objective backlog from existing objectives. Both then undergo
@@ -85,10 +88,14 @@ validation. The first subsequent
 state commit keeps the original remote commit as its parent, preserving the
 pre-migration backup in Git history. No automatic major-version migration exists.
 
-Publishing schema 2 is a one-way deployment boundary: a schema-1 runtime rejects
+Schema 2 snapshots migrate to schema 3 with empty verification ownership and
+the configured resource limits. An interrupted controller's task states still
+follow the normal recovery route before checks start again.
+
+Publishing schema 3 is a one-way deployment boundary: older runtimes reject
 the newer snapshot. Upgrade every machine that may attach, resume, or take over
-before allowing a schema-2 supervisor to acquire and publish state. Do not hand
-control back to a schema-1 installation after that first schema-2 save.
+before allowing a schema-3 supervisor to acquire and publish state. Do not hand
+control back to a schema-2 installation after that first schema-3 save.
 
 Remote task identities and branches are constrained before use as filesystem or
 Git targets. Schema changes require tests for old fixtures and new-runtime refusal.

@@ -25,6 +25,8 @@ func configuredCapacity(project config.Project, previous model.Capacity) model.C
 	next.TargetWriters = project.Scheduling.TargetWriters
 	next.MaxWriters = project.MaxWriters
 	next.MaxReaders = project.MaxReaders
+	next.MaxHeavyChecks = project.Resources.MaxHeavyChecks
+	next.MaxLightChecks = project.Resources.MaxLightChecks
 	next.GraceSeconds = project.Scheduling.UnderutilizationGraceSeconds
 	next.BacklogSource = project.Scheduling.BacklogSource
 	if policyChanged {
@@ -168,11 +170,13 @@ func capacitySuppression(s *model.Snapshot, writers map[string]bool) (string, st
 
 func (c *Controller) persistCapacity(next model.Capacity, planObjective string) error {
 	previous := c.Snapshot().Capacity
+	next.Verification = previous.Verification
 	next, eventKind := withCapacityTransition(previous, next, planObjective, time.Now().UTC())
 	if reflect.DeepEqual(previous, next) {
 		return nil
 	}
 	if err := c.mutate(func(s *model.Snapshot) error {
+		next.Verification = s.Capacity.Verification
 		s.Capacity = next
 		return nil
 	}); err != nil {

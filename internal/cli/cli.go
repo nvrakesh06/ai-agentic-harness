@@ -404,6 +404,8 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		s.Capacity.TargetWriters = p.Config.Project.Scheduling.TargetWriters
 		s.Capacity.MaxWriters = p.Config.Project.MaxWriters
 		s.Capacity.MaxReaders = p.Config.Project.MaxReaders
+		s.Capacity.MaxHeavyChecks = p.Config.Project.Resources.MaxHeavyChecks
+		s.Capacity.MaxLightChecks = p.Config.Project.Resources.MaxLightChecks
 		s.Capacity.GraceSeconds = p.Config.Project.Scheduling.UnderutilizationGraceSeconds
 		s.Capacity.BacklogSource = p.Config.Project.Scheduling.BacklogSource
 	}
@@ -430,6 +432,27 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 	capacity := s.Capacity
 	fmt.Fprintf(cmd.OutOrStdout(), "Writers: %d active / %d target / %d max\n", capacity.ActiveWriters, capacity.TargetWriters, capacity.MaxWriters)
 	fmt.Fprintf(cmd.OutOrStdout(), "Readers: %d active / %d max\n", capacity.ActiveReaders, capacity.MaxReaders)
+	heavy, light := 0, 0
+	queued := map[string]bool{}
+	for _, check := range capacity.Verification {
+		if check.Phase == "queued" {
+			queued[check.Task] = true
+		}
+		if check.Phase == "running" && check.Class == "heavy" {
+			heavy++
+		}
+		if check.Phase == "running" && check.Class == "light" {
+			light++
+		}
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Checks: %d heavy / %d max, %d light / %d max\n", heavy, capacity.MaxHeavyChecks, light, capacity.MaxLightChecks)
+	for _, check := range capacity.Verification {
+		at := check.QueuedAt
+		if check.Phase == "running" {
+			at = check.StartedAt
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s check %q for %s (%s; %s)\n", check.Phase, check.Class, check.Check, check.Task, time.Since(at).Round(time.Second), map[string]string{"queued": "waiting for a verification slot", "running": "slot owned"}[check.Phase])
+	}
 	if capacity.ReasonCode != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Backfill: %s — %s (%s)\n", capacity.State, capacity.Reason, capacity.ReasonCode)
 	} else {
@@ -443,6 +466,9 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 			continue
 		}
 		status := string(t.State)
+		if queued[t.ID] {
+			status = "WAITING_CHECK_CAPACITY"
+		}
 		if t.State == model.Ready {
 			for _, d := range t.Dependencies {
 				if s.Tasks[d] != nil && s.Tasks[d].State != model.Done {

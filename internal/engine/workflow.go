@@ -916,8 +916,10 @@ func verifyWithPermit(ctx context.Context, e config.Effective, dir string, permi
 	}
 	return checked, nil
 }
-func (c *Controller) checks(ctx context.Context, e config.Effective, dir string) ([]string, error) {
-	return verifyWithPermit(ctx, e, dir, c.checkPermit)
+func (c *Controller) checks(ctx context.Context, e config.Effective, dir, taskID string) ([]string, error) {
+	return verifyWithPermit(ctx, e, dir, func(ctx context.Context, check config.Check) (func(), error) {
+		return c.checkPermit(ctx, taskID, check)
+	})
 }
 
 func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Task, dir, diff string, evidence *model.Evidence, attempt int, required []roles.Role) []reviewOutcome {
@@ -979,7 +981,7 @@ func (c *Controller) verifyReview(id string) error {
 		return e
 	}
 	t = c.Snapshot().Tasks[id]
-	checks, e := c.checks(c.ctx, effective, dir)
+	checks, e := c.checks(c.ctx, effective, dir, id)
 	if e != nil {
 		return e
 	}

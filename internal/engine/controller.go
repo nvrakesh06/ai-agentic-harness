@@ -263,23 +263,27 @@ func (c *Controller) heartbeat(ctx context.Context) {
 	}
 }
 func (c *Controller) recover() error {
-	return c.mutate(func(s *model.Snapshot) error {
-		for _, t := range s.Tasks {
-			switch t.State {
-			case model.Running:
-				t.State = model.Ready
-			case model.Implemented, model.Verifying, model.Review, model.MergeTrain:
-				t.State = model.SyncRequired
-			}
-			t.RunID = ""
+	return c.mutate(recoverSnapshot)
+}
+func recoverSnapshot(s *model.Snapshot) error {
+	// An interrupted controller no longer owns these commands. The ordinary
+	// task recovery route re-runs verification after acquiring fresh slots.
+	s.Capacity.Verification = nil
+	for _, t := range s.Tasks {
+		switch t.State {
+		case model.Running:
+			t.State = model.Ready
+		case model.Implemented, model.Verifying, model.Review, model.MergeTrain:
+			t.State = model.SyncRequired
 		}
-		for i := range s.Runs {
-			if s.Runs[i].Outcome == "running" {
-				s.Runs[i].Outcome = "interrupted"
-			}
+		t.RunID = ""
+	}
+	for i := range s.Runs {
+		if s.Runs[i].Outcome == "running" {
+			s.Runs[i].Outcome = "interrupted"
 		}
-		return nil
-	})
+	}
+	return nil
 }
 func (c *Controller) Serve(parent context.Context) error {
 	lock, e := platform.Acquire(filepath.Join(c.P.Dir, "supervisor.lock"))
@@ -429,6 +433,7 @@ func (c *Controller) Serve(parent context.Context) error {
 			s.Controller.Expires = time.Now().UTC()
 			s.Capacity.ActiveWriters = 0
 			s.Capacity.ActiveReaders = 0
+			s.Capacity.Verification = nil
 			s.Capacity.State = "stopped"
 			s.Capacity.ReasonCode = "supervisor_stopped"
 			s.Capacity.Reason = "the local supervisor is stopped"

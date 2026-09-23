@@ -69,7 +69,7 @@ func (c *Controller) integrate(id string) {
 	if e = c.mutate(func(s *model.Snapshot) error { return model.Transition(s.Tasks[id], model.MergeTrain) }); e != nil {
 		return
 	}
-	checks, e := c.checks(c.ctx, effective, dir)
+	checks, e := c.checks(c.ctx, effective, dir, id)
 	if e != nil {
 		c.retry(id, "verification", e.Error())
 		return
@@ -152,7 +152,7 @@ func (c *Controller) postVerify(id string) {
 			return
 		}
 		defer c.P.Git.RemoveWorktree(context.Background(), dir)
-		_, e = c.checks(c.ctx, effective, dir)
+		_, e = c.checks(c.ctx, effective, dir, id)
 		if c.ctx.Err() != nil {
 			return
 		}

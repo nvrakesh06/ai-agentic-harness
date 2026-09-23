@@ -29,7 +29,9 @@ per lease duration.
 
 Writers are limited to three (configurable downward), each with a branch/worktree.
 Dependencies must be DONE. Active conflict domains exclude overlapping writers.
-Advisory roles and native checks share a separate bounded reader semaphore. A task
+Advisory roles use a bounded reader semaphore. Native checks use separate heavy
+and light resource limits; heavy checks also hold machine-local lock slots under
+the shared AIH home across project controllers. A task
 remains reserved across its merge workflow, including fresh-main re-review.
 The scheduler keeps running while only blocked or dependency-waiting tasks remain.
 A canonical target controls best-effort useful writer utilization below that hard
