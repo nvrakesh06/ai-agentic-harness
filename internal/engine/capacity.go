@@ -42,6 +42,7 @@ func configuredCapacity(project config.Project, previous model.Capacity) model.C
 func decideCapacity(s *model.Snapshot, active map[string]bool, project config.Project, planning bool, activeReaders int, now time.Time) capacityDecision {
 	status := configuredCapacity(project, s.Capacity)
 	status.ActiveReaders = activeReaders
+	status.ActivePreflights = 0
 	writers := map[string]bool{}
 	for id, writing := range active {
 		if !writing {
