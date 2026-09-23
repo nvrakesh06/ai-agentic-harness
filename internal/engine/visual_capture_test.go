@@ -178,7 +178,7 @@ func fixturePlaywrightModule() (string, error) {
 }
 
 func TestVisualRunnerOwnsLoopbackAndProfilePolicy(t *testing.T) {
-	for _, want := range []string{"channel: 'chrome'", "viewport: { width: 1280, height: 720 }", "serviceWorkers: 'block'", "await context.route", "await context.routeWebSocket", "url.origin !== origin", "route.abort('blockedbyclient')", "ws.close()", "await ws.connectToServer()", "context.newPage", "browser.close"} {
+	for _, want := range []string{"channel: 'chrome'", "viewport: { width: 1280, height: 720 }", "serviceWorkers: 'block'", "await context.route", "route.fetch({ maxRedirects: 0 })", "BLOCKED REDIRECT", "await context.routeWebSocket", "url.origin !== origin", "route.abort('blockedbyclient')", "ws.close()", "await ws.connectToServer()", "context.newPage", "browser.close"} {
 		if !strings.Contains(visualRunner, want) {
 			t.Fatalf("AIH runner omitted required policy %q", want)
 		}

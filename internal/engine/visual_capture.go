@@ -49,7 +49,10 @@ await context.route('**/*', async route => {
   const request = route.request();
   const url = new URL(request.url());
   if (url.origin !== origin) { network.push('BLOCKED ' + request.method() + ' ' + url.origin); return route.abort('blockedbyclient'); }
-  return route.continue();
+  const response = await route.fetch({ maxRedirects: 0 });
+  const location = response.headers()['location'];
+  if (location && new URL(location, url).origin !== origin) { network.push('BLOCKED REDIRECT ' + new URL(location, url).origin); return route.abort('blockedbyclient'); }
+  return route.fulfill({ response });
 });
 await context.routeWebSocket('**/*', async ws => {
   const url = new URL(ws.url());
