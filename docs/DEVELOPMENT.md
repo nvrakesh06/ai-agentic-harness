@@ -54,6 +54,10 @@ checks:
 release_repo: nvrakesh06/ai-agentic-harness
 ```
 
+`lease_seconds` controls the durable takeover window. AIH derives a local status
+pulse of at most 30 seconds and a remote half-life renewal from that one value;
+there is no second cadence that can be misconfigured beyond the lease expiry.
+
 Checks optionally declare `platforms: [windows]`, `[darwin]` or `[linux]`. At least one must
 apply. They run in the candidate worktree, with credential-like environment keys
 filtered. Output is bounded; failures are redacted before portable recording.

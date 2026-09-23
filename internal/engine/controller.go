@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,13 @@ import (
 )
 
 var ErrLease = errors.New("controller lease unavailable or lost")
+
+const (
+	// LocalLeaseHeartbeatKey is machine-local observability. The remote snapshot
+	// remains the fencing authority; this value must never authorize publication.
+	LocalLeaseHeartbeatKey = "lease_local_heartbeat"
+	maxLocalLeasePulse     = 30 * time.Second
+)
 
 type Controller struct {
 	P           *Project
@@ -32,6 +40,7 @@ type Controller struct {
 	fatal       chan error
 	readers     chan struct{}
 	jobs        sync.WaitGroup
+	now         func() time.Time
 }
 
 func New(p *Project) *Controller {
@@ -42,6 +51,33 @@ func (c *Controller) Snapshot() *model.Snapshot {
 	defer c.mu.Unlock()
 	return model.Clone(c.s)
 }
+
+func (c *Controller) nowUTC() time.Time {
+	if c.now != nil {
+		return c.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (c *Controller) leaseDuration() time.Duration {
+	return time.Duration(c.P.Config.Project.LeaseSeconds) * time.Second
+}
+
+func leasePulseInterval(lease time.Duration) time.Duration {
+	interval := lease / 6
+	if interval > maxLocalLeasePulse {
+		return maxLocalLeasePulse
+	}
+	if interval < time.Second {
+		return time.Second
+	}
+	return interval
+}
+
+func leaseRenewalDue(lease model.Lease, now time.Time, duration time.Duration) bool {
+	return !lease.Expires.After(now.Add(duration / 2))
+}
+
 func (c *Controller) acquire(ctx context.Context) error {
 	s, h, e := c.P.Git.Load(ctx)
 	if e != nil {
@@ -50,11 +86,11 @@ func (c *Controller) acquire(ctx context.Context) error {
 	if s.Project != c.P.Config.Project.ID {
 		return errors.New("remote project identity mismatch")
 	}
-	now := time.Now().UTC()
+	now := c.nowUTC()
 	if s.Controller.Owner != "" && s.Controller.Expires.Add(5*time.Second).After(now) {
 		return fmt.Errorf("%w: held by %s until %s", ErrLease, s.Controller.Machine, s.Controller.Expires)
 	}
-	s.Controller = model.Lease{Machine: c.P.Machine.ID, Owner: c.owner, Epoch: s.Controller.Epoch + 1, Heartbeat: now, Expires: now.Add(time.Duration(c.P.Config.Project.LeaseSeconds) * time.Second)}
+	s.Controller = model.Lease{Machine: c.P.Machine.ID, Owner: c.owner, Epoch: s.Controller.Epoch + 1, Heartbeat: now, Expires: now.Add(c.leaseDuration())}
 	s.Revision++
 	next, e := c.P.Git.StateCommit(ctx, h, s)
 	if e != nil {
@@ -65,38 +101,66 @@ func (c *Controller) acquire(ctx context.Context) error {
 	}
 	c.s = s
 	c.head = next
-	return c.P.DB.Save(next, s)
+	if e = c.P.DB.Save(next, s); e != nil {
+		return e
+	}
+	return c.P.DB.Set(LocalLeaseHeartbeatKey, now.Format(time.RFC3339Nano))
 }
 func (c *Controller) save(ctx context.Context, fn func(*model.Snapshot) error, updates ...gitx.Update) error {
+	_, e := c.persist(ctx, fn, updates...)
+	return e
+}
+
+// persist publishes meaningful state immediately. A semantic no-op only
+// publishes when the durable lease has reached half-life, so frequent local
+// pulses and duplicate mutations do not create remote history.
+func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error, updates ...gitx.Update) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.s == nil {
-		return ErrLease
+		return false, ErrLease
 	}
-	now := time.Now().UTC()
+	now := c.nowUTC()
 	if c.s.Controller.Owner != c.owner || !c.s.Controller.Expires.After(now) {
-		return ErrLease
+		return false, ErrLease
 	}
 	next := model.Clone(c.s)
 	if e := fn(next); e != nil {
-		return e
+		return false, e
+	}
+	due := leaseRenewalDue(c.s.Controller, now, c.leaseDuration())
+	if len(updates) == 0 && reflect.DeepEqual(c.s, next) {
+		if !due {
+			return false, nil
+		}
+		return c.renewLeaseLocked(ctx, now)
 	}
 	// Keep runtime paths out of portable diagnostic/result text.
 	portable, e := json.Marshal(next)
 	if e != nil {
-		return e
+		return false, e
 	}
 	if e = json.Unmarshal([]byte(c.portable(string(portable))), next); e != nil {
-		return e
+		return false, e
 	}
-	next.Revision++
+	if len(updates) == 0 && reflect.DeepEqual(c.s, next) {
+		if !due {
+			return false, nil
+		}
+		return c.renewLeaseLocked(ctx, now)
+	}
+	if next.Controller.Owner == c.owner {
+		next.Controller.Heartbeat = now
+		next.Controller.Expires = now.Add(c.leaseDuration())
+	}
+	next.Revision = c.s.Revision + 1
 	newHead, e := c.P.Git.StateCommit(ctx, c.head, next)
 	if e != nil {
-		return e
+		return false, e
 	}
 	all := append([]gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}, updates...)
 	if e = c.P.Git.Publish(ctx, all); e != nil {
-		return e
+		return false, e
 	}
 	for id, task := range next.Tasks {
 		if old := c.s.Tasks[id]; old == nil || old.State != task.State {
@@ -109,7 +173,34 @@ func (c *Controller) save(ctx context.Context, fn func(*model.Snapshot) error, u
 	}
 	c.s = next
 	c.head = newHead
-	return c.P.DB.Save(newHead, next)
+	if e = c.P.DB.Save(newHead, next); e != nil {
+		return true, e
+	}
+	_ = c.P.DB.Set(LocalLeaseHeartbeatKey, now.Format(time.RFC3339Nano))
+	return true, nil
+}
+
+// renewLeaseLocked publishes a dedicated lease commit while c.mu is held. The
+// cached snapshot adopts the authoritative renewed lease without changing its
+// user-significant state revision.
+func (c *Controller) renewLeaseLocked(ctx context.Context, now time.Time) (bool, error) {
+	next := model.Clone(c.s)
+	next.Controller.Heartbeat = now
+	next.Controller.Expires = now.Add(c.leaseDuration())
+	newHead, e := c.P.Git.LeaseCommit(ctx, c.head, next)
+	if e != nil {
+		return false, e
+	}
+	if e = c.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}); e != nil {
+		return false, e
+	}
+	c.s = next
+	c.head = newHead
+	if e = c.P.DB.Save(newHead, next); e != nil {
+		return true, e
+	}
+	_ = c.P.DB.Set(LocalLeaseHeartbeatKey, now.Format(time.RFC3339Nano))
+	return true, nil
 }
 func (c *Controller) mutate(fn func(*model.Snapshot) error) error {
 	e := c.save(c.ctx, fn)
@@ -132,22 +223,36 @@ func (c *Controller) fetch(ctx context.Context) error {
 	defer c.gitMu.Unlock()
 	return c.P.Git.Fetch(ctx)
 }
+func (c *Controller) pulseLease(ctx context.Context) (bool, error) {
+	now := c.nowUTC()
+	if e := c.P.DB.Set(LocalLeaseHeartbeatKey, now.Format(time.RFC3339Nano)); e != nil {
+		return false, e
+	}
+	published, e := c.persist(ctx, func(*model.Snapshot) error { return nil })
+	if e != nil {
+		return false, e
+	}
+	if published {
+		expires := c.Snapshot().Controller.Expires.Format(time.RFC3339)
+		_ = c.P.DB.Event("", "", "", "", "lease_renewed", "durable controller lease extended to "+expires)
+	}
+	return published, nil
+}
+
 func (c *Controller) heartbeat(ctx context.Context) {
-	interval := time.Duration(c.P.Config.Project.LeaseSeconds/3) * time.Second
+	interval := leasePulseInterval(c.leaseDuration())
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	if _, e := c.pulseLease(ctx); e != nil {
+		c.fail(e)
+		return
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			e := c.save(ctx, func(s *model.Snapshot) error {
-				now := time.Now().UTC()
-				s.Controller.Heartbeat = now
-				s.Controller.Expires = now.Add(time.Duration(c.P.Config.Project.LeaseSeconds) * time.Second)
-				return nil
-			})
-			if e != nil {
+			if _, e := c.pulseLease(ctx); e != nil {
 				c.fail(e)
 				return
 			}

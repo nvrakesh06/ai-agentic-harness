@@ -191,6 +191,12 @@ budget. Active work gets one checkpoint/finalizer pass inside the remaining hard
 budget. If that pass times out, AIH checkpoints safe edits and passes a synthetic,
 evidence-backed handoff to the next worker; it never extends the hard deadline again.
 
+Local supervisor liveness is updated at least every 30 seconds. Durable lease-only
+commits occur at half of `lease_seconds` without incrementing the state revision;
+meaningful state saves refresh that lease and coalesce the pending renewal. `aih
+status` displays both timestamps. Only the durable remote expiry authorizes
+takeover or publication.
+
 There is no HTTP API, management port, browser dashboard, Redis, or external queue.
 See [architecture](docs/ARCHITECTURE.md), [state layout](docs/STATE.md),
 [integration decision](docs/DECISIONS.md), and [custom roles](docs/ROLES.md).
