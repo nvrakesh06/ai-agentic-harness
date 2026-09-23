@@ -23,6 +23,8 @@ type Pull struct {
 	Number int    `json:"number"`
 	State  string `json:"state"`
 	Merged bool   `json:"merged"`
+	Draft  bool   `json:"draft"`
+	Body   string `json:"body"`
 	Head   struct {
 		SHA string `json:"sha"`
 		Ref string `json:"ref"`
@@ -37,6 +39,7 @@ type Service interface {
 	UpdateIssue(context.Context, int, string, bool) error
 	EnsurePR(context.Context, string, string, string, string) (int, error)
 	UpdatePR(context.Context, int, string) error
+	SetPRDraft(context.Context, int, bool) error
 	Pull(context.Context, int) (Pull, error)
 	Issues(context.Context) ([]Issue, error)
 }
@@ -152,11 +155,26 @@ func (c Client) EnsurePR(ctx context.Context, branch, base, title, body string) 
 		return list[0].Number, nil
 	}
 	var p Pull
-	e := c.api(ctx, "POST", "repos/"+c.Repo+"/pulls", map[string]any{"head": branch, "base": base, "title": title, "body": body}, &p)
+	e := c.api(ctx, "POST", "repos/"+c.Repo+"/pulls", map[string]any{"head": branch, "base": base, "title": title, "body": body, "draft": true}, &p)
 	return p.Number, e
 }
 func (c Client) UpdatePR(ctx context.Context, n int, body string) error {
 	return c.api(ctx, "PATCH", "repos/"+c.Repo+"/pulls/"+strconv.Itoa(n), map[string]any{"body": body}, nil)
+}
+func (c Client) SetPRDraft(ctx context.Context, n int, draft bool) error {
+	p, e := c.Pull(ctx, n)
+	if e != nil {
+		return e
+	}
+	if p.Draft == draft {
+		return nil
+	}
+	args := []string{"pr", "ready", strconv.Itoa(n), "--repo", c.Repo}
+	if draft {
+		args = append(args, "--undo")
+	}
+	_, e = c.run(ctx, "", args...)
+	return e
 }
 func (c Client) Pull(ctx context.Context, n int) (Pull, error) {
 	var p Pull

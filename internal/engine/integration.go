@@ -38,7 +38,10 @@ func (c *Controller) integrate(id string) {
 		}
 		base = t.BaseSHA
 		if effective.BaseSHA != base || effective.Hash != t.Evidence.Config {
-			_ = c.mutate(func(s *model.Snapshot) error { s.Tasks[id].State = model.SyncRequired; return nil })
+			if c.mutate(func(s *model.Snapshot) error { s.Tasks[id].State = model.SyncRequired; return nil }) == nil {
+				_ = c.updatePR(id, true)
+				c.mirror(id)
+			}
 			return
 		}
 	}
@@ -47,8 +50,9 @@ func (c *Controller) integrate(id string) {
 		c.block(id, "Check PR access and retry.", e.Error(), model.SyncRequired)
 		return
 	}
-	if pr.State != "open" || pr.Merged || pr.Head.SHA != t.HeadSHA || pr.Base.Ref != "main" {
-		c.block(id, "The PR changed outside AIH. Reconcile it before retrying.", "PR state/head/base differs from verified evidence", model.SyncRequired)
+	if pr.State != "open" || pr.Merged || pr.Draft || pr.Head.SHA != t.HeadSHA || pr.Base.Ref != "main" {
+		_ = c.updatePR(id, true)
+		c.block(id, "The PR changed outside AIH. Reconcile it before retrying.", "PR state/head/base/readiness differs from verified evidence", model.SyncRequired)
 		return
 	}
 	merge, e := c.P.Git.MergeCommit(c.ctx, base, t.HeadSHA, fmt.Sprintf("Merge AIH task #%d: %s", t.Issue, t.Title))
@@ -101,7 +105,7 @@ func (c *Controller) integrate(id string) {
 		}
 		newMain, re := c.P.Git.RemoteHead(c.ctx, "main")
 		if re == nil && newMain != base {
-			_ = c.mutate(func(s *model.Snapshot) error {
+			if c.mutate(func(s *model.Snapshot) error {
 				task := s.Tasks[id]
 				task.FixCycles["integration_races"]++
 				if task.FixCycles["integration_races"] > 5 {
@@ -111,7 +115,10 @@ func (c *Controller) integrate(id string) {
 					task.Evidence = nil
 				}
 				return nil
-			})
+			}) == nil {
+				_ = c.updatePR(id, true)
+				c.mirror(id)
+			}
 			return
 		}
 		c.block(id, "Atomic integration was rejected. Check repository permissions/atomic support.", e.Error(), model.SyncRequired)

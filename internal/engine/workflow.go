@@ -347,6 +347,11 @@ func (c *Controller) mirrorWith(ctx context.Context, id string) {
 	if e := c.P.Hub.UpdateIssue(ctx, t.Issue, c.issueBody(t), t.State == model.Done); e != nil {
 		_ = c.P.DB.Event(id, "", "", "", "github_sync_pending", safety.Redact(e.Error()))
 	}
+	if t.PR != 0 {
+		if e := c.P.Hub.UpdatePR(ctx, t.PR, c.prBody(t)); e != nil {
+			_ = c.P.DB.Event(id, "", "", "", "github_sync_pending", safety.Redact(e.Error()))
+		}
+	}
 }
 func (c *Controller) block(id, question, reason string, resume model.State) {
 	if c.ctx.Err() != nil {
@@ -670,7 +675,7 @@ func (c *Controller) retry(id, kind, reason string) {
 		c.block(id, "Recovery budget exhausted. Choose how to proceed.", reason, model.Fix)
 		return
 	}
-	_ = c.mutate(func(s *model.Snapshot) error {
+	if c.mutate(func(s *model.Snapshot) error {
 		task := s.Tasks[id]
 		if kind == "implementation" {
 			task.Attempts = count
@@ -680,7 +685,9 @@ func (c *Controller) retry(id, kind, reason string) {
 		task.Findings = append(task.Findings, model.Finding{Severity: "high", Category: kind, Reason: reason, Role: kind})
 		task.State = model.Fix
 		return nil
-	})
+	}) == nil {
+		c.mirror(id)
+	}
 }
 func (c *Controller) syncTask(ctx context.Context, id string) (config.Effective, error) {
 	effective, e := c.effective(ctx)
@@ -768,10 +775,6 @@ func (c *Controller) verifyReview(id string) error {
 	}
 	t := c.Snapshot().Tasks[id]
 	dir := c.P.TaskPath(t)
-	checks, e := c.checks(c.ctx, effective, dir)
-	if e != nil {
-		return e
-	}
 	diff, paths, e := c.P.Git.Diff(c.ctx, t.BaseSHA, t.HeadSHA)
 	if e != nil {
 		return e
@@ -782,14 +785,13 @@ func (c *Controller) verifyReview(id string) error {
 	if e = safety.Check(diff); e != nil {
 		return e
 	}
-	if t.PR == 0 {
-		pr, e := c.P.Hub.EnsurePR(c.ctx, t.Branch, "main", t.Title, c.prBody(t))
-		if e != nil {
-			return e
-		}
-		if e = c.mutate(func(s *model.Snapshot) error { s.Tasks[id].PR = pr; return nil }); e != nil {
-			return e
-		}
+	if e = c.ensureDraftPR(id); e != nil {
+		return e
+	}
+	t = c.Snapshot().Tasks[id]
+	checks, e := c.checks(c.ctx, effective, dir)
+	if e != nil {
+		return e
 	}
 	all, e := roles.Load(effective.Files)
 	if e != nil {
@@ -821,15 +823,21 @@ func (c *Controller) verifyReview(id string) error {
 	}
 	evidence := &model.Evidence{Base: t.BaseSHA, Head: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: checks, Reviews: map[string]string{}, At: time.Now().UTC()}
 	if e = c.mutate(func(s *model.Snapshot) error {
-		s.Tasks[id].State = model.Review
-		s.Tasks[id].UI = t.UI
-		s.Tasks[id].Security = t.Security
-		s.Tasks[id].Findings = nil
-		s.Tasks[id].Verification = nil
+		task := s.Tasks[id]
+		task.State = model.Review
+		task.UI = t.UI
+		task.Security = t.Security
+		task.Findings = nil
+		task.Verification = nil
+		task.Evidence = evidence
 		return nil
 	}); e != nil {
 		return e
 	}
+	if e = c.updatePR(id, true); e != nil {
+		return e
+	}
+	c.mirror(id)
 	type reviewOutcome struct {
 		result provider.Result
 		err    error
@@ -861,11 +869,14 @@ func (c *Controller) verifyReview(id string) error {
 			result.Findings[i].Role = role.Name
 		}
 		if e = c.mutate(func(s *model.Snapshot) error {
-			s.Tasks[id].Findings = append(s.Tasks[id].Findings, result.Findings...)
+			task := s.Tasks[id]
+			task.Findings = append(task.Findings, result.Findings...)
+			task.Evidence.Reviews[role.Name] = result.Summary
 			return nil
 		}); e != nil {
 			return e
 		}
+		c.mirror(id)
 		if roles.Blocking(role, result.Findings) {
 			c.retry(id, role.Name, result.Summary)
 			return nil
@@ -889,18 +900,71 @@ func (c *Controller) verifyReview(id string) error {
 		return e
 	}
 	t = c.Snapshot().Tasks[id]
-	if e = c.P.Hub.UpdatePR(c.ctx, t.PR, c.prBody(t)); e != nil {
+	if e = c.updatePR(id, false); e != nil {
 		return e
 	}
 	c.mirror(id)
 	return nil
 }
+func (c *Controller) ensureDraftPR(id string) error {
+	t := c.Snapshot().Tasks[id]
+	if t.PR == 0 {
+		pr, e := c.P.Hub.EnsurePR(c.ctx, t.Branch, "main", t.Title, c.prBody(t))
+		if e != nil {
+			return e
+		}
+		if e = c.mutate(func(s *model.Snapshot) error { s.Tasks[id].PR = pr; return nil }); e != nil {
+			return e
+		}
+	}
+	return c.updatePR(id, true)
+}
+func (c *Controller) updatePR(id string, draft bool) error {
+	t := c.Snapshot().Tasks[id]
+	if t == nil || t.PR == 0 {
+		return nil
+	}
+	if draft {
+		if e := c.P.Hub.SetPRDraft(c.ctx, t.PR, true); e != nil {
+			return e
+		}
+	}
+	if e := c.P.Hub.UpdatePR(c.ctx, t.PR, c.prBody(t)); e != nil {
+		return e
+	}
+	if !draft {
+		if e := c.P.Hub.SetPRDraft(c.ctx, t.PR, false); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+func acceptedEvidence(t *model.Task) bool {
+	if t == nil || t.Evidence == nil || t.Evidence.Config == "" || t.Evidence.Rules == "" || len(t.Evidence.Checks) == 0 {
+		return false
+	}
+	switch t.State {
+	case model.MergeReady, model.MergeTrain:
+		return t.Evidence.Base == t.BaseSHA && t.Evidence.Head == t.HeadSHA
+	case model.PostVerify, model.Done:
+		return t.MergeSHA != "" && t.Evidence.IntegrationSHA == t.MergeSHA
+	default:
+		return false
+	}
+}
 func (c *Controller) prBody(t *model.Task) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n\nCloses #%d\n\n%s\n\nAcceptance criteria:\n", github.Marker(t.ID), t.Issue, t.Objective)
+	fmt.Fprintf(&b, "%s\n\nCloses #%d\n\n%s\n", github.Marker(t.ID), t.Issue, t.Objective)
+	accepted := acceptedEvidence(t)
+	if accepted {
+		fmt.Fprintf(&b, "\nAIH review status: exact-head verification and required independent reviews passed.\nAIH state: `%s`\nCheckpoint head: `%s`\n", t.State, t.HeadSHA)
+	} else {
+		fmt.Fprintf(&b, "\nAIH work in progress: this draft PR is visible for inspection but is not verified or merge-ready.\nAIH state: `%s`\nCheckpoint head: `%s`\n", t.State, t.HeadSHA)
+	}
+	b.WriteString("\nAcceptance criteria:\n")
 	for _, a := range t.Acceptance {
 		mark := " "
-		if t.Evidence != nil && t.Evidence.Reviews["qa"] != "" {
+		if accepted {
 			mark = "x"
 		}
 		fmt.Fprintf(&b, "- [%s] %s\n", mark, a)
@@ -912,7 +976,11 @@ func (c *Controller) prBody(t *model.Task) string {
 		fmt.Fprintf(&b, "\nReported risk: %s\n", risk)
 	}
 	if e := t.Evidence; e != nil {
-		fmt.Fprintf(&b, "\nVerification (base `%s`, head `%s`):\n", e.Base, e.Head)
+		label := "Verification progress; acceptance is not complete"
+		if accepted {
+			label = "Accepted verification"
+		}
+		fmt.Fprintf(&b, "\n%s (base `%s`, head `%s`):\n", label, e.Base, e.Head)
 		for _, n := range e.Checks {
 			b.WriteString("- passed: " + n + "\n")
 		}
