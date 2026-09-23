@@ -135,17 +135,18 @@ type Lease struct {
 	Expires   time.Time `json:"expires_at"`
 }
 type Run struct {
-	ID         string    `json:"id"`
-	Task       string    `json:"task"`
-	Role       string    `json:"role"`
-	Provider   string    `json:"provider"`
-	Capability string    `json:"capability"`
-	Version    string    `json:"version"`
-	RulesHash  string    `json:"rules_hash"`
-	Started    time.Time `json:"started"`
-	DurationMS int64     `json:"duration_ms"`
-	Outcome    string    `json:"outcome"`
-	Epoch      uint64    `json:"epoch"`
+	ID             string    `json:"id"`
+	Task           string    `json:"task"`
+	Role           string    `json:"role"`
+	Provider       string    `json:"provider"`
+	Capability     string    `json:"capability"`
+	EffectiveModel string    `json:"effective_model"`
+	Version        string    `json:"version"`
+	RulesHash      string    `json:"rules_hash"`
+	Started        time.Time `json:"started"`
+	DurationMS     int64     `json:"duration_ms"`
+	Outcome        string    `json:"outcome"`
+	Epoch          uint64    `json:"epoch"`
 }
 type CapacityTransition struct {
 	At            time.Time `json:"at"`

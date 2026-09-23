@@ -144,6 +144,62 @@ func TestStatusShowsWorkerDeadlineLifecycle(t *testing.T) {
 	}
 }
 
+func TestStatusShowsResolvedModelInHumanAndJSONOutput(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	snapshot := model.NewSnapshot("model-project")
+	snapshot.Runs = []model.Run{{ID: "run", Role: "reviewer", Capability: "strong", EffectiveModel: "provider-specific-model", Outcome: "completed"}}
+	if err = db.Save(strings.Repeat("a", 40), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	p := &engine.Project{DB: db, Dir: dir}
+	var human, machine bytes.Buffer
+	cmd := New()
+	cmd.SetOut(&human)
+	if err = showStatus(cmd, p, false, false); err != nil {
+		t.Fatal(err)
+	}
+	cmd.SetOut(&machine)
+	if err = showStatus(cmd, p, false, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, out := range []string{human.String(), machine.String()} {
+		if !strings.Contains(out, "capability=strong") && !strings.Contains(out, `"capability": "strong"`) || !strings.Contains(out, "provider-specific-model") {
+			t.Fatalf("status omitted model evidence: %s", out)
+		}
+	}
+}
+
+func TestStatusBoundsHistoricalWorkerRunsButKeepsActive(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	snapshot := model.NewSnapshot("bounded-runs")
+	for i := 0; i < 12; i++ {
+		snapshot.Runs = append(snapshot.Runs, model.Run{ID: fmt.Sprintf("old-%02d", i), Role: "reviewer", Outcome: "completed"})
+	}
+	snapshot.Runs[0].Outcome = "running"
+	if err = db.Save(strings.Repeat("a", 40), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	cmd := New()
+	cmd.SetOut(&out)
+	if err = showStatus(cmd, &engine.Project{DB: db, Dir: dir}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "active plus latest 10 of 12") || !strings.Contains(out.String(), "old-00") || strings.Contains(out.String(), "old-01") {
+		t.Fatalf("historical runs were not bounded correctly: %s", out.String())
+	}
+}
+
 func TestStatusDistinguishesLocalAndDurableLeaseHeartbeats(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "state.db"))

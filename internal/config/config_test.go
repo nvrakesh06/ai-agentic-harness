@@ -16,6 +16,29 @@ func canonicalFiles() map[string]string {
 	}
 	return f
 }
+
+func TestModelResolutionAndMappingWarnings(t *testing.T) {
+	p := Defaults()
+	if got := p.ResolveModel("implementer", "normal"); got.Capability != "normal" || got.EffectiveModel != ProviderDefaultModel || got.RequestModel != "" {
+		t.Fatalf("default resolution = %#v", got)
+	}
+	warnings := p.ModelMappingWarnings()
+	if len(warnings) != 3 || !strings.Contains(strings.Join(warnings, "\n"), "implementer") || !strings.Contains(strings.Join(warnings, "\n"), "advisor") {
+		t.Fatalf("default warnings = %v", warnings)
+	}
+	p.ProviderModels = map[string]string{"normal": "model-a", "strong": "model-b", "strongest": "model-b"}
+	if warnings := p.ModelMappingWarnings(); len(warnings) != 0 {
+		t.Fatalf("explicit identical mappings warned: %v", warnings)
+	}
+	if got := p.ResolveModel("advisor", "strongest"); got.EffectiveModel != "model-b" || got.RequestModel != "model-b" {
+		t.Fatalf("explicit resolution = %#v", got)
+	}
+	p.ProviderModels = map[string]string{"normal": "model-a"}
+	warnings = p.ModelMappingWarningsForRoles(map[string]string{"custom-review": "strong", "custom-qa": "normal"})
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "custom-review") {
+		t.Fatalf("custom role warning = %v", warnings)
+	}
+}
 func TestCanonicalValidation(t *testing.T) {
 	f := canonicalFiles()
 	if _, e := Parse(f); e != nil {
@@ -96,5 +119,28 @@ func TestMachineAndNativeChecks(t *testing.T) {
 		if _, e = GitHubRepo(r); e == nil {
 			t.Fatal("unsafe remote", r)
 		}
+	}
+}
+
+func TestParseLocalIncludesCustomRoles(t *testing.T) {
+	root := t.TempDir()
+	files := canonicalFiles()
+	if err := os.MkdirAll(filepath.Join(root, ".aih", "roles"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range files {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, ".aih", "roles", "custom.yaml"), []byte("name: custom-review\nextends: reviewer\ncapability: strongest\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ParseLocal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.Files[".aih/roles/custom.yaml"]; !ok {
+		t.Fatal("custom role was omitted from local configuration")
 	}
 }

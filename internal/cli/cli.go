@@ -74,6 +74,11 @@ func New() *cobra.Command {
 		if e = engine.Init(cmd.Context(), r, h, selected); e != nil {
 			return e
 		}
+		if cfg, parseErr := config.ParseLocal(r); parseErr == nil {
+			for _, warning := range modelMappingWarnings(cfg) {
+				fmt.Fprintln(cmd.OutOrStdout(), "[WARN]", warning)
+			}
+		}
 		fmt.Fprintln(cmd.OutOrStdout(), "AIH initialized. Review .aih/project.yaml and AGENTS.md, then commit and push the configuration to main. Run aih run \"your objective\" afterward.")
 		return nil
 	}}
@@ -410,6 +415,27 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 			fmt.Fprintf(cmd.OutOrStdout(), "  Verification route: %s (%s, attempt %d)\n", route, t.Verification.Environment, t.Verification.Attempts)
 		}
 	}
+	if len(s.Runs) > 0 {
+		const recentRunLimit = 10
+		shown := map[int]bool{}
+		for i, run := range s.Runs {
+			if run.Outcome == "running" {
+				shown[i] = true
+			}
+		}
+		for i := len(s.Runs) - recentRunLimit; i < len(s.Runs); i++ {
+			if i >= 0 {
+				shown[i] = true
+			}
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Worker runs (active plus latest %d of %d; full history in status --json):\n", recentRunLimit, len(s.Runs))
+		for i, run := range s.Runs {
+			if !shown[i] {
+				continue
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: capability=%s effective_model=%s outcome=%s\n", run.Role, run.ID, run.Capability, run.EffectiveModel, run.Outcome)
+		}
+	}
 	for _, ob := range s.Objectives {
 		if ob.Blocker != "" {
 			fmt.Fprintf(cmd.OutOrStdout(), "Objective %s needs input: %s\n", ob.ID, ob.Blocker)
@@ -449,6 +475,18 @@ func shortSHA(s string) string {
 		return s[:12]
 	}
 	return s
+}
+
+func modelMappingWarnings(cfg config.Effective) []string {
+	all, err := roles.Load(cfg.Files)
+	if err != nil {
+		return cfg.Project.ModelMappingWarnings()
+	}
+	capabilities := make(map[string]string, len(all))
+	for name, role := range all {
+		capabilities[name] = role.Capability
+	}
+	return cfg.Project.ModelMappingWarningsForRoles(capabilities)
 }
 func addInspection(root *cobra.Command, o *options) {
 	roleCmd := &cobra.Command{Use: "roles", RunE: func(cmd *cobra.Command, _ []string) error {
