@@ -155,6 +155,23 @@ func TestSchemaTwoMigrationDropsUnownedCheckRecords(t *testing.T) {
 	}
 }
 
+func TestSchemaTwoMigratesAndPreflightProgressRoundTrips(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Schema = 2
+	s.Tasks["task"] = &Task{ID: "task", State: Ready}
+	b, _ := json.Marshal(s)
+	migrated, changed, err := Decode(b)
+	if err != nil || !changed || migrated.Schema != StateSchema || migrated.Tasks["task"].Preflight != nil {
+		t.Fatal(migrated, changed, err)
+	}
+	migrated.Tasks["task"].Preflight = &Preflight{Phase: "waiting", BaseSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", HeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Config: fmt.Sprintf("%064x", 1), Rules: fmt.Sprintf("%064x", 2), Completed: []string{"architecture"}}
+	b, _ = json.Marshal(migrated)
+	recovered, changed, err := Decode(b)
+	if err != nil || changed || recovered.Tasks["task"].Preflight.Phase != "waiting" || fmt.Sprint(recovered.Tasks["task"].Preflight.Completed) != "[architecture]" {
+		t.Fatal(recovered, changed, err)
+	}
+}
+
 func TestVerificationRetryGuardRoundTripsAndValidates(t *testing.T) {
 	s := NewSnapshot("project123")
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte("native verification")))

@@ -229,12 +229,25 @@ func (c *Controller) effective(ctx context.Context) (config.Effective, error) {
 	return e, eErr
 }
 func (c *Controller) role(ctx context.Context, e config.Effective, r roles.Role, t *model.Task, dir, objective, diff, evidence string) (provider.Result, error) {
+	return c.roleWithCompletion(ctx, e, r, t, dir, objective, diff, evidence, nil)
+}
+func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective, r roles.Role, t *model.Task, dir, objective, diff, evidence string, complete func(*model.Snapshot, provider.Result, error) error) (provider.Result, error) {
 	if r.Name != "implementer" {
 		select {
 		case c.readers <- struct{}{}:
 			defer func() { <-c.readers }()
 		case <-ctx.Done():
 			return provider.Result{}, ctx.Err()
+		}
+		if t != nil && t.Preflight != nil && t.Preflight.Phase == "waiting" {
+			if err := c.mutate(func(s *model.Snapshot) error {
+				if p := s.Tasks[t.ID].Preflight; p != nil {
+					p.Phase = "running"
+				}
+				return nil
+			}); err != nil {
+				return provider.Result{}, err
+			}
 		}
 	}
 	id := model.ID()
@@ -288,6 +301,9 @@ func (c *Controller) role(ctx context.Context, e config.Effective, r roles.Role,
 					s.Runs[i].DurationMS = time.Since(started).Milliseconds()
 					s.Runs[i].Outcome = outcome
 				}
+			}
+			if complete != nil {
+				return complete(s, result, err)
 			}
 			return nil
 		})
@@ -552,6 +568,8 @@ func portableStrings(c *Controller, values []string) []string {
 	return out
 }
 func (c *Controller) ensureWorktree(id string) error {
+	c.gitMu.Lock()
+	defer c.gitMu.Unlock()
 	t := c.Snapshot().Tasks[id]
 	from := t.HeadSHA
 	if from == "" {
@@ -606,39 +624,6 @@ func (c *Controller) implement(id string) bool {
 	if t.SyncBase != "" {
 		if e = c.P.Git.PrepareMerge(c.ctx, dir, t.SyncBase); e != nil {
 			c.block(id, "Repair task synchronization and retry.", e.Error(), model.Fix)
-			return false
-		}
-	}
-	pre, e := roles.Required(all, t, t.Areas, "pre-implementation")
-	if e != nil {
-		c.block(id, "Correct required roles.", e.Error(), model.Ready)
-		return false
-	}
-	if t.UI {
-		pre = append(pre, all["designer"])
-	}
-	for _, r := range pre {
-		result, e := c.role(c.ctx, effective, r, t, dir, "Provide pre-implementation guidance for the assigned task.", "", "")
-		if e != nil {
-			c.retry(id, "implementation", e.Error())
-			return false
-		}
-		if result.Status == "blocked" {
-			c.block(id, result.Question, result.Summary, model.Ready)
-			return false
-		}
-		if result.Status != "completed" {
-			c.retry(id, "implementation", r.Name+": "+result.Summary)
-			return false
-		}
-		if r.Stage == "pre-implementation" && roles.Blocking(r, result.Findings) {
-			c.block(id, "Resolve the pre-implementation specialist's blocking concerns.", result.Summary, model.Ready)
-			return false
-		}
-		if e = c.mutate(func(s *model.Snapshot) error {
-			s.Tasks[id].Decisions = append(s.Tasks[id].Decisions, r.Name+": "+result.Summary)
-			return nil
-		}); e != nil {
 			return false
 		}
 	}

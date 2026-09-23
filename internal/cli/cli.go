@@ -470,6 +470,7 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s check %q for %s (%s; %s)\n", check.Phase, check.Class, check.Check, check.Task, time.Since(at).Round(time.Second), map[string]string{"queued": "waiting for a verification slot", "running": "slot owned"}[check.Phase])
 	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Preflights: %d active\n", capacity.ActivePreflights)
 	if capacity.ReasonCode != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Backfill: %s — %s (%s)\n", capacity.State, capacity.Reason, capacity.ReasonCode)
 	} else {
@@ -485,6 +486,21 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		status := string(t.State)
 		if queued[t.ID] {
 			status = "WAITING_CHECK_CAPACITY"
+		}
+		if (t.State == model.Ready || t.State == model.Fix) && t.Preflight == nil {
+			status = "PREFLIGHT_QUEUED"
+		}
+		if t.Preflight != nil && (t.State == model.Ready || t.State == model.Fix) {
+			switch t.Preflight.Phase {
+			case "queued":
+				status = "PREFLIGHT_QUEUED"
+			case "waiting":
+				status = "PREFLIGHT_WAITING"
+			case "running":
+				status = "PREFLIGHT_RUNNING"
+			case "ready":
+				status = "READY_TO_WRITE"
+			}
 		}
 		if t.State == model.Ready {
 			for _, d := range t.Dependencies {

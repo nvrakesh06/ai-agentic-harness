@@ -277,6 +277,9 @@ func recoverSnapshot(s *model.Snapshot) error {
 			t.State = model.SyncRequired
 		}
 		t.RunID = ""
+		if t.Preflight != nil && t.Preflight.Phase != "ready" {
+			t.Preflight.Phase = "queued"
+		}
 	}
 	for i := range s.Runs {
 		if s.Runs[i].Outcome == "running" {
@@ -299,6 +302,10 @@ func (c *Controller) Serve(parent context.Context) error {
 	if e = c.P.Provider.Validate(parent); e != nil {
 		return e
 	}
+	preflightRoles, e := roles.Load(c.P.Config.Files)
+	if e != nil {
+		return e
+	}
 	c.ctx, c.cancel = context.WithCancel(parent)
 	defer c.cancel()
 	if e = c.acquire(parent); e != nil {
@@ -318,6 +325,7 @@ func (c *Controller) Serve(parent context.Context) error {
 	ticker := time.NewTicker(400 * time.Millisecond)
 	defer ticker.Stop()
 	active := map[string]bool{}
+	guidedPreflights := map[string]bool{}
 	done := make(chan string, 64)
 	merging := false
 	planning := false
@@ -332,6 +340,7 @@ func (c *Controller) Serve(parent context.Context) error {
 			c.cancel()
 		case id := <-done:
 			delete(active, id)
+			delete(guidedPreflights, id)
 			if strings.HasPrefix(id, "@merge:") {
 				delete(active, strings.TrimPrefix(id, "@merge:"))
 				merging = false
@@ -360,15 +369,26 @@ func (c *Controller) Serve(parent context.Context) error {
 				break
 			}
 			for _, t := range capacity.writers {
-				if active[t.ID] {
+				if hasActive(active, t.ID) {
 					continue
 				}
 				id := t.ID
-				if ce = c.mutate(func(s *model.Snapshot) error { return model.Transition(s.Tasks[id], model.Running) }); ce != nil {
+				admitted, ae := c.admitWriter(id, active)
+				if ae != nil {
+					ce = ae
 					break
+				}
+				if !admitted {
+					continue
 				}
 				active[id] = true
 				c.launch(func() { c.work(id, true); done <- id })
+			}
+			for _, candidate := range selectPreflights(c.Snapshot(), active, guidedPreflights, c.P.Config.Project.MaxReaders, c.P.Config.Project.MaxWriters, preflightRoles) {
+				id := candidate.task.ID
+				active[id] = false
+				guidedPreflights[id] = candidate.guided
+				c.launch(func() { c.preflight(id); done <- id })
 			}
 			if capacity.planObjective != "" {
 				id := capacity.planObjective
@@ -376,7 +396,7 @@ func (c *Controller) Serve(parent context.Context) error {
 				c.launch(func() { c.plan(id); done <- "@plan" })
 			}
 			for _, t := range model.Ordered(s) {
-				if active[t.ID] {
+				if hasActive(active, t.ID) {
 					continue
 				}
 				switch t.State {
@@ -388,7 +408,7 @@ func (c *Controller) Serve(parent context.Context) error {
 			}
 			if !merging {
 				for _, t := range model.Ordered(s) {
-					if active[t.ID] {
+					if hasActive(active, t.ID) {
 						continue
 					}
 					if t.State == model.PostVerify || (t.State == model.MergeReady && s.IntegrationBlocked == "") {
@@ -432,6 +452,7 @@ func (c *Controller) Serve(parent context.Context) error {
 			s.Controller.Owner = ""
 			s.Controller.Expires = time.Now().UTC()
 			s.Capacity.ActiveWriters = 0
+			s.Capacity.ActivePreflights = 0
 			s.Capacity.ActiveReaders = 0
 			s.Capacity.Verification = nil
 			s.Capacity.State = "stopped"
@@ -441,6 +462,9 @@ func (c *Controller) Serve(parent context.Context) error {
 			for _, t := range s.Tasks {
 				if t.State == model.Running {
 					t.State = model.Ready
+				}
+				if t.Preflight != nil && t.Preflight.Phase != "ready" {
+					t.Preflight.Phase = "queued"
 				}
 			}
 			for i := range s.Runs {
@@ -536,6 +560,7 @@ func (c *Controller) commands() (bool, error) {
 				if e := model.Answer(t, cmd.Payload); e != nil {
 					return e
 				}
+				t.Preflight = nil
 			case "improvement":
 				s.Improvements = append(s.Improvements, cmd.Payload)
 			case "assign-role":
@@ -550,6 +575,7 @@ func (c *Controller) commands() (bool, error) {
 					task.Roles = append(task.Roles, cmd.Payload)
 				}
 				task.Evidence = nil
+				task.Preflight = nil
 			default:
 				return errors.New("unknown command")
 			}
