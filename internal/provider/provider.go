@@ -125,6 +125,11 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 			sandbox = "workspace-write"
 		}
 		args = []string{"exec", "--json", "--sandbox", sandbox, "--output-schema", schemaPath, "--output-last-message", resultPath, "-c", "approval_policy=\"never\"", "-c", "project_doc_max_bytes=0"}
+		if r.Role == "implementer" {
+			// The public Codex CLI feature control disables the stable multi-agent
+			// feature for this invocation. The supervisor owns AIH delegation.
+			args = append(args, "--disable", "multi_agent")
+		}
 		if r.Model != "" {
 			args = append(args, "--model", r.Model)
 		}
@@ -159,6 +164,12 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 	// not written to logs; final results are scanned again before publication.
 	_ = os.WriteFile(filepath.Join(r.Runtime, "output.log"), []byte(safety.Redact(diagnosticOutput)), 0600)
 	if e != nil {
+		if errors.Is(e, context.DeadlineExceeded) {
+			if recovered, recoveredErr := c.recoverInProgress(observed.Stdout, resultPath, r.Role); recoveredErr == nil && recovered.Status == "in_progress" {
+				recovered.RecoveredDeadlineHandoff = true
+				return recovered, nil
+			}
+		}
 		return result, &InvocationError{Cause: fmt.Errorf("%s invocation failed: %w", c.Kind, e), LastActivity: observed.LastActivity, OutputBytes: len(diagnosticOutput)}
 	}
 	out := observed.Stdout
@@ -187,6 +198,35 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 		}
 	}
 	return Parse(out, r.Role)
+}
+
+// recoverInProgress returns only a valid structured handoff that was already
+// emitted before the process deadline. It never treats arbitrary partial output
+// as a successful provider result.
+func (c CLI) recoverInProgress(stdout, resultPath, role string) (Result, error) {
+	out := stdout
+	if c.Kind == "codex" {
+		b, err := os.ReadFile(resultPath)
+		if err != nil {
+			return Result{}, err
+		}
+		out = string(b)
+	} else if c.Kind == "claude-code" {
+		var envelope struct {
+			Structured json.RawMessage `json:"structured_output"`
+			Result     string          `json:"result"`
+			IsError    bool            `json:"is_error"`
+		}
+		if err := json.Unmarshal([]byte(out), &envelope); err != nil || envelope.IsError {
+			return Result{}, errors.New("no valid Claude structured handoff")
+		}
+		if len(envelope.Structured) > 0 {
+			out = string(envelope.Structured)
+		} else {
+			out = envelope.Result
+		}
+	}
+	return Parse(out, role)
 }
 func Parse(out, role string) (Result, error) {
 	var r Result

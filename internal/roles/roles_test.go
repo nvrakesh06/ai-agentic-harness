@@ -54,7 +54,7 @@ func TestBuiltinPromptsKeepOrchestrationInSupervisor(t *testing.T) {
 		}
 	}
 	implementer := builtins["implementer"].Instructions
-	for _, value := range []string{"Do not spawn", "subagents or reviewers", "supervisor schedules independent roles", "blocked with an empty question", "supervisor can run canonical native checks"} {
+	for _, value := range []string{"Do not spawn", "subagents, reviewers, QA, security, or specialists", "supervisor-owned gates", "report the remaining gate and return", "blocked with an empty question", "supervisor can run canonical native checks"} {
 		if !strings.Contains(implementer, value) {
 			t.Fatalf("implementer prompt does not preserve supervisor ownership: %q", implementer)
 		}
@@ -66,6 +66,16 @@ func TestReviewPromptsRequirePeerIndependenceAndSupervisorEvidenceRouting(t *tes
 	for _, value := range []string{"Peer reviews run concurrently and independently", "no peer approvals", "Do not wait for, require", "exact-head native evidence", "without asking a human to run tools", "missing Node, npm, Bun", "not a finding", "consequential human decision", "structured finding"} {
 		if !strings.Contains(prompt, value) {
 			t.Fatalf("review prompt missing %q: %s", value, prompt)
+		}
+	}
+}
+
+func TestImplementerPromptHandsIndependentReviewAcceptanceToSupervisor(t *testing.T) {
+	task := &model.Task{Acceptance: []string{"An independent reviewer approves the implementation."}}
+	prompt := Compile(config.Effective{Files: map[string]string{}}, Builtins()["implementer"], "linux", task, "implement the change", "", "")
+	for _, value := range []string{"An independent reviewer approves the implementation.", "supervisor-owned gates", "report the remaining gate and return"} {
+		if !strings.Contains(prompt, value) {
+			t.Fatalf("implementer prompt did not separate independent review acceptance: missing %q", value)
 		}
 	}
 }

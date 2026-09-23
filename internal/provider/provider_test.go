@@ -17,6 +17,9 @@ func init() {
 	if os.Getenv("AIH_PROVIDER_HELPER") != "1" {
 		return
 	}
+	if name := os.Getenv("AIH_HELPER_ARGS"); name != "" {
+		_ = os.WriteFile(name, []byte(strings.Join(os.Args, "\n")), 0600)
+	}
 	args := strings.Join(os.Args, " ")
 	if expected := os.Getenv("AIH_EXPECT_MODEL"); expected != "" {
 		actual := ""
@@ -55,6 +58,9 @@ func init() {
 		os.Exit(0)
 	}
 	r := Result{Schema: 1, Status: "completed", Summary: "fixture result"}
+	if os.Getenv("AIH_HELPER_MODE") == "late-in-progress" {
+		r = Result{Schema: 1, Status: "in_progress", Summary: "safe checkpoint before timeout"}
+	}
 	b, _ := json.Marshal(r)
 	if os.Getenv("AIH_HELPER_MODE") == "malformed" {
 		b = []byte("not-json")
@@ -62,12 +68,18 @@ func init() {
 	for i, a := range os.Args {
 		if a == "--output-last-message" {
 			_ = os.WriteFile(os.Args[i+1], b, 0600)
+			if os.Getenv("AIH_HELPER_MODE") == "late-in-progress" {
+				time.Sleep(10 * time.Second)
+			}
 			fmt.Println(`{"type":"turn.completed"}`)
 			os.Exit(0)
 		}
 	}
 	envelope, _ := json.Marshal(map[string]any{"structured_output": json.RawMessage(b)})
 	fmt.Println(string(envelope))
+	if os.Getenv("AIH_HELPER_MODE") == "late-in-progress" {
+		time.Sleep(10 * time.Second)
+	}
 	if os.Getenv("AIH_HELPER_MODE") == "stderr-success" {
 		fmt.Fprintln(os.Stderr, "benign provider diagnostic")
 	}
@@ -88,6 +100,45 @@ func TestAdaptersPassConfiguredModelExactly(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestImplementerDisablesCodexAgentsAndRecoversStructuredTimeoutHandoff(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AIH_PROVIDER_HELPER", "1")
+	t.Setenv("AIH_HELPER_MODE", "late-in-progress")
+	for _, kind := range []string{"codex", "claude-code"} {
+		t.Run(kind, func(t *testing.T) {
+			result, err := (CLI{Kind: kind, Executable: exe}).Run(context.Background(), Request{Directory: t.TempDir(), Runtime: filepath.Join(t.TempDir(), "run"), Role: "implementer", Prompt: "fixture", Timeout: 500 * time.Millisecond})
+			if err != nil || result.Status != "in_progress" || !result.RecoveredDeadlineHandoff {
+				t.Fatalf("result = %#v, err = %v", result, err)
+			}
+		})
+	}
+}
+
+func TestCodexImplementerInvocationDisablesMultiAgentFeature(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	t.Setenv("AIH_PROVIDER_HELPER", "1")
+	t.Setenv("AIH_HELPER_MODE", "success")
+	t.Setenv("AIH_HELPER_ARGS", argsFile)
+	_, err = (CLI{Kind: "codex", Executable: exe}).Run(context.Background(), Request{Directory: t.TempDir(), Runtime: filepath.Join(t.TempDir(), "run"), Role: "implementer", Prompt: "fixture", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "--disable\nmulti_agent") {
+		t.Fatalf("implementer invocation did not disable the multi-agent feature: %s", args)
 	}
 }
 func TestAdaptersLaunchAndFailures(t *testing.T) {
