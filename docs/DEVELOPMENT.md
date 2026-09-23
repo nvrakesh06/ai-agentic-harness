@@ -71,7 +71,7 @@ apply. They run in the candidate worktree, with credential-like environment keys
 filtered. Output is bounded; failures are redacted before portable recording.
 Checks declare `class: heavy` or `class: light`; an omitted class is heavy for
 safe legacy behavior. Limits in `resources` are portable project ceilings. The
-machine's `~/.aih/machine.yaml` may set `max_heavy_checks` (default 1), and
+machine's `AIH_HOME/machine.yaml` may set `max_heavy_checks` (default 1), and
 heavy checks take a machine-local OS lock under the shared AIH home. Command
 timeouts start after a slot is acquired. `status` and `watch` show each queued
 or running check and its elapsed wait or run time.

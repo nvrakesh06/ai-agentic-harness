@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -23,7 +24,7 @@ func TestRecoveryClearsCheckOwnerBeforeRetry(t *testing.T) {
 
 func TestMachineCheckSlots(t *testing.T) {
 	for _, slots := range []int{1, 2} {
-		t.Run(string(rune('0'+slots)), func(t *testing.T) {
+		t.Run(strconv.Itoa(slots), func(t *testing.T) {
 			home := t.TempDir()
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
