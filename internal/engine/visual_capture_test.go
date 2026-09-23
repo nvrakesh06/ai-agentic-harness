@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -115,8 +116,11 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	if err = changed.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.captureVisual(context.Background(), effective, task, worktree); err == nil {
-		t.Fatal("altered cached PNG accepted for same head and config")
+	if recaptured, err := c.captureVisual(context.Background(), effective, task, worktree); err != nil || recaptured.Manifest != visual.Manifest {
+		t.Fatalf("one corrupt-cache recapture was not accepted: %#v %v", recaptured, err)
+	}
+	if _, err := c.captureVisual(context.Background(), effective, task, worktree); err != nil {
+		t.Fatalf("sealed recapture cache was not reused: %v", err)
 	}
 	if err := os.WriteFile(imagePath, originalImage, 0600); err != nil {
 		t.Fatal(err)
@@ -127,7 +131,7 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := c.captureVisual(context.Background(), effective, task, worktree); err == nil {
-		t.Fatal("altered cached manifest accepted for same head and config")
+		t.Fatal("second corrupt cache accepted after bounded recapture")
 	}
 	if got := run("status", "--porcelain"); got != "" {
 		t.Fatalf("capture dirtied source: %s", got)
@@ -149,6 +153,27 @@ func TestVisualEvidenceRequestRoutesBrowserSandboxFailure(t *testing.T) {
 	}
 	if visualEvidenceRequest(provider.Result{Status: "blocked", Question: "Choose whether to accept a product behavior change"}) {
 		t.Fatal("product decision was treated as visual capture")
+	}
+}
+
+func TestVisualCaptureErrorsSeparateUnavailableToolFromSourceFailure(t *testing.T) {
+	c := &Controller{P: &Project{Dir: t.TempDir()}}
+	task := &model.Task{ID: "task-visual", HeadSHA: strings.Repeat("a", 40)}
+	effective := config.Effective{Hash: strings.Repeat("b", 64)}
+	_, err := c.captureVisual(context.Background(), effective, task, t.TempDir())
+	var unavailable *visualCaptureUnavailableError
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("missing capture configuration was not typed unavailable: %v", err)
+	}
+
+	err = visualCaptureRunError("aih-capture-tool-that-does-not-exist", exec.ErrNotFound, "")
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("missing capture tool was not typed unavailable: %v", err)
+	}
+	err = visualCaptureRunError("capture-review", errors.New("exit status 1"), "fixture source failure")
+	var source *checkFailure
+	if !errors.As(err, &source) {
+		t.Fatalf("capture source failure was not routed as native evidence: %v", err)
 	}
 }
 

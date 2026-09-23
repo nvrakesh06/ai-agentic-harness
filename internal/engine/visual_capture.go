@@ -12,6 +12,7 @@ import (
 	_ "image/png"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -26,6 +27,23 @@ import (
 )
 
 const visualFileLimit = 8 << 20
+
+// visualCaptureUnavailableError denotes a supervisor capability problem. It
+// must never enter the implementer FIX loop because no source change can add a
+// missing capture command or repair its local launch environment.
+type visualCaptureUnavailableError struct{ err error }
+
+func (e *visualCaptureUnavailableError) Error() string {
+	return "visual capture unavailable: " + e.err.Error()
+}
+func (e *visualCaptureUnavailableError) Unwrap() error { return e.err }
+
+func visualCaptureRunError(command string, err error, output string) error {
+	if errors.Is(err, exec.ErrNotFound) {
+		return &visualCaptureUnavailableError{fmt.Errorf("%w: %s", err, filepath.Base(command))}
+	}
+	return &checkFailure{name: "visual capture", command: filepath.Base(command), err: err, output: short(safety.Redact(output), 2000)}
+}
 
 type visualManifest struct {
 	Head      string   `json:"head"`
@@ -176,20 +194,33 @@ func loadSealedVisualEvidence(dir, taskID, head, configHash string) (*model.Visu
 	return current, nil
 }
 
+// quarantineVisualCapture preserves one rejected cache for local diagnosis,
+// then permits one clean recapture at the same head/config. A second corrupt
+// cache is terminal so cache damage cannot create an endless recapture loop.
+func quarantineVisualCapture(output string) error {
+	quarantine := output + ".corrupt"
+	if _, err := os.Lstat(quarantine); err == nil {
+		return errors.New("visual capture cache was already recaptured once")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(output, quarantine)
+}
+
 // captureVisual executes only the canonical project's configured argv, at the
 // pinned task worktree. The command owns browser startup and loopback policy;
 // AIH bounds its process lifetime and accepts only validated local artifacts.
 func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task *model.Task, dir string) (*model.VisualEvidence, error) {
 	capture := e.Project.VisualCapture
 	if capture == nil {
-		return nil, errors.New("visual capture is not configured for this project")
+		return nil, &visualCaptureUnavailableError{errors.New("visual capture is not configured for this project")}
 	}
 	if !visualTaskID.MatchString(task.ID) || !visualRevision.MatchString(task.HeadSHA) || !visualHash.MatchString(e.Hash) {
-		return nil, errors.New("visual capture needs an exact task head and config hash")
+		return nil, &visualCaptureUnavailableError{errors.New("visual capture needs an exact task head and config hash")}
 	}
 	sha, err := (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
 	if err != nil || sha != task.HeadSHA {
-		return nil, errors.New("visual capture worktree is not at the reviewed head")
+		return nil, &checkFailure{name: "visual capture", command: filepath.Base(capture.Command[0]), err: errors.New("worktree is not at the reviewed head")}
 	}
 	parent, parentErr := os.Lstat(c.P.Dir)
 	if parentErr != nil || !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 {
@@ -223,7 +254,12 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 			}
 			return cached, nil
 		}
-		return nil, errors.New("existing visual capture is invalid; review requires a fresh head/config directory")
+		if err := quarantineVisualCapture(output); err != nil {
+			return nil, &checkFailure{name: "visual capture", command: filepath.Base(capture.Command[0]), err: fmt.Errorf("cached artifacts are invalid and cannot be recaptured: %w", err)}
+		}
+		if c.P.DB != nil {
+			_ = c.P.DB.Event(task.ID, task.RunID, "verification", "native", "visual_capture_recaptured", "head="+task.HeadSHA+" config="+e.Hash[:16]+" provenance=quarantined-corrupt-cache")
+		}
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
@@ -232,12 +268,23 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		return nil, err
 	}
 	defer os.RemoveAll(temporary)
+	release := func() {}
+	// Direct helper tests intentionally have no acquired controller snapshot;
+	// every live capture reserves the same heavy permit as native checks.
+	if c.s != nil {
+		var permitErr error
+		release, permitErr = c.checkPermit(ctx, task.ID, config.Check{Name: "visual capture", Class: "heavy"})
+		if permitErr != nil {
+			return nil, permitErr
+		}
+	}
+	defer release()
 	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(capture.Timeout)*time.Second)
 	defer cancel()
 	env := append(cleanEnvironment(), "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA)
 	out, err := platform.Run(checkCtx, dir, env, "", capture.Command[0], capture.Command[1:]...)
 	if err != nil {
-		return nil, fmt.Errorf("native visual capture failed: %v; output=%s", err, short(safety.Redact(out), 2000))
+		return nil, visualCaptureRunError(capture.Command[0], err, out)
 	}
 	sha, err = (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
 	if err != nil || sha != task.HeadSHA {
@@ -249,7 +296,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	}
 	visual, err := loadVisualEvidence(temporary, task.ID, task.HeadSHA, e.Hash)
 	if err != nil {
-		return nil, err
+		return nil, &checkFailure{name: "visual capture", command: filepath.Base(capture.Command[0]), err: err}
 	}
 	if err = sealVisualEvidence(temporary, visual); err != nil {
 		return nil, err

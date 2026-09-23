@@ -627,15 +627,32 @@ func (c *Controller) work(id string, write bool) {
 	}
 	if e := c.verifyReview(id); e != nil {
 		if c.ctx.Err() == nil {
-			var checkErr *checkFailure
-			if errors.As(e, &checkErr) {
-				c.verificationFailure(id, checkErr)
-			} else {
-				c.retry(id, "verification", e.Error())
-			}
+			c.handleVerificationError(id, e)
 		}
 		return
 	}
+}
+
+func (c *Controller) handleVerificationError(id string, err error) {
+	var unavailable *visualCaptureUnavailableError
+	if errors.As(err, &unavailable) {
+		t := c.Snapshot().Tasks[id]
+		reason := c.portable(unavailable.Error())
+		if c.mutate(func(s *model.Snapshot) error {
+			model.Block(s.Tasks[id], "Visual capture is unavailable on this supervisor. Repair the configured capture tool or choose a verification path, then retry.", reason, model.SyncRequired)
+			return nil
+		}) == nil {
+			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_unavailable", reason)
+			c.mirror(id)
+		}
+		return
+	}
+	var checkErr *checkFailure
+	if errors.As(err, &checkErr) {
+		c.verificationFailure(id, checkErr)
+		return
+	}
+	c.retry(id, "verification", err.Error())
 }
 func (c *Controller) implement(id string) bool {
 	effective, e := c.effective(c.ctx)
