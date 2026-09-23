@@ -84,6 +84,32 @@ func TestReviewFollowupsKeepsDistinctConcernsAtSameLocation(t *testing.T) {
 	}
 }
 
+func TestReviewFollowupsDoesNotGroupGenericSameFileSubjects(t *testing.T) {
+	task := &model.Task{ID: "review-followups-generic", Issue: 48, HeadSHA: "abc123"}
+	findings := []model.Finding{
+		{Severity: "medium", Category: "reliability", Location: "http.ts:288", Reason: "Connection timeout needs a bounded retry.", Resolution: "Retry the connection after timeout."},
+		{Severity: "medium", Category: "privacy", Location: "http.ts:290", Reason: "Connection credentials leak into logs.", Resolution: "Redact connection credentials."},
+	}
+	if groups := groupReviewFollowups(task, findings); len(groups) != 2 {
+		t.Fatalf("generic shared wording merged unrelated remedies: %#v", groups)
+	}
+	if nearbyFollowupLocations("http.ts:288:4", "http.ts:290:2") != true || nearbyFollowupLocations("http.ts:288", "http.ts:350") {
+		t.Fatal("line and column parsing did not preserve source proximity")
+	}
+}
+
+func TestReviewFollowupIdentitySurvivesAdditionalAcronym(t *testing.T) {
+	task := &model.Task{ID: "review-followups-stable", Issue: 48, HeadSHA: "abc123"}
+	first := model.Finding{Severity: "medium", Category: "protocol", Location: "http.ts:288", Reason: "CONNECT bypasses error envelope."}
+	second := first
+	second.Reason = "CONNECT bypasses API error envelope."
+	before := groupReviewFollowups(task, []model.Finding{first})
+	after := groupReviewFollowups(task, []model.Finding{second})
+	if len(before) != 1 || len(after) != 1 || before[0].key != after[0].key {
+		t.Fatalf("same-head wording change created a new work item: before=%#v after=%#v", before, after)
+	}
+}
+
 type followupHub struct {
 	issues map[int]github.Issue
 	next   int

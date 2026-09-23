@@ -127,11 +127,42 @@ func normalizedCategory(category string) string {
 func sameFollowupConcern(group reviewFollowupGroup, candidate model.Finding) bool {
 	for _, finding := range group.findings {
 		shared, distinctive := sharedFollowupTerms(finding, candidate)
-		if group.source != "" && group.source == followupSourceFile(candidate.Location) && (distinctive || (group.category == normalizedCategory(candidate.Category) && shared >= 2)) {
+		if group.source != "" && group.source == followupSourceFile(candidate.Location) && nearbyFollowupLocations(finding.Location, candidate.Location) && (distinctive || (group.category == normalizedCategory(candidate.Category) && shared >= 2)) {
 			return true
 		}
 	}
 	return false
+}
+
+// A shared subject in one large source file is not enough to make two
+// findings the same work item. Reviewers may point to nearby lines of one
+// defect, while distant occurrences generally need separate fixes.
+func nearbyFollowupLocations(left, right string) bool {
+	leftLine, leftOK := followupLine(left)
+	rightLine, rightOK := followupLine(right)
+	if !leftOK || !rightOK {
+		return normalizedLocation(left) == normalizedLocation(right)
+	}
+	if leftLine > rightLine {
+		leftLine, rightLine = rightLine, leftLine
+	}
+	return rightLine-leftLine <= 8
+}
+
+func followupLine(location string) (int, bool) {
+	parts := strings.Split(strings.TrimSpace(location), ":")
+	lastNonNumeric := len(parts) - 1
+	for lastNonNumeric > 0 && numericLocationPart(parts[lastNonNumeric]) {
+		lastNonNumeric--
+	}
+	if lastNonNumeric == len(parts)-1 {
+		return 0, false
+	}
+	var line int
+	if _, err := fmt.Sscan(strings.TrimSpace(parts[lastNonNumeric+1]), &line); err == nil {
+		return line, true
+	}
+	return 0, false
 }
 
 func sharedFollowupTerms(a, b model.Finding) (int, bool) {
@@ -177,6 +208,9 @@ func followupTopic(findings []model.Finding) string {
 		}
 		if terms[i].count != terms[j].count {
 			return terms[i].count > terms[j].count
+		}
+		if len([]rune(terms[i].term)) != len([]rune(terms[j].term)) {
+			return len([]rune(terms[i].term)) > len([]rune(terms[j].term))
 		}
 		return terms[i].term < terms[j].term
 	})
@@ -290,7 +324,7 @@ func genericFollowupTerm(term string) bool {
 		"implementation": true, "issue": true, "missing": true, "native": true, "path": true, "review": true,
 		"reviewer": true, "should": true, "suggested": true, "test": true, "the": true, "this": true,
 		"use": true, "verify": true, "with": true, "arrow": true, "body": true, "branch": true,
-		"error": true, "helper": true, "label": true, "opacity": true, "response": true, "state": true,
+		"connection": true, "connections": true, "error": true, "helper": true, "label": true, "opacity": true, "response": true, "state": true,
 		"text": true, "through": true,
 	}[term]
 	return generic
