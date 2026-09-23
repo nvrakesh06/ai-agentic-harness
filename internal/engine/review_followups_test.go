@@ -69,6 +69,21 @@ func TestReviewFollowupsGroupsDuplicateRolesAndRefreshesSameHead(t *testing.T) {
 	}
 }
 
+func TestReviewFollowupsKeepsDistinctConcernsAtSameLocation(t *testing.T) {
+	task := &model.Task{ID: "review-followups-distinct", Issue: 48, HeadSHA: "abc123"}
+	findings := []model.Finding{
+		{Severity: "medium", Category: "protocol", Location: "http.ts:288", Role: "qa", Reason: "CONNECT bypasses the JSON error envelope.", Resolution: "Use the protocol error writer."},
+		{Severity: "medium", Category: "privacy", Location: "http.ts:288", Role: "security", Reason: "Authentication tokens appear in response logs.", Resolution: "Redact tokens before logging."},
+	}
+	groups := groupReviewFollowups(task, findings)
+	if len(groups) != 2 {
+		t.Fatalf("unrelated findings at one line must remain separate work items: %#v", groups)
+	}
+	if groups[0].key == groups[1].key {
+		t.Fatalf("distinct concerns produced the same durable issue identity: %#v", groups)
+	}
+}
+
 type followupHub struct {
 	issues map[int]github.Issue
 	next   int

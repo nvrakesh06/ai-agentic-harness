@@ -126,14 +126,8 @@ func normalizedCategory(category string) string {
 
 func sameFollowupConcern(group reviewFollowupGroup, candidate model.Finding) bool {
 	for _, finding := range group.findings {
-		if normalizedLocation(finding.Location) != "" && normalizedLocation(finding.Location) == normalizedLocation(candidate.Location) {
-			return true
-		}
 		shared, distinctive := sharedFollowupTerms(finding, candidate)
-		if group.category == normalizedCategory(candidate.Category) && (shared >= 2 || distinctive) {
-			return true
-		}
-		if group.source != "" && group.source == followupSourceFile(candidate.Location) && distinctive {
+		if group.source != "" && group.source == followupSourceFile(candidate.Location) && (distinctive || (group.category == normalizedCategory(candidate.Category) && shared >= 2)) {
 			return true
 		}
 	}
@@ -143,16 +137,17 @@ func sameFollowupConcern(group reviewFollowupGroup, candidate model.Finding) boo
 func sharedFollowupTerms(a, b model.Finding) (int, bool) {
 	left, right := followupTerms(a), followupTerms(b)
 	shared := 0
+	distinctive := false
 	for term := range left {
 		if _, ok := right[term]; !ok {
 			continue
 		}
 		shared++
 		if len([]rune(term)) >= 5 && !genericFollowupTerm(term) {
-			return shared, true
+			distinctive = true
 		}
 	}
-	return shared, false
+	return shared, distinctive
 }
 
 func followupTopic(findings []model.Finding) string {
@@ -262,7 +257,7 @@ func numericLocationPart(part string) bool {
 
 func followupTerms(finding model.Finding) map[string]struct{} {
 	terms := map[string]struct{}{}
-	for _, text := range []string{finding.Location, finding.Reason, finding.Resolution} {
+	for _, text := range []string{finding.Reason, finding.Resolution} {
 		for _, token := range followupTextTerms(text) {
 			if len([]rune(token)) >= 3 && !genericFollowupTerm(token) {
 				terms[token] = struct{}{}
