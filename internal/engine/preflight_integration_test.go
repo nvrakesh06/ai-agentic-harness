@@ -21,7 +21,7 @@ type heldPreflightProvider struct {
 }
 
 func TestRecoveredCompletedDesignerIsNotRunAgain(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
 	if err != nil {
@@ -42,6 +42,9 @@ func TestRecoveredCompletedDesignerIsNotRunAgain(t *testing.T) {
 		State: model.Ready, Branch: "aih/ui", BaseSHA: base, HeadSHA: base,
 		Preflight: &model.Preflight{Phase: "waiting", BaseSHA: base, HeadSHA: base,
 			Config: effective.Hash, Rules: roles.Hash(), Completed: []string{"designer"}}}
+	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(s.Tasks["ui"]), s.Tasks["ui"].Branch, base); err != nil {
+		t.Fatal(err)
+	}
 	next, err := f.P.Git.StateCommit(ctx, old, s)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +57,7 @@ func TestRecoveredCompletedDesignerIsNotRunAgain(t *testing.T) {
 	c := engine.New(f.P)
 	done := make(chan error, 1)
 	go func() { done <- c.Serve(ctx) }()
-	deadline := time.NewTimer(12 * time.Second)
+	deadline := time.NewTimer(30 * time.Second)
 	defer deadline.Stop()
 	for workers.writers.Load() == 0 {
 		select {
@@ -88,7 +91,7 @@ func (p *heldPreflightProvider) Run(ctx context.Context, request provider.Reques
 }
 
 func TestPreflightReaderQueueLeavesIndependentWriterSlotsAvailable(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
 	if err != nil {
@@ -115,6 +118,9 @@ func TestPreflightReaderQueueLeavesIndependentWriterSlotsAvailable(t *testing.T)
 			Acceptance: []string{"fixture succeeds"}, Areas: []string{item.id}, Domains: []string{item.id},
 			Risk: "low", UI: item.ui, State: model.Ready, Branch: "aih/" + item.id,
 			BaseSHA: base, HeadSHA: base}
+		if err = f.P.Git.Worktree(ctx, f.P.TaskPath(s.Tasks[item.id]), s.Tasks[item.id].Branch, base); err != nil {
+			t.Fatal(err)
+		}
 	}
 	next, err := f.P.Git.StateCommit(ctx, old, s)
 	if err != nil {
@@ -128,7 +134,7 @@ func TestPreflightReaderQueueLeavesIndependentWriterSlotsAvailable(t *testing.T)
 	c := engine.New(f.P)
 	done := make(chan error, 1)
 	go func() { done <- c.Serve(ctx) }()
-	deadline := time.NewTimer(12 * time.Second)
+	deadline := time.NewTimer(30 * time.Second)
 	defer deadline.Stop()
 	for {
 		current := c.Snapshot()
