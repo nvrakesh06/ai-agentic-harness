@@ -75,3 +75,18 @@ func TestOrchestratorReceivesExactCustomRoleNames(t *testing.T) {
 		t.Fatal("builtin review roles were presented as custom task roles")
 	}
 }
+
+func TestNextWorkerReceivesRecoveredHandoff(t *testing.T) {
+	task := &model.Task{
+		Summary:       "Recovered worker timeout handoff. Changed files: internal/engine/workflow.go.",
+		ReportedTests: []string{"go test ./internal/engine"},
+		Risks:         []string{"Verify the recovered checkpoint."},
+		Decisions:     []string{"Checkpoint: recovered timeout handoff"},
+	}
+	prompt := Compile(config.Effective{Files: map[string]string{}}, Builtins()["implementer"], "linux", task, "continue", "", "")
+	for _, value := range []string{"Recovered worker timeout handoff", "go test ./internal/engine", "Verify the recovered checkpoint", "Checkpoint: recovered timeout handoff"} {
+		if !strings.Contains(prompt, value) {
+			t.Fatalf("next worker prompt missing recovered evidence %q", value)
+		}
+	}
+}

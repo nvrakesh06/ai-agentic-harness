@@ -36,6 +36,18 @@ checkpoint. Unpushed edits cannot be reconstructed. On the same machine, existin
 worktrees are retained rather than reset, so uncommitted work can be checkpointed
 after inspection. Interrupted review/test processes are disposable and rerun.
 
+An implementation worker approaching its deadline receives one bounded checkpoint
+pass before hard termination. If that pass cannot return structured output, AIH
+creates a sanitized local session `handoff.json`, then atomically publishes safe
+worktree edits and the synthetic `in_progress` summary/check/risk/decision fields.
+The local JSON is diagnostic-only; replacement machines recover from the matching
+remote task branch and snapshot. Command evidence is restricted to fixed check
+families without arguments. Non-timeout checkpoint errors take the normal retry and
+Advisor path. The next worker receives the portable handoff in its assigned task.
+Inspect `aih status`, `aih watch`, or `aih logs` for `worker_checkpoint_requested`
+and `worker_hard_timeout` lifecycle events. A synthetic handoff is recovery evidence,
+not proof that the implementation or its tests are complete.
+
 If local state is corrupt, first stop the supervisor and preserve its entire
 project directory somewhere safe. Recreate through attach rather than copying a
 SQLite database from another machine. Never delete the authoritative `aih-state`

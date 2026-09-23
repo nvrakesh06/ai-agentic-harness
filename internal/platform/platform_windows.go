@@ -25,7 +25,7 @@ func prepare(cmd *exec.Cmd, background bool) {
 }
 
 func supervise(cmd *exec.Cmd) (func(), error) { return func() {}, nil }
-func own(cmd *exec.Cmd) (func(), func(), error) {
+func own(cmd *exec.Cmd) (func(), func() error, error) {
 	job, e := windows.CreateJobObject(nil, nil)
 	if e != nil {
 		return nil, nil, e
@@ -50,7 +50,7 @@ func own(cmd *exec.Cmd) (func(), func(), error) {
 		windows.CloseHandle(job)
 		return nil, nil, e
 	}
-	return func() { windows.CloseHandle(job) }, func() { _ = windows.TerminateJobObject(job, 1) }, nil
+	return func() { windows.CloseHandle(job) }, func() error { return windows.TerminateJobObject(job, 1) }, nil
 }
 
 func resumePrimary(pid uint32) error {

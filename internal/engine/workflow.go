@@ -122,7 +122,25 @@ func (c *Controller) role(ctx context.Context, e config.Effective, r roles.Role,
 	if p.Name() != e.Project.Provider {
 		p = provider.New(e.Project.Provider)
 	}
-	result, err := p.Run(ctx, provider.Request{Directory: dir, Runtime: filepath.Join(c.P.Dir, "sessions", id), Prompt: roles.Compile(e, r, runtime.GOOS, t, objective, diff, evidence), Role: r.Name, Model: e.Project.ProviderModels[capability], Write: r.Name == "implementer", Timeout: time.Duration(e.Project.WorkerSeconds) * time.Second})
+	runtimeDir := filepath.Join(c.P.Dir, "sessions", id)
+	prompt := roles.Compile(e, r, runtime.GOOS, t, objective, diff, evidence)
+	request := provider.Request{Directory: dir, Runtime: runtimeDir, Prompt: prompt, Role: r.Name, Model: e.Project.ProviderModels[capability], Write: r.Name == "implementer", Timeout: time.Duration(e.Project.WorkerSeconds) * time.Second}
+	var result provider.Result
+	var err error
+	if r.Name == "implementer" {
+		checkpointPrompt := prompt + "\n\nSOFT DEADLINE CHECKPOINT\nStop expanding scope. Inspect and preserve the existing worktree edits, run only the smallest relevant verification that fits, and immediately return the required structured result. Use completed only if the assigned acceptance criteria are satisfied; otherwise use in_progress and report the exact handoff, tests, and remaining risks. Do not undo safe existing work or begin unrelated improvements."
+		result, err = runWithCheckpoint(ctx, p, request, checkpointPrompt, request.Timeout, deadlineHooks{
+			active: func(runErr error) bool { return c.workerActive(dir, runErr) },
+			event: func(kind, message string) {
+				_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, kind, message)
+			},
+			recover: func(runErr error) provider.Result {
+				return c.syntheticHandoff(dir, runtimeDir, runErr)
+			},
+		})
+	} else {
+		result, err = p.Run(ctx, request)
+	}
 	outcome := result.Status
 	if err != nil {
 		outcome = "failed"
@@ -144,6 +162,7 @@ func (c *Controller) role(ctx context.Context, e config.Effective, r roles.Role,
 	_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "worker_exit", outcome)
 	return result, err
 }
+
 func needsProvision(s *model.Snapshot, id string) bool {
 	for _, t := range s.Tasks {
 		if t.ObjectiveID == id && t.State == model.Planned {
@@ -354,6 +373,43 @@ func (c *Controller) checkpoint(ctx context.Context, id string) error {
 	}
 	return c.save(ctx, func(s *model.Snapshot) error { s.Tasks[id].HeadSHA = sha; return nil }, gitx.Update{Branch: t.Branch, Old: t.HeadSHA, New: sha})
 }
+
+func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result provider.Result) error {
+	if !result.RecoveredDeadlineHandoff || result.Status != "in_progress" {
+		return errors.New("invalid recovered deadline handoff")
+	}
+	t := c.Snapshot().Tasks[id]
+	sha, err := c.P.Git.Checkpoint(ctx, c.P.TaskPath(t), id)
+	if err != nil {
+		return err
+	}
+	updates := []gitx.Update{}
+	if sha != t.HeadSHA {
+		updates = append(updates, gitx.Update{Branch: t.Branch, Old: t.HeadSHA, New: sha})
+	}
+	return c.save(ctx, func(s *model.Snapshot) error {
+		task := s.Tasks[id]
+		task.HeadSHA = sha
+		task.Summary = c.portable(result.Summary)
+		task.ReportedTests = portableStrings(c, result.Tests)
+		task.Risks = portableStrings(c, result.Risks)
+		task.Rotations++
+		task.Decisions = append(task.Decisions, "Checkpoint: "+task.Summary)
+		if task.Rotations >= 24 {
+			model.Block(task, "Task reached 24 checkpoint slices. Refine or authorize further work.", task.Summary, model.Ready)
+			return nil
+		}
+		return model.Transition(task, model.Ready)
+	}, updates...)
+}
+
+func portableStrings(c *Controller, values []string) []string {
+	out := make([]string, len(values))
+	for i, value := range values {
+		out[i] = c.portable(value)
+	}
+	return out
+}
 func (c *Controller) ensureWorktree(id string) error {
 	t := c.Snapshot().Tasks[id]
 	from := t.HeadSHA
@@ -448,6 +504,12 @@ func (c *Controller) implement(id string) bool {
 	t = c.Snapshot().Tasks[id]
 	r, e := c.role(c.ctx, effective, all["implementer"], t, dir, t.Objective, "", "")
 	if c.ctx.Err() != nil {
+		return false
+	}
+	if e == nil && r.RecoveredDeadlineHandoff {
+		if ce := c.recoveredCheckpoint(c.ctx, id, r); ce != nil {
+			c.block(id, "Resolve recovered checkpoint publication failure; local work is preserved.", ce.Error(), model.Ready)
+		}
 		return false
 	}
 	if ce := c.checkpoint(c.ctx, id); ce != nil {
