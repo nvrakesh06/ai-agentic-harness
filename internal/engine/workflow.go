@@ -728,7 +728,10 @@ func (c *Controller) verificationFailure(id string, failure *checkFailure) {
 	environment := nativeEnvironment(effective)
 	task := c.Snapshot().Tasks[id]
 	guard := task.Verification
-	repeated := guard != nil && guard.Environment == environment && guard.HeadSHA == task.HeadSHA
+	// A NativeOnly handoff is a request for the first supervisor-owned check,
+	// not a prior native failure. Only a guard with a recorded native attempt can
+	// suppress another check at the same revision.
+	repeated := guard != nil && guard.Attempts > 0 && guard.Environment == environment && guard.HeadSHA == task.HeadSHA
 	nativeOnly := guard != nil && guard.NativeOnly
 	capabilityMissing := errors.Is(failure, exec.ErrNotFound)
 	attempts := 1
