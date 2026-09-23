@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -293,6 +294,53 @@ func TestStatusShowsMachineReadableCapacityAndHumanReason(t *testing.T) {
 	}
 	if !strings.Contains(machine.String(), `"target_active_writers": 2`) || !strings.Contains(machine.String(), `"underutilization_reason_code": "dependencies"`) {
 		t.Fatalf("JSON status omitted capacity fields: %s", machine.String())
+	}
+}
+
+func TestSupervisorStartupWaitsForDelayedAcknowledgement(t *testing.T) {
+	if startupAckTimeout < 30*time.Second {
+		t.Fatal("startup deadline is too short for lease acquisition on a loaded machine")
+	}
+	probes := 0
+	err := waitForSupervisorStart(context.Background(), 3*time.Second, time.Millisecond,
+		func() bool {
+			probes++
+			return probes > 35
+		},
+		func() string { return "" },
+	)
+	if err != nil {
+		t.Fatal("delayed supervisor acknowledgement was reported as failure:", err)
+	}
+	if probes <= 35 {
+		t.Fatalf("startup returned before acknowledgement after %d probes", probes)
+	}
+}
+
+func TestSupervisorStartupReportsChildFailure(t *testing.T) {
+	probes := 0
+	err := waitForSupervisorStart(context.Background(), 3*time.Second, time.Millisecond,
+		func() bool { return false },
+		func() string {
+			probes++
+			if probes >= 3 {
+				return "lease refused"
+			}
+			return ""
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "lease refused") {
+		t.Fatalf("child failure was not reported: %v", err)
+	}
+}
+
+func TestSupervisorStartupReportsDelayedAcknowledgement(t *testing.T) {
+	err := waitForSupervisorStart(context.Background(), 20*time.Millisecond, time.Millisecond,
+		func() bool { return false },
+		func() string { return "" },
+	)
+	if !errors.Is(err, errStartupAckTimeout) {
+		t.Fatalf("startup timeout was not distinguishable from a child failure: %v", err)
 	}
 }
 
