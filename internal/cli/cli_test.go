@@ -277,7 +277,7 @@ func TestStatusShowsMachineReadableCapacityAndHumanReason(t *testing.T) {
 	snapshot.Tasks["task-a"] = &model.Task{ID: "task-a", State: model.Verifying, Title: "verify release"}
 	snapshot.Capacity.Verification = []model.VerificationCheck{{Task: "task-a", Check: "release", Class: "heavy", Phase: "queued", QueuedAt: time.Now().Add(-time.Minute)}}
 	snapshot.Capacity.ActivePreflights = 1
-	snapshot.Tasks["ui"] = &model.Task{ID: "ui", Title: "UI task", State: model.Ready, Preflight: &model.Preflight{Phase: "waiting", BaseSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Config: fmt.Sprintf("%064x", 1), Rules: fmt.Sprintf("%064x", 2)}}
+	snapshot.Tasks["ui"] = &model.Task{ID: "ui", Title: "UI task", State: model.Ready, Preflight: &model.Preflight{Phase: "waiting", BaseSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Config: fmt.Sprintf("%064x", 1), Rules: fmt.Sprintf("%064x", 2), ReuseCount: 1, ReuseReason: "reused unchanged bounded FIX guidance"}}
 	if err = db.Save("0123456789abcdef", snapshot); err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestStatusShowsMachineReadableCapacityAndHumanReason(t *testing.T) {
 	if err = showStatus(cmd, p, false, false); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Writers: 1 active / 2 target / 3 max", "Readers: 2 active / 4 max", "Checks: 0 heavy / 1 project max / 1 machine max", "WAITING_CHECK_CAPACITY", "waiting for a verification slot", "Preflights: 1 active", "PREFLIGHT_WAITING", "dependencies", "Next safe work: task-b after task-a"} {
+	for _, want := range []string{"Writers: 1 active / 2 target / 3 max", "Readers: 2 active / 4 max", "Checks: 0 heavy / 1 project max / 1 machine max", "WAITING_CHECK_CAPACITY", "waiting for a verification slot", "Preflights: 1 active", "PREFLIGHT_WAITING", "reused unchanged bounded FIX guidance", "dependencies", "Next safe work: task-b after task-a"} {
 		if !strings.Contains(human.String(), want) {
 			t.Fatalf("human status omitted %q: %s", want, human.String())
 		}

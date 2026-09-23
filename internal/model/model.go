@@ -94,12 +94,15 @@ type Task struct {
 // Preflight is portable so completed reader guidance survives a controller restart.
 // Ready means the same source and policy may proceed to writer admission.
 type Preflight struct {
-	Phase     string   `json:"phase"`
-	BaseSHA   string   `json:"base_sha"`
-	HeadSHA   string   `json:"head_sha,omitempty"`
-	Config    string   `json:"config"`
-	Rules     string   `json:"rules"`
-	Completed []string `json:"completed,omitempty"`
+	Phase       string   `json:"phase"`
+	BaseSHA     string   `json:"base_sha"`
+	HeadSHA     string   `json:"head_sha,omitempty"`
+	Config      string   `json:"config"`
+	Rules       string   `json:"rules"`
+	Scope       string   `json:"scope_fingerprint,omitempty"`
+	ReuseCount  int      `json:"reuse_count,omitempty"`
+	ReuseReason string   `json:"reuse_reason,omitempty"`
+	Completed   []string `json:"completed,omitempty"`
 }
 
 // Guidance is encoded in the existing durable Decisions field so a correction
@@ -359,6 +362,9 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 				(p.HeadSHA != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(p.HeadSHA)) ||
 				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(p.Config) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(p.Rules) {
 				return nil, false, errors.New("incomplete preflight identity")
+			}
+			if (p.Scope != "" && !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(p.Scope)) || p.ReuseCount < 0 {
+				return nil, false, errors.New("invalid preflight reuse identity")
 			}
 		}
 		if _, ok := edges[t.State]; !ok && t.State != Done {

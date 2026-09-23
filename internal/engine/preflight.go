@@ -1,8 +1,12 @@
 package engine
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
@@ -13,7 +17,66 @@ import (
 
 func preflightMatches(p *model.Preflight, t *model.Task, effective config.Effective) bool {
 	return p != nil && p.BaseSHA == effective.BaseSHA && p.HeadSHA == t.HeadSHA &&
-		p.Config == effective.Hash && p.Rules == roles.Hash()
+		p.Config == effective.Hash && p.Rules == roles.Hash() &&
+		(p.Scope == "" || p.Scope == preflightScope(t))
+}
+
+// reusablePreflightForFix deliberately accepts a changed task head only after
+// every required pre-implementation role completed and the task is returning
+// through the bounded FIX route. The scope/base/config/rules fingerprint keeps
+// a changed contract or role policy from inheriting old advice.
+func reusablePreflightForFix(p *model.Preflight, t *model.Task, effective config.Effective, required []roles.Role) bool {
+	if p == nil || t == nil || t.State != model.Fix || p.Phase != "writing" || p.HeadSHA == t.HeadSHA ||
+		p.BaseSHA != effective.BaseSHA || p.Config != effective.Hash || p.Rules != roles.Hash() ||
+		p.Scope == "" || p.Scope != preflightScope(t) || p.ReuseCount >= effective.Policy.ImplementationRetries {
+		return false
+	}
+	for _, role := range required {
+		if !slices.Contains(p.Completed, role.Name) {
+			return false
+		}
+	}
+	return true
+}
+
+func reusePreflight(p *model.Preflight, t *model.Task) {
+	p.HeadSHA = t.HeadSHA
+	p.Phase = "ready"
+	p.ReuseCount++
+	p.ReuseReason = "reused completed pre-implementation guidance for bounded FIX: scope, base, policy, and role rules unchanged"
+}
+
+func reusePreflightForFix(p *model.Preflight, t *model.Task, effective config.Effective, required []roles.Role) bool {
+	if !reusablePreflightForFix(p, t, effective, required) {
+		return false
+	}
+	reusePreflight(p, t)
+	return true
+}
+
+type preflightScopeInput struct {
+	Objective  string   `json:"objective"`
+	Acceptance []string `json:"acceptance"`
+	Areas      []string `json:"areas"`
+	Domains    []string `json:"domains"`
+	Risk       string   `json:"risk"`
+	UI         bool     `json:"ui"`
+	Security   bool     `json:"security"`
+	Roles      []string `json:"roles"`
+	DependsOn  []string `json:"depends_on"`
+}
+
+// preflightScope records inputs that define the task's specialist contract.
+// Source-head changes are intentionally excluded: exact-head checks and final
+// review cover those changes after the bounded repair.
+func preflightScope(t *model.Task) string {
+	input := preflightScopeInput{Objective: t.Objective, Acceptance: append([]string(nil), t.Acceptance...), Areas: append([]string(nil), t.Areas...), Domains: append([]string(nil), t.Domains...), Risk: t.Risk, UI: t.UI, Security: t.Security, Roles: append([]string(nil), t.Roles...), DependsOn: append([]string(nil), t.Dependencies...)}
+	for _, values := range [][]string{input.Acceptance, input.Areas, input.Domains, input.Roles, input.DependsOn} {
+		sort.Strings(values)
+	}
+	b, _ := json.Marshal(input)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 func requiredPreflightRoles(effective config.Effective, t *model.Task) ([]roles.Role, error) {
@@ -122,7 +185,9 @@ func (c *Controller) preflight(id string) {
 			return errors.New("task left preflight eligibility")
 		}
 		if !preflightMatches(task.Preflight, task, effective) {
-			task.Preflight = &model.Preflight{Phase: "queued", BaseSHA: effective.BaseSHA, HeadSHA: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash()}
+			if !reusePreflightForFix(task.Preflight, task, effective, pre) {
+				task.Preflight = &model.Preflight{Phase: "queued", BaseSHA: effective.BaseSHA, HeadSHA: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Scope: preflightScope(task)}
+			}
 		}
 		return nil
 	}); err != nil {

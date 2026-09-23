@@ -164,10 +164,10 @@ func TestSchemaTwoMigratesAndPreflightProgressRoundTrips(t *testing.T) {
 	if err != nil || !changed || migrated.Schema != StateSchema || migrated.Tasks["task"].Preflight != nil {
 		t.Fatal(migrated, changed, err)
 	}
-	migrated.Tasks["task"].Preflight = &Preflight{Phase: "waiting", BaseSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", HeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Config: fmt.Sprintf("%064x", 1), Rules: fmt.Sprintf("%064x", 2), Completed: []string{"architecture"}}
+	migrated.Tasks["task"].Preflight = &Preflight{Phase: "waiting", BaseSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", HeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Config: fmt.Sprintf("%064x", 1), Rules: fmt.Sprintf("%064x", 2), Scope: fmt.Sprintf("%064x", 3), ReuseCount: 1, ReuseReason: "reused unchanged bounded FIX guidance", Completed: []string{"architecture"}}
 	b, _ = json.Marshal(migrated)
 	recovered, changed, err := Decode(b)
-	if err != nil || changed || recovered.Tasks["task"].Preflight.Phase != "waiting" || fmt.Sprint(recovered.Tasks["task"].Preflight.Completed) != "[architecture]" {
+	if err != nil || changed || recovered.Tasks["task"].Preflight.Phase != "waiting" || recovered.Tasks["task"].Preflight.ReuseCount != 1 || recovered.Tasks["task"].Preflight.ReuseReason == "" || fmt.Sprint(recovered.Tasks["task"].Preflight.Completed) != "[architecture]" {
 		t.Fatal(recovered, changed, err)
 	}
 }
