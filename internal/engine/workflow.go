@@ -276,11 +276,8 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 	var err error
 	scratch := ""
 	if t != nil {
-		scratch, err = c.P.ValidTaskScratchPath(t)
+		scratch, err = c.P.PrepareTaskScratch(t)
 		if err != nil {
-			return provider.Result{}, err
-		}
-		if err := os.MkdirAll(scratch, 0700); err != nil {
 			return provider.Result{}, err
 		}
 		prompt += "\nWORKER SCRATCH\nUse the supplied external scratch directory for temporary tooling, package-manager caches, downloads, and generated diagnostics. Do not create worker caches or downloaded tools inside the source worktree. Scratch is local-only and is never checkpointed: " + scratch + "\n"

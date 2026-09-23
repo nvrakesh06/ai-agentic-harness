@@ -127,3 +127,43 @@ func TestTaskScratchCleanupRejectsSiblingJunction(t *testing.T) {
 		t.Fatalf("scratch cleanup removed sibling content: %v", err)
 	}
 }
+
+func TestTaskScratchRootJunctionCannotEscapePreparationOrCleanup(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	root := filepath.Join(f.P.Dir, "scratch")
+	outside := filepath.Join(t.TempDir(), "outside")
+	marker := filepath.Join(outside, "marker")
+	if err = os.MkdirAll(outside, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(marker, []byte("must remain"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink(outside, root); err != nil {
+		t.Skipf("junction fixture unavailable on this machine: %v", err)
+	}
+	task := &model.Task{ID: "task"}
+	if _, err = f.P.ValidTaskScratchPath(task); err == nil {
+		t.Fatal("scratch root junction was accepted for worker preparation")
+	}
+	if _, err = f.P.PrepareTaskScratch(task); err == nil {
+		t.Fatal("scratch root junction was accepted for scratch creation")
+	}
+	if err = f.P.RemoveTaskScratch(task); err == nil {
+		t.Fatal("scratch root junction was accepted for cleanup")
+	}
+	if _, err = os.Stat(marker); err != nil {
+		t.Fatalf("scratch root junction affected outside marker: %v", err)
+	}
+	if _, err = os.Stat(filepath.Join(outside, task.ID)); !os.IsNotExist(err) {
+		t.Fatalf("scratch preparation created content outside the project: %v", err)
+	}
+}

@@ -188,6 +188,13 @@ func (c *Controller) postVerify(id string) {
 			return
 		}
 	}
+	// Keep the durable task in POST_VERIFY until its local-only scratch has
+	// been removed. A transient cleanup failure is retried on the next pass and
+	// cannot turn a successfully integrated task into a failed worker task.
+	if e = c.P.RemoveTaskScratch(t); e != nil {
+		_ = c.P.DB.Event(id, "", "", "", "scratch_cleanup_failed", safety.Redact(e.Error()))
+		return
+	}
 	if e = c.mutate(func(s *model.Snapshot) error {
 		if s.IntegrationBlocked == id {
 			s.IntegrationBlocked = ""
@@ -197,9 +204,6 @@ func (c *Controller) postVerify(id string) {
 		return model.Transition(s.Tasks[id], model.Done)
 	}); e != nil {
 		return
-	}
-	if e = c.P.RemoveTaskScratch(t); e != nil {
-		_ = c.P.DB.Event(id, "", "", "", "scratch_cleanup_failed", safety.Redact(e.Error()))
 	}
 	c.mirror(id)
 	t = c.Snapshot().Tasks[id]
