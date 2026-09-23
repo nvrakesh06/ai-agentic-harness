@@ -130,6 +130,9 @@ func TestReviewFollowupSourceScopeIgnoresLocationNotation(t *testing.T) {
 		"src/http.ts#L288",
 		"other.ts:3; src/http.ts:288",
 		"src/http.ts:288; other.ts:3",
+		"src/http.ts:288, 290",
+		"290-305, src/http.ts:288",
+		"src/http.ts:288, 290:4",
 	} {
 		want := source
 		if strings.Contains(location, "other.ts") {

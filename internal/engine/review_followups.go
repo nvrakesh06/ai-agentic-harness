@@ -119,6 +119,9 @@ func followupSourceFile(location string) string {
 	var sources []string
 	for _, candidate := range strings.FieldsFunc(location, func(r rune) bool { return r == ';' || r == ',' || r == '\n' }) {
 		candidate = strings.Trim(strings.TrimSpace(candidate), "`\"' ")
+		if followupBareLine.MatchString(candidate) {
+			continue
+		}
 		candidate = strings.ReplaceAll(candidate, "\\", "/")
 		candidate = followupParenLine.ReplaceAllString(candidate, "")
 		candidate = followupHashLine.ReplaceAllString(candidate, "")
@@ -147,6 +150,7 @@ func followupSourceFile(location string) string {
 var followupParenLine = regexp.MustCompile(`(?i)\s*\(lines?\s+\d+(?:\s*[-–]\s*\d+)?\)$`)
 var followupHashLine = regexp.MustCompile(`(?i)#l\d+(?:-l?\d+)?$`)
 var followupColonLine = regexp.MustCompile(`:\d+(?:[-–]\d+)?(?::\d+)?$`)
+var followupBareLine = regexp.MustCompile(`(?i)^l?\d+(?:[-–]l?\d+)?(?::\d+)?$`)
 
 func followupFindingKey(finding model.Finding) string {
 	return strings.Join([]string{normalizedCategory(finding.Category), strings.ToLower(finding.Location), strings.ToLower(finding.Reason), strings.ToLower(finding.Resolution), strings.ToLower(finding.Role)}, "\x00")
