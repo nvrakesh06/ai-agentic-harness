@@ -1232,11 +1232,16 @@ func (c *Controller) prBody(t *model.Task) string {
 		}
 		fmt.Fprintf(&b, "\nPolicy hash: `%s`\nRules hash: `%s`\n", e.Config, e.Rules)
 	}
-	if len(t.Findings) > 0 {
-		b.WriteString("\nRecorded findings:\n")
-		for _, finding := range t.Findings {
-			fmt.Fprintf(&b, "- %s (%s): %s\n", finding.Category, finding.Severity, finding.Reason)
+	verificationFindings := false
+	for _, finding := range t.Findings {
+		if finding.Category != "verification" {
+			continue
 		}
+		if !verificationFindings {
+			b.WriteString("\nNative verification findings:\n")
+			verificationFindings = true
+		}
+		fmt.Fprintf(&b, "- %s: %s\n", finding.Severity, short(safety.Redact(finding.Reason), 8000))
 	}
 	b.WriteString("\nRisks: inspect recorded findings and acceptance evidence.\nRollback: propose and verify a revert of the integration commit; no automatic production rollback.\n")
 	return b.String()
