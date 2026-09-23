@@ -302,6 +302,10 @@ func (c *Controller) Serve(parent context.Context) error {
 	if e = c.P.Provider.Validate(parent); e != nil {
 		return e
 	}
+	preflightRoles, e := roles.Load(c.P.Config.Files)
+	if e != nil {
+		return e
+	}
 	c.ctx, c.cancel = context.WithCancel(parent)
 	defer c.cancel()
 	if e = c.acquire(parent); e != nil {
@@ -380,14 +384,7 @@ func (c *Controller) Serve(parent context.Context) error {
 				active[id] = true
 				c.launch(func() { c.work(id, true); done <- id })
 			}
-			configuredRoles, roleErr := roles.Load(c.P.Config.Files)
-			if roleErr != nil {
-				e = roleErr
-				stopping = true
-				c.cancel()
-				break
-			}
-			for _, candidate := range selectPreflights(c.Snapshot(), active, guidedPreflights, c.P.Config.Project.MaxReaders, c.P.Config.Project.MaxWriters, configuredRoles) {
+			for _, candidate := range selectPreflights(c.Snapshot(), active, guidedPreflights, c.P.Config.Project.MaxReaders, c.P.Config.Project.MaxWriters, preflightRoles) {
 				id := candidate.task.ID
 				active[id] = false
 				guidedPreflights[id] = candidate.guided
