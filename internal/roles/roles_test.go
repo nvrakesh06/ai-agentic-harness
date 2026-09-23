@@ -114,6 +114,26 @@ func TestRequiredReviewRosterKeepsParentForIndependentOverrideAndNonReviewStage(
 		t.Fatalf("independent override reason missing: %s", reason)
 	}
 }
+func TestIndependentReviewOverrideWinsWithMultipleSpecialists(t *testing.T) {
+	all, err := Load(map[string]string{
+		".aih/roles/independent.yaml": "name: independent-animation\nextends: reviewer\nindependent_parent_review: true\ntriggers:\n  paths: [src/animation/**]\n",
+		".aih/roles/standard.yaml":    "name: standard-animation\nextends: reviewer\ntriggers:\n  paths: [src/animation/**]\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	required, err := Required(all, &model.Task{Risk: "low"}, []string{"src/animation/timeline.go"}, "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, reason := ReviewRoster(required)
+	if strings.Join(names, ",") != "independent-animation,qa,reviewer,standard-animation" {
+		t.Fatalf("independent parent was dropped: %v", names)
+	}
+	if !strings.Contains(reason, "reviewer retained with independent-animation (independent_parent_review)") || strings.Contains(reason, "retained with independent-animation, standard-animation") {
+		t.Fatalf("inaccurate roster reason: %s", reason)
+	}
+}
 func TestContextFilteringAndCanonicalRules(t *testing.T) {
 	e := config.Effective{Files: map[string]string{"AGENTS.md": "CANONICAL", "backend/AGENTS.md": "BACKEND", "frontend/AGENTS.md": "FRONTEND"}}
 	task := &model.Task{Areas: []string{"backend/api"}}

@@ -210,12 +210,17 @@ func Required(all map[string]Role, t *model.Task, paths []string, stage string) 
 	}
 	if stage == "review" {
 		for _, parent := range []string{"reviewer", "designer"} {
+			extending := false
+			independent := false
 			for n := range wanted {
 				r := all[n]
-				if r.Extends == parent && r.Stage == "review" && r.Mode == "validator" && !r.IndependentParentReview {
-					delete(wanted, parent)
-					break
+				if r.Extends == parent && r.Stage == "review" && r.Mode == "validator" {
+					extending = true
+					independent = independent || r.IndependentParentReview
 				}
+			}
+			if extending && !independent {
+				delete(wanted, parent)
 			}
 		}
 	}
@@ -243,7 +248,7 @@ func ReviewRoster(required []Role) ([]string, string) {
 	for _, r := range required {
 		names = append(names, r.Name)
 		present[r.Name] = true
-		if r.Extends == "reviewer" || r.Extends == "designer" {
+		if (r.Extends == "reviewer" || r.Extends == "designer") && r.Stage == "review" && r.Mode == "validator" {
 			specialists[r.Extends] = append(specialists[r.Extends], r.Name)
 		}
 	}
@@ -254,7 +259,17 @@ func ReviewRoster(required []Role) ([]string, string) {
 			continue
 		}
 		if present[parent] {
-			reasons = append(reasons, parent+" retained with "+strings.Join(matched, ", ")+" (independent_parent_review)")
+			independent := []string{}
+			for _, name := range matched {
+				for _, role := range required {
+					if role.Name == name && role.IndependentParentReview {
+						independent = append(independent, name)
+					}
+				}
+			}
+			if len(independent) > 0 {
+				reasons = append(reasons, parent+" retained with "+strings.Join(independent, ", ")+" (independent_parent_review)")
+			}
 			continue
 		}
 		reasons = append(reasons, parent+" satisfied by "+strings.Join(matched, ", ")+" (inherits parent instructions)")
