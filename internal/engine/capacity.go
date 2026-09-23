@@ -57,10 +57,18 @@ func decideCapacity(s *model.Snapshot, active map[string]bool, project config.Pr
 	})
 	status.ActiveWriters = len(writers)
 	decision := capacityDecision{status: status, writers: runnable}
-	if status.ActiveWriters+len(runnable) >= status.TargetWriters {
+	if status.ActiveWriters >= status.TargetWriters {
 		decision.status.State = "satisfied"
 		decision.status.ReasonCode = ""
 		decision.status.Reason = ""
+		decision.status.NextSafeWork = ""
+		decision.status.UnderutilizedSince = time.Time{}
+		return decision
+	}
+	if status.ActiveWriters+len(runnable) >= status.TargetWriters {
+		decision.status.State = "dispatching"
+		decision.status.ReasonCode = "writer_admission"
+		decision.status.Reason = "safe prepared tasks are being admitted to writer slots"
 		decision.status.NextSafeWork = ""
 		decision.status.UnderutilizedSince = time.Time{}
 		return decision
@@ -212,7 +220,7 @@ func withCapacityTransition(previous, next model.Capacity, planObjective string,
 	kind := ""
 	if planObjective != "" {
 		kind = "capacity_backfill_selected"
-	} else if next.State != "satisfied" && next.ActiveWriters < next.TargetWriters && (previous.State != next.State || previous.ReasonCode != next.ReasonCode) {
+	} else if next.State != "satisfied" && next.State != "dispatching" && next.ActiveWriters < next.TargetWriters && (previous.State != next.State || previous.ReasonCode != next.ReasonCode) {
 		kind = "capacity_underutilized"
 		if next.ReasonCode != "grace_period" && next.ReasonCode != "planning_in_progress" {
 			kind = "capacity_backfill_suppressed"

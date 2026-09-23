@@ -46,6 +46,9 @@ func TestQueuedDesignerDoesNotConsumeWriterCapacity(t *testing.T) {
 	if decision.status.ActiveWriters != 1 || decision.status.ActivePreflights != 1 || decision.status.ActiveReaders != 2 {
 		t.Fatalf("capacity does not distinguish actual writers and waiting guidance: %#v", decision.status)
 	}
+	if decision.status.State != "dispatching" || decision.status.ReasonCode != "writer_admission" {
+		t.Fatalf("imminent writer was reported as already active: %#v", decision.status)
+	}
 	snapshot.Capacity = decision.status
 	again := decideCapacity(snapshot, active, project, false, 2, now.Add(time.Second))
 	if again.status.ActivePreflights != 1 {
