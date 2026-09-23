@@ -33,23 +33,27 @@ const visualFileLimit = 8 << 20
 // from the configured loopback origin, including redirects, subresources, and
 // WebSockets. Project configuration supplies only the loopback URL.
 const visualRunner = `
-import { createRequire } from 'node:module';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-const require = createRequire(process.cwd() + '/package.json');
-const { chromium } = require('playwright');
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const { chromium } = require(process.env.AIH_VISUAL_PLAYWRIGHT_MODULE);
 const output = process.env.AIH_VISUAL_OUTPUT_DIR;
 const head = process.env.AIH_VISUAL_HEAD;
 const target = process.env.AIH_VISUAL_URL;
 const origin = new URL(target).origin;
 const network = [];
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
-const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, serviceWorkers: 'block' });
 await context.route('**/*', async route => {
   const request = route.request();
   const url = new URL(request.url());
   if (url.origin !== origin) { network.push('BLOCKED ' + request.method() + ' ' + url.origin); return route.abort('blockedbyclient'); }
   return route.continue();
+});
+await context.routeWebSocket('**/*', async ws => {
+  const url = new URL(ws.url());
+  if (url.origin !== origin.replace(/^http/, 'ws')) { network.push('BLOCKED WEBSOCKET ' + url.origin); return ws.close(); }
 });
 context.on('response', response => network.push(response.request().method() + ' ' + response.status() + ' ' + new URL(response.url()).pathname));
 const page = await context.newPage();
@@ -76,6 +80,21 @@ func visualCaptureRunError(command string, err error, output string) error {
 		return &visualCaptureUnavailableError{fmt.Errorf("%w: %s", err, filepath.Base(command))}
 	}
 	return &checkFailure{name: "visual capture", command: filepath.Base(command), err: err, output: short(safety.Redact(output), 2000)}
+}
+
+// playwrightModule is an explicit machine capability. AIH never resolves a
+// browser library from the target project, whose dependencies are untrusted
+// evidence inputs rather than supervisor tooling.
+func playwrightModule() (string, error) {
+	module := os.Getenv("AIH_PLAYWRIGHT_MODULE")
+	if module == "" || !filepath.IsAbs(module) {
+		return "", &visualCaptureUnavailableError{errors.New("AIH_PLAYWRIGHT_MODULE must name an absolute supervisor-owned Playwright module")}
+	}
+	info, err := os.Stat(module)
+	if err != nil || !info.IsDir() || filepath.Base(module) != "playwright" {
+		return "", &visualCaptureUnavailableError{errors.New("AIH_PLAYWRIGHT_MODULE is not an available Playwright module")}
+	}
+	return module, nil
 }
 
 type visualManifest struct {
@@ -301,6 +320,10 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		return nil, err
 	}
 	defer os.RemoveAll(temporary)
+	playwright, err := playwrightModule()
+	if err != nil {
+		return nil, err
+	}
 	runner := filepath.Join(temporary, "aih-visual-runner.mjs")
 	if err := os.WriteFile(runner, []byte(visualRunner), 0600); err != nil {
 		return nil, err
@@ -318,7 +341,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	defer release()
 	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(capture.Timeout)*time.Second)
 	defer cancel()
-	env := append(cleanEnvironment(), "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA, "AIH_VISUAL_URL="+capture.URL)
+	env := append(cleanEnvironment(), "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA, "AIH_VISUAL_URL="+capture.URL, "AIH_VISUAL_PLAYWRIGHT_MODULE="+playwright)
 	out, err := platform.Run(checkCtx, dir, env, "", "node", runner)
 	if err != nil {
 		return nil, visualCaptureRunError("node", err, out)

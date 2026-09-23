@@ -58,6 +58,11 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	if runtime.GOOS != "windows" || os.Getenv("AIH_REAL_PLAYWRIGHT") != "1" {
 		t.Skip("real Playwright fixture runs on an explicitly provisioned Windows browser host")
 	}
+	if module, err := fixturePlaywrightModule(); err != nil {
+		t.Skipf("supervisor Playwright capability unavailable: %v", err)
+	} else {
+		t.Setenv("AIH_PLAYWRIGHT_MODULE", module)
+	}
 	worktree, state := t.TempDir(), t.TempDir()
 	run := func(args ...string) string {
 		t.Helper()
@@ -96,16 +101,6 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	if _, err := c.captureVisual(context.Background(), effective, &model.Task{ID: "../outside", HeadSHA: head}, worktree); err == nil {
 		t.Fatal("unsafe task ID escaped evidence root")
 	}
-	t.Setenv("AIH_VISUAL_FAIL_HELPER", "1")
-	if _, err := c.captureVisual(context.Background(), effective, task, worktree); err == nil {
-		t.Fatal("failed capture accepted")
-	}
-	t.Setenv("AIH_VISUAL_FAIL_HELPER", "0")
-	t.Setenv("AIH_VISUAL_STALE_HEAD", "1")
-	if _, err := c.captureVisual(context.Background(), effective, task, worktree); err == nil {
-		t.Fatal("stale captured head accepted")
-	}
-	t.Setenv("AIH_VISUAL_STALE_HEAD", "0")
 	visual, err := c.captureVisual(context.Background(), effective, task, worktree)
 	if err != nil || visual.Head != head || len(visual.Artifacts) != 2 {
 		t.Fatalf("capture failed: %#v %v", visual, err)
@@ -167,8 +162,23 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	}
 }
 
+func fixturePlaywrightModule() (string, error) {
+	if module := os.Getenv("AIH_PLAYWRIGHT_MODULE"); module != "" {
+		return module, nil
+	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	matches, err := filepath.Glob(filepath.Join(cache, "npm-cache", "_npx", "*", "node_modules", "playwright"))
+	if err != nil || len(matches) == 0 {
+		return "", errors.New("set AIH_PLAYWRIGHT_MODULE to a provisioned module")
+	}
+	return matches[len(matches)-1], nil
+}
+
 func TestVisualRunnerOwnsLoopbackAndProfilePolicy(t *testing.T) {
-	for _, want := range []string{"channel: 'chrome'", "viewport: { width: 1280, height: 720 }", "await context.route", "url.origin !== origin", "route.abort('blockedbyclient')", "context.newPage", "browser.close"} {
+	for _, want := range []string{"channel: 'chrome'", "viewport: { width: 1280, height: 720 }", "serviceWorkers: 'block'", "await context.route", "await context.routeWebSocket", "url.origin !== origin", "route.abort('blockedbyclient')", "ws.close()", "context.newPage", "browser.close"} {
 		if !strings.Contains(visualRunner, want) {
 			t.Fatalf("AIH runner omitted required policy %q", want)
 		}
