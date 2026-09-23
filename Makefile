@@ -6,7 +6,7 @@ build:
 install:
 	go install ./cmd/aih
 test:
-	go test ./... -timeout 6m
+	go test -p 1 ./... -timeout 10m
 vet:
 	go vet ./...
 lint:
