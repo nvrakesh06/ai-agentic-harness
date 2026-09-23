@@ -740,15 +740,21 @@ func (c *Controller) verificationFailure(id string, failure *checkFailure) {
 		}
 	}
 	next := &model.Verification{Environment: environment, SourceEnvironment: source, HeadSHA: task.HeadSHA, Fingerprint: verificationFingerprint(environment+"/"+failure.command, reason), Attempts: attempts, NativeOnly: nativeOnly || capabilityMissing}
-	if nativeOnly || capabilityMissing || repeated {
+	// NativeOnly records why the supervisor, rather than the worker, owns this
+	// check. It does not turn a check that launched and exited non-zero into an
+	// environment failure. A launched check has actionable source evidence and
+	// must give the implementer one bounded FIX attempt.
+	if capabilityMissing || repeated {
 		question := "Native verification cannot complete in the current environment. Repair its tools or environment, then answer to retry verification."
-		if repeated && !nativeOnly && !capabilityMissing {
-			question = "Native verification failed again at the same source revision and environment. Diagnose the persistent failure, then answer to retry verification."
+		resume := model.SyncRequired
+		if repeated && !capabilityMissing {
+			question = "Native verification failed again at the same source revision and environment. Diagnose the persistent source failure, then answer to run one bounded implementer fix."
+			resume = model.Fix
 		}
 		if c.mutate(func(s *model.Snapshot) error {
 			t := s.Tasks[id]
 			t.Verification = next
-			model.Block(t, question, reason, model.SyncRequired)
+			model.Block(t, question, reason, resume)
 			return nil
 		}) == nil {
 			_ = c.P.DB.Event(id, task.RunID, "verification", "native", "retry_suppressed", environment+" head="+task.HeadSHA)
@@ -1225,6 +1231,12 @@ func (c *Controller) prBody(t *model.Task) string {
 			b.WriteString("- " + n + ": " + e.Reviews[n] + "\n")
 		}
 		fmt.Fprintf(&b, "\nPolicy hash: `%s`\nRules hash: `%s`\n", e.Config, e.Rules)
+	}
+	if len(t.Findings) > 0 {
+		b.WriteString("\nRecorded findings:\n")
+		for _, finding := range t.Findings {
+			fmt.Fprintf(&b, "- %s (%s): %s\n", finding.Category, finding.Severity, finding.Reason)
+		}
 	}
 	b.WriteString("\nRisks: inspect recorded findings and acceptance evidence.\nRollback: propose and verify a revert of the integration commit; no automatic production rollback.\n")
 	return b.String()
