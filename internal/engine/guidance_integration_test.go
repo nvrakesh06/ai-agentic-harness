@@ -10,6 +10,7 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/engine"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
 )
 
@@ -74,5 +75,68 @@ func TestTaskGuidanceCommandPersistsAndSurvivesAttach(t *testing.T) {
 	recovered, _, err := fixture.P.DB.Load()
 	if err != nil || len(model.TaskGuidance(recovered.Tasks["ui"])) != 1 {
 		t.Fatalf("attach lost guidance: %#v %v", recovered.Tasks["ui"], err)
+	}
+}
+
+func TestOperatorGuidancePersistsAcrossAttachAtExactScope(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	fixture, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.P.DB.Close()
+	s, stateHead, err := fixture.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := fixture.P.Git.Run(ctx, "", "rev-parse", "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = fixture.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih/ui", New: base}}); err != nil {
+		t.Fatal(err)
+	}
+	gate := &model.Task{ID: "gate", ObjectiveID: "objective", State: model.Blocked, Blocker: &model.Blocker{Question: "hold", Resume: model.Ready}}
+	target := &model.Task{ID: "ui", ObjectiveID: "objective", State: model.Fix, Branch: "aih/ui", BaseSHA: base, HeadSHA: base, Dependencies: []string{"gate"}}
+	s.Tasks[gate.ID], s.Tasks[target.ID] = gate, target
+	next, err := fixture.P.Git.StateCommit(ctx, stateHead, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = fixture.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateHead, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = fixture.P.DB.Save(next, s); err != nil {
+		t.Fatal(err)
+	}
+	c := engine.New(fixture.P)
+	done := make(chan error, 1)
+	go func() { done <- c.Serve(ctx) }()
+	waitStarted(t, fixture.P)
+	payload, _ := json.Marshal(map[string]any{"operator": true, "head": base, "config": fixture.P.Config.Hash, "rules": roles.Hash(), "text": "Use the bounded operator contract."})
+	if err = fixture.P.DB.Submit(store.Command{ID: "operator-guidance", Kind: "guide", Target: "ui", Payload: string(payload)}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		persisted, _, e := fixture.P.Git.Load(ctx)
+		if e == nil && len(model.EligibleGuidance(persisted.Tasks["ui"], fixture.P.Config.Hash, roles.Hash())) == 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err = fixture.P.DB.Submit(store.Command{ID: "stop", Kind: "handoff"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err = fixture.P.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered, _, err := fixture.P.DB.Load()
+	if err != nil || len(model.EligibleGuidance(recovered.Tasks["ui"], fixture.P.Config.Hash, roles.Hash())) != 1 {
+		t.Fatalf("operator guidance lost or stale after attach: %#v %v", recovered.Tasks["ui"], err)
 	}
 }
