@@ -7,9 +7,12 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -52,6 +55,9 @@ func TestNativeVisualHelper(t *testing.T) {
 }
 
 func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
+	if runtime.GOOS != "windows" || os.Getenv("AIH_REAL_PLAYWRIGHT") != "1" {
+		t.Skip("real Playwright fixture runs on an explicitly provisioned Windows browser host")
+	}
 	worktree, state := t.TempDir(), t.TempDir()
 	run := func(args ...string) string {
 		t.Helper()
@@ -72,9 +78,20 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	run("add", "source.txt")
 	run("commit", "-m", "base")
 	head := run("rev-parse", "HEAD")
-	t.Setenv("AIH_VISUAL_TEST_HELPER", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<!doctype html><div id="root"></div><script src="/api-client.ts"></script>`))
+		case "/api-client.ts":
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
 	c := &Controller{P: &Project{Dir: state}}
-	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Command: []string{os.Args[0], "-test.run=^TestNativeVisualHelper$"}, Timeout: 10}}}
+	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{URL: server.URL + "/", Timeout: 10}}}
 	task := &model.Task{ID: "task-visual", HeadSHA: head}
 	if _, err := c.captureVisual(context.Background(), effective, &model.Task{ID: "../outside", HeadSHA: head}, worktree); err == nil {
 		t.Fatal("unsafe task ID escaped evidence root")
@@ -92,6 +109,10 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	visual, err := c.captureVisual(context.Background(), effective, task, worktree)
 	if err != nil || visual.Head != head || len(visual.Artifacts) != 2 {
 		t.Fatalf("capture failed: %#v %v", visual, err)
+	}
+	network, err := os.ReadFile(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "network.txt"))
+	if err != nil || !strings.Contains(string(network), "404 /api-client.ts") {
+		t.Fatalf("real blank-page capture omitted failed module evidence: %q %v", network, err)
 	}
 	if !strings.HasPrefix(filepath.Join(state, filepath.FromSlash(visual.Manifest)), state) {
 		t.Fatal("manifest escaped AIH state")
@@ -143,6 +164,14 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	run("commit", "-m", "changed")
 	if _, err := c.captureVisual(context.Background(), effective, task, worktree); err == nil {
 		t.Fatal("stale task head reused visual evidence")
+	}
+}
+
+func TestVisualRunnerOwnsLoopbackAndProfilePolicy(t *testing.T) {
+	for _, want := range []string{"channel: 'chrome'", "viewport: { width: 1280, height: 720 }", "await context.route", "url.origin !== origin", "route.abort('blockedbyclient')", "context.newPage", "browser.close"} {
+		if !strings.Contains(visualRunner, want) {
+			t.Fatalf("AIH runner omitted required policy %q", want)
+		}
 	}
 }
 

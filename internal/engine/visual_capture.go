@@ -28,6 +28,39 @@ import (
 
 const visualFileLimit = 8 << 20
 
+// The runner is deliberately AIH-owned. It creates a fresh browser context,
+// pins its viewport/channel, and aborts every request whose origin differs
+// from the configured loopback origin, including redirects, subresources, and
+// WebSockets. Project configuration supplies only the loopback URL.
+const visualRunner = `
+import { createRequire } from 'node:module';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const require = createRequire(process.cwd() + '/package.json');
+const { chromium } = require('playwright');
+const output = process.env.AIH_VISUAL_OUTPUT_DIR;
+const head = process.env.AIH_VISUAL_HEAD;
+const target = process.env.AIH_VISUAL_URL;
+const origin = new URL(target).origin;
+const network = [];
+const browser = await chromium.launch({ channel: 'chrome', headless: true });
+const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+await context.route('**/*', async route => {
+  const request = route.request();
+  const url = new URL(request.url());
+  if (url.origin !== origin) { network.push('BLOCKED ' + request.method() + ' ' + url.origin); return route.abort('blockedbyclient'); }
+  return route.continue();
+});
+context.on('response', response => network.push(response.request().method() + ' ' + response.status() + ' ' + new URL(response.url()).pathname));
+const page = await context.newPage();
+await page.goto(target, { waitUntil: 'networkidle' });
+await page.screenshot({ path: join(output, 'desktop.png') });
+writeFileSync(join(output, 'network.txt'), network.join('\n'));
+writeFileSync(join(output, 'manifest.json'), JSON.stringify({ head, summary: 'AIH-owned browser capture', artifacts: ['desktop.png', 'network.txt'] }));
+await context.close();
+await browser.close();
+`
+
 // visualCaptureUnavailableError denotes a supervisor capability problem. It
 // must never enter the implementer FIX loop because no source change can add a
 // missing capture command or repair its local launch environment.
@@ -220,7 +253,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	}
 	sha, err := (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
 	if err != nil || sha != task.HeadSHA {
-		return nil, &checkFailure{name: "visual capture", command: filepath.Base(capture.Command[0]), err: errors.New("worktree is not at the reviewed head")}
+		return nil, &checkFailure{name: "visual capture", command: "node", err: errors.New("worktree is not at the reviewed head")}
 	}
 	parent, parentErr := os.Lstat(c.P.Dir)
 	if parentErr != nil || !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 {
@@ -255,7 +288,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 			return cached, nil
 		}
 		if err := quarantineVisualCapture(output); err != nil {
-			return nil, &checkFailure{name: "visual capture", command: filepath.Base(capture.Command[0]), err: fmt.Errorf("cached artifacts are invalid and cannot be recaptured: %w", err)}
+			return nil, &checkFailure{name: "visual capture", command: "node", err: fmt.Errorf("cached artifacts are invalid and cannot be recaptured: %w", err)}
 		}
 		if c.P.DB != nil {
 			_ = c.P.DB.Event(task.ID, task.RunID, "verification", "native", "visual_capture_recaptured", "head="+task.HeadSHA+" config="+e.Hash[:16]+" provenance=quarantined-corrupt-cache")
@@ -268,6 +301,10 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		return nil, err
 	}
 	defer os.RemoveAll(temporary)
+	runner := filepath.Join(temporary, "aih-visual-runner.mjs")
+	if err := os.WriteFile(runner, []byte(visualRunner), 0600); err != nil {
+		return nil, err
+	}
 	release := func() {}
 	// Direct helper tests intentionally have no acquired controller snapshot;
 	// every live capture reserves the same heavy permit as native checks.
@@ -281,10 +318,10 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	defer release()
 	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(capture.Timeout)*time.Second)
 	defer cancel()
-	env := append(cleanEnvironment(), "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA)
-	out, err := platform.Run(checkCtx, dir, env, "", capture.Command[0], capture.Command[1:]...)
+	env := append(cleanEnvironment(), "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA, "AIH_VISUAL_URL="+capture.URL)
+	out, err := platform.Run(checkCtx, dir, env, "", "node", runner)
 	if err != nil {
-		return nil, visualCaptureRunError(capture.Command[0], err, out)
+		return nil, visualCaptureRunError("node", err, out)
 	}
 	sha, err = (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
 	if err != nil || sha != task.HeadSHA {
@@ -296,7 +333,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	}
 	visual, err := loadVisualEvidence(temporary, task.ID, task.HeadSHA, e.Hash)
 	if err != nil {
-		return nil, &checkFailure{name: "visual capture", command: filepath.Base(capture.Command[0]), err: err}
+		return nil, &checkFailure{name: "visual capture", command: "node", err: err}
 	}
 	if err = sealVisualEvidence(temporary, visual); err != nil {
 		return nil, err

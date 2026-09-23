@@ -52,11 +52,11 @@ type Check struct {
 	Class     string   `yaml:"class,omitempty" json:"class,omitempty"`
 }
 
-// VisualCapture is an opt-in, supervisor-owned command. The command receives
-// AIH_VISUAL_OUTPUT_DIR and writes a manifest.json plus bounded artifacts there.
+// VisualCapture declares a loopback target. AIH owns the browser runner; there
+// is intentionally no project-supplied argv that could evade its policy.
 type VisualCapture struct {
-	Command []string `yaml:"command" json:"command"`
-	Timeout int      `yaml:"timeout_seconds" json:"timeout_seconds"`
+	URL     string `yaml:"url" json:"url"`
+	Timeout int    `yaml:"timeout_seconds" json:"timeout_seconds"`
 }
 type Policy struct {
 	ImplementationRetries int `yaml:"implementation_retries"`
@@ -280,8 +280,12 @@ func (p Project) Validate() error {
 		}
 	}
 	if p.VisualCapture != nil {
-		if len(p.VisualCapture.Command) == 0 || strings.TrimSpace(p.VisualCapture.Command[0]) == "" || p.VisualCapture.Timeout < 1 || p.VisualCapture.Timeout > 300 {
-			return errors.New("visual_capture needs command argv and timeout_seconds between 1 and 300")
+		u, err := url.Parse(p.VisualCapture.URL)
+		if err != nil || u.Scheme != "http" || u.Hostname() != "127.0.0.1" || u.Port() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return errors.New("visual_capture needs an http://127.0.0.1:<port> URL without credentials, query, or fragment")
+		}
+		if p.VisualCapture.Timeout < 1 || p.VisualCapture.Timeout > 300 {
+			return errors.New("visual_capture timeout_seconds must be between 1 and 300")
 		}
 	}
 	for _, capability := range p.Models {

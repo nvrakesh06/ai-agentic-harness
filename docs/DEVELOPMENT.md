@@ -61,10 +61,10 @@ checks:
     command: [go, test, ./...]
     class: heavy
     timeout_seconds: 600
-# Optional. A project-owned script runs at the reviewed task head only when a
-# reviewer requests visual evidence that its sandbox cannot capture.
+# Optional. AIH owns the browser runner when a reviewer requests visual
+# evidence that its sandbox cannot capture.
 visual_capture:
-  command: [node, scripts/capture-review.mjs]
+  url: http://127.0.0.1:4318/
   timeout_seconds: 90
 release_repo: nvrakesh06/ai-agentic-harness
 ```
@@ -85,21 +85,14 @@ or running check and its elapsed wait or run time.
 Checks must leave tracked source and unignored files unchanged. Use check-mode
 formatters and ignore build outputs in the application itself.
 
-`visual_capture` is optional and separate from build/test checks. AIH runs its
-configured argv with the task worktree as cwd and a bounded lifetime. The command
-receives `AIH_VISUAL_OUTPUT_DIR` (outside source) and `AIH_VISUAL_HEAD`. It must
-write `manifest.json` with `{"head":"<AIH_VISUAL_HEAD>","summary":"...",
-"artifacts":["desktop.png","network.txt"]}` and the named files in that
-directory. The captured head must match the reviewed head. At least one screenshot
-is required; AIH accepts at most eight flat files, 8 MiB each and 16 MiB total.
-Text diagnostics and the manifest must contain no secret-like values. The
-supervisor seals the manifest and artifact hashes against later cache changes,
-records an exact-head local reference, then gives
-that reference to the requesting reviewer for one retry. Capture output is
-evidence for review, never a visual pass by itself. Projects must make their
-capture script use disposable profiles, loopback-only URLs, and clean fixture
-data; AIH does not yet enforce browser navigation or profile policy for this
-project-defined command.
+`visual_capture` is optional and separate from build/test checks. It supplies
+only an owned `http://127.0.0.1:<port>` target: AIH launches its own fixed Chrome
+channel and viewport, creates a fresh browser context, blocks redirects,
+subresources, WebSockets, and other requests outside that exact loopback origin,
+and owns the process lifetime. Project configuration has no capture argv and
+cannot choose a profile or CDP endpoint. AIH writes `manifest.json`, a screenshot,
+and redacted network diagnostics outside source, seals their hashes, and gives the
+requesting reviewer one exact-head retry. Capture is evidence, never a visual pass.
 
 This feature adds portable state schema 4. Before activating a schema-4
 supervisor, hand off the schema-3 supervisor, retain the local SQLite database
