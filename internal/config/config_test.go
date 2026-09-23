@@ -58,6 +58,43 @@ func TestCanonicalValidation(t *testing.T) {
 	}
 }
 
+func TestCheckResourcesDefaultAndValidation(t *testing.T) {
+	p := Defaults()
+	if p.Resources.MaxHeavyChecks != 1 || p.Resources.MaxLightChecks != 2 {
+		t.Fatalf("unsafe defaults: %+v", p.Resources)
+	}
+	for _, resources := range []Resources{{}, {MaxHeavyChecks: 9, MaxLightChecks: 1}, {MaxHeavyChecks: 1, MaxLightChecks: 9}} {
+		bad := p
+		bad.Resources = resources
+		if err := bad.Validate(); err == nil {
+			t.Fatalf("accepted %+v", resources)
+		}
+	}
+	p.Checks = []Check{{Name: "suite", Command: []string{"go", "test"}, Timeout: 10, Class: "unknown"}}
+	if err := p.Validate(); err == nil {
+		t.Fatal("accepted unknown check class")
+	}
+	p.Checks[0].Class = "light"
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	legacy := canonicalFiles()
+	project := legacy[".aih/project.yaml"]
+	start := strings.Index(project, "resources:\n")
+	if start < 0 {
+		t.Fatal("resources block missing")
+	}
+	end := strings.Index(project[start:], "\nmodels:")
+	if end < 0 {
+		t.Fatal("models block missing")
+	}
+	legacy[".aih/project.yaml"] = project[:start] + project[start+end+1:]
+	e, err := Parse(legacy)
+	if err != nil || e.Project.Resources.MaxHeavyChecks != 1 {
+		t.Fatalf("legacy resources: %+v, %v", e.Project.Resources, err)
+	}
+}
+
 func TestSchedulingPolicyDefaultsAndValidation(t *testing.T) {
 	p := Defaults()
 	if p.Scheduling.TargetWriters != 2 || p.Scheduling.UnderutilizationGraceSeconds != 30 || p.Scheduling.BacklogSource != "queued_objectives" {

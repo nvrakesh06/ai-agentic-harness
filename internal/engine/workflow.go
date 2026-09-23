@@ -879,14 +879,26 @@ func cleanEnvironment() []string {
 	return env
 }
 func Verify(ctx context.Context, e config.Effective, dir string) ([]string, error) {
+	return verifyWithPermit(ctx, e, dir, nil)
+}
+func verifyWithPermit(ctx context.Context, e config.Effective, dir string, permit func(context.Context, config.Check) (func(), error)) ([]string, error) {
 	var checked []string
 	for _, check := range e.Project.Checks {
 		if !applicable(check) {
 			continue
 		}
+		release := func() {}
+		if permit != nil {
+			var err error
+			release, err = permit(ctx, check)
+			if err != nil {
+				return checked, err
+			}
+		}
 		checkCtx, cancel := context.WithTimeout(ctx, time.Duration(check.Timeout)*time.Second)
 		out, err := platform.Run(checkCtx, dir, cleanEnvironment(), "", check.Command[0], check.Command[1:]...)
 		cancel()
+		release()
 		if err != nil {
 			return checked, &checkFailure{name: check.Name, command: filepath.Base(check.Command[0]), err: err, output: short(safety.Redact(out), 8000)}
 		}
@@ -904,14 +916,10 @@ func Verify(ctx context.Context, e config.Effective, dir string) ([]string, erro
 	}
 	return checked, nil
 }
-func (c *Controller) checks(ctx context.Context, e config.Effective, dir string) ([]string, error) {
-	select {
-	case c.readers <- struct{}{}:
-		defer func() { <-c.readers }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	return Verify(ctx, e, dir)
+func (c *Controller) checks(ctx context.Context, e config.Effective, dir, taskID string) ([]string, error) {
+	return verifyWithPermit(ctx, e, dir, func(ctx context.Context, check config.Check) (func(), error) {
+		return c.checkPermit(ctx, taskID, check)
+	})
 }
 
 func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Task, dir, diff string, evidence *model.Evidence, attempt int, required []roles.Role) []reviewOutcome {
@@ -973,7 +981,7 @@ func (c *Controller) verifyReview(id string) error {
 		return e
 	}
 	t = c.Snapshot().Tasks[id]
-	checks, e := c.checks(c.ctx, effective, dir)
+	checks, e := c.checks(c.ctx, effective, dir, id)
 	if e != nil {
 		return e
 	}
@@ -1062,7 +1070,7 @@ func (c *Controller) verifyReview(id string) error {
 			names = append(names, required[index].Name)
 		}
 		_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_requested", "roles="+strings.Join(names, ",")+" head="+t.HeadSHA)
-		checks, checkErr := c.checks(c.ctx, effective, dir)
+		checks, checkErr := c.checks(c.ctx, effective, dir, id)
 		if checkErr != nil {
 			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_failed", short(checkErr.Error(), 500))
 			return checkErr

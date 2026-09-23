@@ -15,7 +15,7 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 2
+const StateSchema = 3
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
@@ -156,12 +156,23 @@ type CapacityTransition struct {
 	ReasonCode    string    `json:"reason_code,omitempty"`
 	Objective     string    `json:"objective,omitempty"`
 }
+type VerificationCheck struct {
+	Task      string    `json:"task"`
+	Check     string    `json:"check"`
+	Class     string    `json:"class"`
+	Phase     string    `json:"phase"`
+	QueuedAt  time.Time `json:"queued_at"`
+	StartedAt time.Time `json:"started_at,omitempty"`
+}
 type Capacity struct {
 	ActiveWriters      int                  `json:"active_writers"`
 	TargetWriters      int                  `json:"target_active_writers"`
 	MaxWriters         int                  `json:"max_parallel_writers"`
 	ActiveReaders      int                  `json:"active_readers"`
 	MaxReaders         int                  `json:"max_parallel_readers"`
+	MaxHeavyChecks     int                  `json:"max_heavy_checks,omitempty"`
+	MaxLightChecks     int                  `json:"max_light_checks,omitempty"`
+	Verification       []VerificationCheck  `json:"verification,omitempty"`
 	GraceSeconds       int                  `json:"underutilization_grace_seconds"`
 	BacklogSource      string               `json:"backlog_source"`
 	BacklogCursor      int                  `json:"backlog_cursor"`
@@ -219,6 +230,13 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		if s.CreatedBy == "" {
 			s.CreatedBy = Version
 		}
+	}
+	if s.Schema <= 2 {
+		// Earlier runtimes did not own verification resources. Ignore any
+		// unexpected fields and reconstruct limits from canonical policy on attach.
+		s.Capacity.MaxHeavyChecks = 0
+		s.Capacity.MaxLightChecks = 0
+		s.Capacity.Verification = nil
 	}
 	if migrated {
 		s.Schema = StateSchema
@@ -291,11 +309,25 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			return nil, false, errors.New("invalid capacity policy")
 		}
 	}
+	if (s.Capacity.MaxHeavyChecks != 0 && (s.Capacity.MaxHeavyChecks < 1 || s.Capacity.MaxHeavyChecks > 8)) || (s.Capacity.MaxLightChecks != 0 && (s.Capacity.MaxLightChecks < 1 || s.Capacity.MaxLightChecks > 8)) {
+		return nil, false, errors.New("invalid check capacity policy")
+	}
 	if s.Capacity.ReasonCode != "" && !regexp.MustCompile(`^[a-z_]+$`).MatchString(s.Capacity.ReasonCode) {
 		return nil, false, errors.New("invalid capacity reason code")
 	}
 	if len(s.Capacity.Transitions) > CapacityTransitionLimit {
 		return nil, false, errors.New("capacity transition history exceeds limit")
+	}
+	seenChecks := map[string]bool{}
+	for _, check := range s.Capacity.Verification {
+		if s.Tasks[check.Task] == nil || check.Check == "" || (check.Class != "heavy" && check.Class != "light") || (check.Phase != "queued" && check.Phase != "running") || check.QueuedAt.IsZero() || (check.Phase == "running" && check.StartedAt.IsZero()) {
+			return nil, false, errors.New("invalid verification capacity record")
+		}
+		key := check.Task + "\x00" + check.Check
+		if seenChecks[key] {
+			return nil, false, errors.New("duplicate verification capacity record")
+		}
+		seenChecks[key] = true
 	}
 	for _, transition := range s.Capacity.Transitions {
 		if transition.At.IsZero() || (transition.Kind != "capacity_underutilized" && transition.Kind != "capacity_backfill_selected" && transition.Kind != "capacity_backfill_suppressed") {

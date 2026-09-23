@@ -36,6 +36,9 @@ provider: codex
 base_branch: main
 max_parallel_writers: 3
 max_parallel_readers: 2
+resources:
+  max_heavy_checks: 1
+  max_light_checks: 2
 scheduling:
   target_active_writers: 2
   underutilization_grace_seconds: 30
@@ -54,6 +57,7 @@ provider_models: {}  # omitted tiers use provider-default; doctor lists affected
 checks:
   - name: tests
     command: [go, test, ./...]
+    class: heavy
     timeout_seconds: 600
 release_repo: nvrakesh06/ai-agentic-harness
 ```
@@ -65,6 +69,12 @@ there is no second cadence that can be misconfigured beyond the lease expiry.
 Checks optionally declare `platforms: [windows]`, `[darwin]` or `[linux]`. At least one must
 apply. They run in the candidate worktree, with credential-like environment keys
 filtered. Output is bounded; failures are redacted before portable recording.
+Checks declare `class: heavy` or `class: light`; an omitted class is heavy for
+safe legacy behavior. Limits in `resources` are portable project ceilings. The
+machine's `AIH_HOME/machine.yaml` may set `max_heavy_checks` (default 1), and
+heavy checks take a machine-local OS lock under the shared AIH home. Command
+timeouts start after a slot is acquired. `status` and `watch` show each queued
+or running check and its elapsed wait or run time.
 Checks must leave tracked source and unignored files unchanged. Use check-mode
 formatters and ignore build outputs in the application itself.
 
@@ -129,7 +139,7 @@ in-progress checkpoint slices cause a human blocker to bound non-failing churn.
 major: 1
 minimum: 1.0.0
 engineering_rules_version: 1
-state_schema: 2
+state_schema: 3
 update_channel: stable
 auto_update: notify
 ```

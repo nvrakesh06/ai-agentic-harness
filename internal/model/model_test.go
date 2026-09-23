@@ -24,6 +24,32 @@ func TestTransitionsAndBlockers(t *testing.T) {
 		t.Fatal(task, e)
 	}
 }
+
+func TestVerificationCapacityRoundTripAndValidation(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Tasks["task-a"] = &Task{ID: "task-a", State: Verifying}
+	at := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	s.Capacity.Verification = []VerificationCheck{{Task: "task-a", Check: "release", Class: "heavy", Phase: "queued", QueuedAt: at}}
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, _, err := Decode(b)
+	if err != nil || len(decoded.Capacity.Verification) != 1 {
+		t.Fatalf("round trip: %+v, %v", decoded, err)
+	}
+	s.Capacity.Verification[0].Phase = "running"
+	b, _ = json.Marshal(s)
+	if _, _, err := Decode(b); err == nil {
+		t.Fatal("running owner without start accepted")
+	}
+	s.Capacity.Verification[0].StartedAt = at
+	s.Capacity.Verification[0].Task = "missing"
+	b, _ = json.Marshal(s)
+	if _, _, err := Decode(b); err == nil {
+		t.Fatal("unknown owner accepted")
+	}
+}
 func TestSchedulerDependenciesDomainsAndBlocked(t *testing.T) {
 	s := NewSnapshot("project123")
 	for _, id := range []string{"a", "b", "c", "d", "e", "f"} {
@@ -108,6 +134,24 @@ func TestSchemaOneMigratesAuthorizedBacklogAndCapacityRoundTrips(t *testing.T) {
 	roundTrip, changed, err := Decode(b)
 	if err != nil || changed || roundTrip.Schema != StateSchema || roundTrip.Capacity.BacklogCursor != 1 || roundTrip.Capacity.ReasonCode != "dependencies" || len(roundTrip.Capacity.Transitions) != 1 {
 		t.Fatal(roundTrip, changed, err)
+	}
+}
+
+func TestSchemaTwoMigrationDropsUnownedCheckRecords(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Schema = 2
+	s.Tasks["task-a"] = &Task{ID: "task-a", State: Verifying}
+	s.Capacity = Capacity{TargetWriters: 2, MaxWriters: 3, MaxReaders: 2, GraceSeconds: 30, BacklogSource: "queued_objectives", MaxHeavyChecks: 8, Verification: []VerificationCheck{{Task: "task-a", Check: "release", Class: "heavy", Phase: "running", QueuedAt: time.Now(), StartedAt: time.Now()}}}
+	b, _ := json.Marshal(s)
+	migrated, changed, err := Decode(b)
+	if err != nil || !changed || migrated.Schema != StateSchema {
+		t.Fatal(migrated, changed, err)
+	}
+	if migrated.Capacity.MaxHeavyChecks != 0 || len(migrated.Capacity.Verification) != 0 {
+		t.Fatal("schema 2 invented verification ownership")
+	}
+	if migrated.Tasks["task-a"].State != Verifying {
+		t.Fatal("migration changed lifecycle before controller recovery")
 	}
 }
 
