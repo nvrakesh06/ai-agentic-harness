@@ -230,6 +230,12 @@ func TestVisualCaptureErrorsSeparateUnavailableToolFromSourceFailure(t *testing.
 	if !errors.As(err, &unavailable) {
 		t.Fatalf("missing capture tool was not typed unavailable: %v", err)
 	}
+	for _, stage := range []string{"playwright-module", "browser-launch", "playwright-api"} {
+		err = visualCaptureRunError("node", errors.New("exit status 78"), "AIH_VISUAL_UNAVAILABLE:"+stage)
+		if !errors.As(err, &unavailable) || !strings.Contains(err.Error(), stage) {
+			t.Fatalf("supervisor %s failure entered source FIX: %v", stage, err)
+		}
+	}
 	err = visualCaptureRunError("capture-review", errors.New("exit status 1"), "fixture source failure")
 	var source *checkFailure
 	if !errors.As(err, &source) {

@@ -37,14 +37,34 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const { chromium } = require(process.env.AIH_VISUAL_PLAYWRIGHT_MODULE);
+let chromium;
+try {
+  ({ chromium } = require(process.env.AIH_VISUAL_PLAYWRIGHT_MODULE));
+} catch {
+  console.error('AIH_VISUAL_UNAVAILABLE:playwright-module');
+  process.exit(78);
+}
 const output = process.env.AIH_VISUAL_OUTPUT_DIR;
 const head = process.env.AIH_VISUAL_HEAD;
 const target = process.env.AIH_VISUAL_URL;
 const origin = new URL(target).origin;
 const network = [];
-const browser = await chromium.launch({ channel: 'chrome', headless: true });
-const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, serviceWorkers: 'block' });
+let browser;
+try {
+  browser = await chromium.launch({ channel: 'chrome', headless: true });
+} catch {
+  console.error('AIH_VISUAL_UNAVAILABLE:browser-launch');
+  process.exit(78);
+}
+let context;
+try {
+  context = await browser.newContext({ viewport: { width: 1280, height: 720 }, serviceWorkers: 'block' });
+  if (typeof context.route !== 'function' || typeof context.routeWebSocket !== 'function') throw new Error('missing route API');
+} catch {
+  await browser.close();
+  console.error('AIH_VISUAL_UNAVAILABLE:playwright-api');
+  process.exit(78);
+}
 await context.route('**/*', async route => {
   const request = route.request();
   const url = new URL(request.url());
@@ -82,6 +102,11 @@ func (e *visualCaptureUnavailableError) Unwrap() error { return e.err }
 func visualCaptureRunError(command string, err error, output string) error {
 	if errors.Is(err, exec.ErrNotFound) {
 		return &visualCaptureUnavailableError{fmt.Errorf("%w: %s", err, filepath.Base(command))}
+	}
+	for _, stage := range []string{"playwright-module", "browser-launch", "playwright-api"} {
+		if strings.Contains(output, "AIH_VISUAL_UNAVAILABLE:"+stage) {
+			return &visualCaptureUnavailableError{fmt.Errorf("supervisor browser capability failed at %s", stage)}
+		}
 	}
 	return &checkFailure{name: "visual capture", command: filepath.Base(command), err: err, output: short(safety.Redact(output), 2000)}
 }
