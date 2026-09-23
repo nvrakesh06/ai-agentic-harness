@@ -31,6 +31,12 @@ func TestGuidanceCommandValidatesSourceAndTarget(t *testing.T) {
 	if _, err := validateGuidanceCommand(s, cmd); err == nil {
 		t.Fatal("unknown target accepted")
 	}
+	cmd.Target = "ui"
+	secret, _ := json.Marshal(guidanceCommand{Source: "api", Text: "Use token=abcdefghijklmnopqrstuvwxyz123456 in the launcher"})
+	cmd.Payload = string(secret)
+	if _, err := validateGuidanceCommand(s, cmd); err == nil {
+		t.Fatal("secret-like guidance accepted for durable state")
+	}
 }
 
 func TestCompletedWorkerReplaysLateGuidanceAfterCheckpoint(t *testing.T) {
@@ -48,5 +54,24 @@ func TestCompletedWorkerReplaysLateGuidanceAfterCheckpoint(t *testing.T) {
 	replay, err = completeImplementation(target, len(model.TaskGuidance(target)))
 	if err != nil || replay || target.State != model.Implemented {
 		t.Fatalf("worker that received guidance did not finish: state=%s replay=%t err=%v", target.State, replay, err)
+	}
+}
+
+func TestNativeOnlyWorkerReplaysLateGuidanceBeforeVerificationRoute(t *testing.T) {
+	source := &model.Task{ID: "api", ObjectiveID: "objective", State: model.Running, HeadSHA: strings.Repeat("a", 40)}
+	target := &model.Task{ID: "ui", ObjectiveID: "objective", State: model.Running}
+	startedWith := len(model.TaskGuidance(target))
+	if err := model.QueueGuidance(target, source, "command", "Use the durable API CLI."); err != nil {
+		t.Fatal(err)
+	}
+	guard := &model.Verification{Environment: "windows/native", NativeOnly: true}
+	replay, err := completeNativeOnlyImplementation(target, startedWith, guard)
+	if err != nil || !replay || target.State != model.Ready || target.Verification != nil {
+		t.Fatalf("late guidance was bypassed by native-only verification: state=%s replay=%t guard=%#v err=%v", target.State, replay, target.Verification, err)
+	}
+	target.State = model.Running
+	replay, err = completeNativeOnlyImplementation(target, len(model.TaskGuidance(target)), guard)
+	if err != nil || replay || target.State != model.Implemented || target.Verification != guard {
+		t.Fatalf("native-only route did not resume after guidance: state=%s replay=%t guard=%#v err=%v", target.State, replay, target.Verification, err)
 	}
 }

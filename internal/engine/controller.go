@@ -496,6 +496,9 @@ func validateGuidanceCommand(s *model.Snapshot, cmd store.Command) (guidanceComm
 	if err := json.Unmarshal([]byte(cmd.Payload), &guidance); err != nil {
 		return guidance, errors.New("invalid guidance payload")
 	}
+	if err := safety.Check(guidance.Text); err != nil {
+		return guidance, err
+	}
 	target := s.Tasks[cmd.Target]
 	source := s.Tasks[guidance.Source]
 	if target == nil || source == nil {
