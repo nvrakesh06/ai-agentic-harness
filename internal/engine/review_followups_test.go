@@ -117,6 +117,33 @@ func TestReviewFollowupIdentitySurvivesAdditionalAcronym(t *testing.T) {
 	}
 }
 
+func TestReviewFollowupSourceScopeIgnoresLocationNotation(t *testing.T) {
+	const source = "src/http.ts"
+	for _, location := range []string{
+		"src/http.ts:288",
+		"src/http.ts:288:4",
+		"src/http.ts:288-290",
+		"src/http.ts:288-290:4",
+		"./src/http.ts:288",
+		"`src/http.ts:288`",
+		"src/http.ts (line 288)",
+		"src/http.ts#L288",
+		"other.ts:3; src/http.ts:288",
+		"src/http.ts:288; other.ts:3",
+	} {
+		want := source
+		if strings.Contains(location, "other.ts") {
+			want = "other.ts"
+		}
+		if got := followupSourceFile(location); got != want {
+			t.Errorf("source scope for %q: got %q want %q", location, got, want)
+		}
+	}
+	if got := followupSourceFile(`C:\repo\src\http.ts:288-290:4`); got != "c/repo/src/http.ts" {
+		t.Fatalf("Windows source path range normalized to %q", got)
+	}
+}
+
 type followupHub struct {
 	issues map[int]github.Issue
 	next   int

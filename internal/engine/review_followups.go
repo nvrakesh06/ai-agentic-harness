@@ -3,6 +3,7 @@ package engine
 import (
 	"crypto/sha256"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -112,41 +113,40 @@ func followupSourceFile(location string) string {
 	if location == "" {
 		return ""
 	}
-	// Reviewers sometimes give multiple locations. Keep the first concrete
-	// path as the owning scope and preserve every original location in the body.
-	if parts := strings.FieldsFunc(location, func(r rune) bool { return r == ';' || r == ',' || r == '\n' }); len(parts) > 0 {
-		location = strings.TrimSpace(parts[0])
-	}
-	location = strings.ReplaceAll(location, "\\", "/")
-	parts := strings.Split(location, ":")
-	for i := len(parts) - 1; i > 0; i-- {
-		if numericLocationPart(parts[i]) {
-			parts = parts[:i]
-			continue
+	// The source scope must not change when reviewers switch between line,
+	// range, column, or prose notation. Sort multi-location candidates so their
+	// authored order also cannot create another issue for the same paths.
+	var sources []string
+	for _, candidate := range strings.FieldsFunc(location, func(r rune) bool { return r == ';' || r == ',' || r == '\n' }) {
+		candidate = strings.Trim(strings.TrimSpace(candidate), "`\"' ")
+		candidate = strings.ReplaceAll(candidate, "\\", "/")
+		candidate = followupParenLine.ReplaceAllString(candidate, "")
+		candidate = followupHashLine.ReplaceAllString(candidate, "")
+		candidate = followupColonLine.ReplaceAllString(candidate, "")
+		candidate = strings.Trim(strings.TrimSpace(candidate), "`\"' ")
+		for strings.HasPrefix(candidate, "./") {
+			candidate = strings.TrimPrefix(candidate, "./")
 		}
-		break
-	}
-	location = strings.Join(parts, ":")
-	return strings.Map(func(r rune) rune {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '/' || r == '.' || r == '_' || r == '-' {
-			return r
+		candidate = strings.Map(func(r rune) rune {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '/' || r == '.' || r == '_' || r == '-' {
+				return r
+			}
+			return -1
+		}, candidate)
+		if candidate != "" {
+			sources = append(sources, candidate)
 		}
-		return -1
-	}, location)
+	}
+	if len(sources) == 0 {
+		return ""
+	}
+	sort.Strings(sources)
+	return sources[0]
 }
 
-func numericLocationPart(part string) bool {
-	part = strings.TrimSpace(part)
-	if part == "" {
-		return false
-	}
-	for _, r := range part {
-		if !unicode.IsDigit(r) {
-			return false
-		}
-	}
-	return true
-}
+var followupParenLine = regexp.MustCompile(`(?i)\s*\(lines?\s+\d+(?:\s*[-–]\s*\d+)?\)$`)
+var followupHashLine = regexp.MustCompile(`(?i)#l\d+(?:-l?\d+)?$`)
+var followupColonLine = regexp.MustCompile(`:\d+(?:[-–]\d+)?(?::\d+)?$`)
 
 func followupFindingKey(finding model.Finding) string {
 	return strings.Join([]string{normalizedCategory(finding.Category), strings.ToLower(finding.Location), strings.ToLower(finding.Reason), strings.ToLower(finding.Resolution), strings.ToLower(finding.Role)}, "\x00")
