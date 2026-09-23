@@ -88,11 +88,13 @@ formatters and ignore build outputs in the application itself.
 `visual_capture` is optional and separate from build/test checks. AIH runs its
 configured argv with the task worktree as cwd and a bounded lifetime. The command
 receives `AIH_VISUAL_OUTPUT_DIR` (outside source) and `AIH_VISUAL_HEAD`. It must
-write `manifest.json` with `{"summary":"...","artifacts":["desktop.png",
-"network.txt"]}` and the named files in that directory. At least one screenshot
+write `manifest.json` with `{"head":"<AIH_VISUAL_HEAD>","summary":"...",
+"artifacts":["desktop.png","network.txt"]}` and the named files in that
+directory. The captured head must match the reviewed head. At least one screenshot
 is required; AIH accepts at most eight flat files, 8 MiB each and 16 MiB total.
 Text diagnostics and the manifest must contain no secret-like values. The
-supervisor records artifact hashes and an exact-head local reference, then gives
+supervisor seals the manifest and artifact hashes against later cache changes,
+records an exact-head local reference, then gives
 that reference to the requesting reviewer for one retry. Capture output is
 evidence for review, never a visual pass by itself. Projects must make their
 capture script use disposable profiles, loopback-only URLs, and clean fixture

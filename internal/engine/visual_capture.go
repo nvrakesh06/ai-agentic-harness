@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ import (
 const visualFileLimit = 8 << 20
 
 type visualManifest struct {
+	Head      string   `json:"head"`
 	Summary   string   `json:"summary"`
 	Artifacts []string `json:"artifacts"`
 }
@@ -98,6 +100,9 @@ func loadVisualEvidence(dir, taskID, head, configHash string) (*model.VisualEvid
 	if err = json.Unmarshal(body, &m); err != nil {
 		return nil, err
 	}
+	if m.Head != head {
+		return nil, errors.New("visual manifest captured head differs from reviewed head")
+	}
 	if len(m.Summary) > 1000 || len(m.Artifacts) == 0 || len(m.Artifacts) > 8 {
 		return nil, errors.New("visual manifest needs a bounded summary and 1..8 artifacts")
 	}
@@ -127,7 +132,48 @@ func loadVisualEvidence(dir, taskID, head, configHash string) (*model.VisualEvid
 	if !image {
 		return nil, errors.New("visual manifest contains no screenshot")
 	}
-	return &model.VisualEvidence{Head: head, Config: configHash, Manifest: filepath.ToSlash(filepath.Join("visual-evidence", taskID, head+"-"+configHash[:16], "manifest.json")), Artifacts: artifacts, Summary: m.Summary}, nil
+	manifestHash := sha256.Sum256(body)
+	return &model.VisualEvidence{Head: head, Config: configHash, Manifest: filepath.ToSlash(filepath.Join("visual-evidence", taskID, head+"-"+configHash[:16], "manifest.json")), ManifestSHA256: hex.EncodeToString(manifestHash[:]), Artifacts: artifacts, Summary: m.Summary}, nil
+}
+
+// The supervisor writes this seal after validation. On reuse, compare the
+// manifest and every artifact hash with the original accepted capture.
+func sealVisualEvidence(dir string, evidence *model.VisualEvidence) error {
+	f, err := os.OpenFile(filepath.Join(dir, "capture-seal.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	err = json.NewEncoder(f).Encode(evidence)
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
+}
+func loadSealedVisualEvidence(dir, taskID, head, configHash string) (*model.VisualEvidence, error) {
+	info, err := os.Lstat(filepath.Join(dir, "capture-seal.json"))
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 32<<10 {
+		return nil, errors.New("visual capture seal must be a regular file <= 32 KiB")
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "capture-seal.json"))
+	if err != nil {
+		return nil, err
+	}
+	var sealed model.VisualEvidence
+	if err = json.Unmarshal(body, &sealed); err != nil {
+		return nil, err
+	}
+	current, err := loadVisualEvidence(dir, taskID, head, configHash)
+	if err != nil {
+		return nil, err
+	}
+	if !reflect.DeepEqual(sealed, *current) {
+		return nil, errors.New("cached visual capture differs from its accepted manifest or artifact hashes")
+	}
+	return current, nil
 }
 
 // captureVisual executes only the canonical project's configured argv, at the
@@ -170,8 +216,11 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return nil, errors.New("visual evidence path is not a directory")
 		}
-		if cached, err := loadVisualEvidence(output, task.ID, task.HeadSHA, e.Hash); err == nil {
+		if cached, err := loadSealedVisualEvidence(output, task.ID, task.HeadSHA, e.Hash); err == nil {
 			cached.Summary = safety.Portable(cached.Summary, c.P.Dir, dir)
+			if task.Evidence != nil && task.Evidence.Visual != nil && !reflect.DeepEqual(*task.Evidence.Visual, *cached) {
+				return nil, errors.New("cached visual capture differs from durable review evidence")
+			}
 			return cached, nil
 		}
 		return nil, errors.New("existing visual capture is invalid; review requires a fresh head/config directory")
@@ -200,6 +249,9 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	}
 	visual, err := loadVisualEvidence(temporary, task.ID, task.HeadSHA, e.Hash)
 	if err != nil {
+		return nil, err
+	}
+	if err = sealVisualEvidence(temporary, visual); err != nil {
 		return nil, err
 	}
 	if err = os.Rename(temporary, output); err != nil {
