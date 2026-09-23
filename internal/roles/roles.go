@@ -307,6 +307,9 @@ func Compile(e config.Effective, r Role, osName string, t *model.Task, objective
 		data, _ := json.MarshalIndent(t, "", "  ")
 		b.WriteString("\nASSIGNED TASK\n" + string(data))
 	}
+	if r.Stage == "review" {
+		b.WriteString("\nREVIEW COORDINATION\nPeer reviews run concurrently and independently. The evidence payload intentionally contains no peer approvals. Do not wait for, require, or infer another reviewer's result. Treat exact-head native evidence supplied by the supervisor as authoritative. If supervisor-owned evidence is missing or must be refreshed, request that evidence without asking a human to run tools. A restricted worker's missing Node, npm, Bun, or raw native logs is not a finding when supervisor evidence is supplied. Use blocked only for a consequential human decision the supervisor cannot make. Report every concrete code or test defect as a structured finding with severity, location, reason, and suggested resolution.\n")
+	}
 	b.WriteString("\nOBJECTIVE\n" + objective + "\nDIFF\n" + diff + "\nVERIFICATION EVIDENCE\n" + evidence + "\n")
 	return b.String()
 }

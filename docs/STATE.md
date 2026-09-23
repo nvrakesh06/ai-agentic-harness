@@ -35,7 +35,9 @@ backfill selection, a machine-readable suppression reason and the bounded tail o
 underutilization/selection/suppression transitions. Task records contain dependencies,
 conflict domains, issues/PRs, branch/base/head/merge revisions, retry counters,
 findings, human decisions, blocker/resume state, verification retry guards and exact
-verification evidence. A guard records only portable environment/command classes,
+verification evidence. Passed checks record their identity, executable, exit result
+and bounded redacted stdout alongside exact base/head/config/rules. A guard records
+only portable environment/command classes,
 the source revision, a normalized fingerprint and attempt count; it contains no
 machine paths or provider conversation state.
 No SQLite files or provider sessions are pushed.
