@@ -101,6 +101,7 @@ type Preflight struct {
 	Rules     string   `json:"rules"`
 	Completed []string `json:"completed,omitempty"`
 }
+
 // Guidance is encoded in the existing durable Decisions field so a correction
 // survives attach without introducing a competing task-state schema while the
 // capacity-state migration is in flight. The command ID makes delivery auditable.
