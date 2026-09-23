@@ -113,11 +113,11 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 		return result, e
 	}
 	if r.Scratch != "" {
-		workspace, e := filepath.Abs(r.Directory)
+		workspace, e := resolvedPath(r.Directory)
 		if e != nil {
 			return result, e
 		}
-		scratch, e := filepath.Abs(r.Scratch)
+		scratch, e := resolvedPath(r.Scratch)
 		if e != nil {
 			return result, e
 		}
@@ -227,6 +227,35 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 		}
 	}
 	return Parse(out, r.Role)
+}
+
+// resolvedPath evaluates every existing component and reconstructs missing
+// suffixes. This catches a scratch symlink/junction that points into source
+// before a worker can create cache files there.
+func resolvedPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	missing := []string{}
+	for {
+		resolved, err := filepath.EvalSymlinks(abs)
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return resolved, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("resolve worker scratch path: %w", err)
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return "", fmt.Errorf("resolve worker scratch path: %w", err)
+		}
+		missing = append(missing, filepath.Base(abs))
+		abs = parent
+	}
 }
 
 // recoverInProgress returns only a valid structured handoff that was already

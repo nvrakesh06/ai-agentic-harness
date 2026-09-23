@@ -63,3 +63,27 @@ func TestAttachKeepsTaskScratchMappingOnTheSameMachine(t *testing.T) {
 		t.Fatalf("attach lost task scratch cache: %v", err)
 	}
 }
+
+func TestTaskScratchCleanupRejectsCorruptTaskPath(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	outside := filepath.Join(f.P.Dir, "outside")
+	marker := filepath.Join(outside, "marker")
+	if err = os.MkdirAll(outside, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(marker, []byte("must remain"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := &model.Task{ID: ".." + string(filepath.Separator) + "outside"}
+	if err = f.P.RemoveTaskScratch(corrupt); err == nil {
+		t.Fatal("corrupt task path was accepted for scratch cleanup")
+	}
+	if _, err = os.Stat(marker); err != nil {
+		t.Fatalf("unsafe scratch cleanup removed outside content: %v", err)
+	}
+}

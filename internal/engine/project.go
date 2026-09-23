@@ -281,6 +281,46 @@ func (p *Project) TaskScratchPath(t *model.Task) string {
 	return filepath.Join(p.Dir, "scratch", t.ID)
 }
 
+// RemoveTaskScratch removes only a resolved task directory below this project's
+// scratch root. Task IDs originate in durable state, so a corrupted value must
+// fail closed rather than allow a path traversal or junction escape.
+func (p *Project) RemoveTaskScratch(t *model.Task) error {
+	root, err := filepath.Abs(filepath.Join(p.Dir, "scratch"))
+	if err != nil {
+		return err
+	}
+	target, err := filepath.Abs(p.TaskScratchPath(t))
+	if err != nil {
+		return err
+	}
+	if !pathWithin(root, target) {
+		return errors.New("unsafe task scratch cleanup path")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("resolve task scratch root: %w", err)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("resolve task scratch path: %w", err)
+	}
+	if !pathWithin(resolvedRoot, resolvedTarget) {
+		return errors.New("unsafe resolved task scratch cleanup path")
+	}
+	return os.RemoveAll(resolvedTarget)
+}
+
+func pathWithin(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 func outsideSource(root, home string) error {
 	return config.OutsideSource(root, home)
 }

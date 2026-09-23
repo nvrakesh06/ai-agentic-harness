@@ -165,17 +165,21 @@ func TestWorkerScratchIsExternalAndConfiguresTemporaryToolCaches(t *testing.T) {
 	if _, err = (CLI{Kind: "codex", Executable: exe}).Run(context.Background(), Request{Directory: workspace, Runtime: filepath.Join(t.TempDir(), "run"), Scratch: scratch, Role: "implementer", Prompt: "fixture", Timeout: time.Second}); err != nil {
 		t.Fatal(err)
 	}
+	resolvedScratch, err := resolvedPath(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got, err := os.ReadFile(envFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"AIH_SCRATCH=" + scratch,
-		"TMP=" + scratch,
-		"TEMP=" + scratch,
-		"TMPDIR=" + scratch,
-		"npm_config_cache=" + filepath.Join(scratch, "npm-cache"),
-		"NPM_CONFIG_CACHE=" + filepath.Join(scratch, "npm-cache"),
+		"AIH_SCRATCH=" + resolvedScratch,
+		"TMP=" + resolvedScratch,
+		"TEMP=" + resolvedScratch,
+		"TMPDIR=" + resolvedScratch,
+		"npm_config_cache=" + filepath.Join(resolvedScratch, "npm-cache"),
+		"NPM_CONFIG_CACHE=" + filepath.Join(resolvedScratch, "npm-cache"),
 	} {
 		if !strings.Contains(string(got), want) {
 			t.Fatalf("scratch environment omitted %q: %s", want, got)
@@ -186,6 +190,14 @@ func TestWorkerScratchIsExternalAndConfiguresTemporaryToolCaches(t *testing.T) {
 	}
 	if _, err = (CLI{Kind: "codex", Executable: exe}).Run(context.Background(), Request{Directory: workspace, Runtime: filepath.Join(t.TempDir(), "invalid-run"), Scratch: filepath.Join(workspace, "scratch"), Role: "implementer", Prompt: "fixture", Timeout: time.Second}); err == nil {
 		t.Fatal("scratch inside source worktree was accepted")
+	}
+	link := filepath.Join(filepath.Dir(workspace), "scratch-link")
+	if err = os.Symlink(workspace, link); err == nil {
+		if _, err = (CLI{Kind: "codex", Executable: exe}).Run(context.Background(), Request{Directory: workspace, Runtime: filepath.Join(t.TempDir(), "junction-run"), Scratch: link, Role: "implementer", Prompt: "fixture", Timeout: time.Second}); err == nil {
+			t.Fatal("scratch symlink into source worktree was accepted")
+		}
+	} else {
+		t.Logf("symlink fixture unavailable on this machine: %v", err)
 	}
 }
 func TestAdaptersLaunchAndFailures(t *testing.T) {
