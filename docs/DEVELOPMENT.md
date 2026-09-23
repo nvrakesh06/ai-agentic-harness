@@ -64,7 +64,9 @@ checks:
 # Optional. AIH owns the browser runner when a reviewer requests visual
 # evidence that its sandbox cannot capture.
 visual_capture:
-  url: http://127.0.0.1:4318/
+  # This adapter binds 127.0.0.1:0, uses AIH_VISUAL_TLS_CERT and
+  # AIH_VISUAL_TLS_KEY, then prints: AIH_VISUAL_READY https://127.0.0.1:<port>
+  server: [node, scripts/aih-visual-server.mjs]
   timeout_seconds: 90
 release_repo: nvrakesh06/ai-agentic-harness
 ```
@@ -85,14 +87,20 @@ or running check and its elapsed wait or run time.
 Checks must leave tracked source and unignored files unchanged. Use check-mode
 formatters and ignore build outputs in the application itself.
 
-`visual_capture` is optional and separate from build/test checks. It supplies
-only an owned `http://127.0.0.1:<port>` target: AIH launches its own fixed Chrome
-channel and viewport, creates a fresh browser context, blocks redirects,
-subresources, WebSockets, and other requests outside that exact loopback origin,
-and owns the process lifetime. Project configuration has no capture argv and
-cannot choose a profile or CDP endpoint. AIH writes `manifest.json`, a screenshot,
-and redacted network diagnostics outside source, seals their hashes, and gives the
-requesting reviewer one exact-head retry. Capture is evidence, never a visual pass.
+`visual_capture` is optional and separate from build/test checks. `server` is a
+project adapter argv that AIH runs from the pinned task worktree. The adapter must
+bind `127.0.0.1:0` itself, serve HTTPS with the fresh paths in
+`AIH_VISUAL_TLS_CERT` and `AIH_VISUAL_TLS_KEY`, and print one bounded readiness
+line: `AIH_VISUAL_READY https://127.0.0.1:<port>`. AIH pins that certificate,
+places an AIH-owned loopback gateway in front of the browser, then launches its
+fixed Chrome channel and viewport with a fresh browser context. It blocks redirects,
+subresources, WebSockets, and other requests outside the gateway origin, and kills
+the complete adapter process tree on completion, timeout, or cancellation. The
+project cannot choose browser argv, a profile, CDP endpoint, or a pre-existing
+listener. AIH writes `manifest.json`, a screenshot, and redacted network diagnostics
+outside source, verifies the worktree remains clean at the exact head before
+sealing hashes, and gives the requesting reviewer one exact-head retry. Capture is
+evidence, never a visual pass.
 
 The browser package is a supervisor capability, not a project dependency. Install
 Playwright in an AIH-managed tools directory outside every target worktree and set

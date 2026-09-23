@@ -2,13 +2,16 @@ package engine
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +58,48 @@ func TestNativeVisualHelper(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(fmt.Sprintf(`{"head":%q,"summary":"blank page: frontend module 404","artifacts":["desktop.png","network.txt"]}`, head)), 0600)
 }
 
+// TestNativeVisualAdapter is a disposable project-side adapter. It deliberately
+// binds port zero and publishes only the bounded readiness line required by
+// AIH; certificate paths are supplied by the supervisor.
+func TestNativeVisualAdapter(t *testing.T) {
+	if os.Getenv("AIH_VISUAL_SERVER_HELPER") != "1" {
+		return
+	}
+	cert, err := tls.LoadX509KeyPair(os.Getenv("AIH_VISUAL_TLS_CERT"), os.Getenv("AIH_VISUAL_TLS_KEY"))
+	if err != nil {
+		os.Exit(2)
+	}
+	listener, err := tls.Listen("tcp4", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		os.Exit(2)
+	}
+	defer listener.Close()
+	forbidden := os.Getenv("AIH_VISUAL_TEST_FORBIDDEN")
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			if os.Getenv("AIH_VISUAL_TEST_NAVIGATION") == "1" {
+				http.Redirect(w, r, forbidden+"/navigation", http.StatusFound)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<!doctype html><div id="root"></div><img src="https://outside.invalid/pixel.png"><img src="/redirect-pixel"><script>new WebSocket('ws://outside.invalid/socket')</script><script src="/api-client.ts"></script>`))
+		case "/api-client.ts":
+			http.NotFound(w, r)
+		case "/redirect-pixel":
+			http.Redirect(w, r, forbidden+"/pixel.png", http.StatusFound)
+		case "/redirect-navigation":
+			http.Redirect(w, r, forbidden+"/navigation", http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	})}
+	fmt.Printf("%shttps://127.0.0.1:%d\n", visualReadyPrefix, listener.Addr().(*net.TCPAddr).Port)
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		os.Exit(2)
+	}
+}
+
 func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	if runtime.GOOS != "windows" || os.Getenv("AIH_REAL_PLAYWRIGHT") != "1" {
 		t.Skip("real Playwright fixture runs on an explicitly provisioned Windows browser host")
@@ -90,24 +135,11 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 		_, _ = w.Write([]byte("forbidden destination reached"))
 	}))
 	defer forbidden.Close()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/":
-			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte(`<!doctype html><div id="root"></div><img src="https://outside.invalid/pixel.png"><img src="/redirect-pixel"><script>new WebSocket('ws://outside.invalid/socket')</script><script src="/api-client.ts"></script>`))
-		case "/api-client.ts":
-			http.NotFound(w, r)
-		case "/redirect-pixel":
-			http.Redirect(w, r, forbidden.URL+"/pixel.png", http.StatusFound)
-		case "/redirect-navigation":
-			http.Redirect(w, r, forbidden.URL+"/navigation", http.StatusFound)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+	t.Setenv("AIH_VISUAL_SERVER_HELPER", "1")
+	t.Setenv("AIH_VISUAL_TEST_FORBIDDEN", forbidden.URL)
+	adapter := []string{os.Args[0], "-test.run=^TestNativeVisualAdapter$"}
 	c := &Controller{P: &Project{Dir: state}}
-	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{URL: server.URL + "/", Timeout: 10}}}
+	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: adapter, Timeout: 10}}}
 	task := &model.Task{ID: "task-visual", HeadSHA: head}
 	if _, err := c.captureVisual(context.Background(), effective, &model.Task{ID: "../outside", HeadSHA: head}, worktree); err == nil {
 		t.Fatal("unsafe task ID escaped evidence root")
@@ -123,7 +155,8 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	if forbiddenRequests.Load() != 0 {
 		t.Fatalf("forbidden subresource redirect reached destination %d times", forbiddenRequests.Load())
 	}
-	navigation := config.Effective{Hash: strings.Repeat("c", 64), Project: config.Project{VisualCapture: &config.VisualCapture{URL: server.URL + "/redirect-navigation", Timeout: 10}}}
+	t.Setenv("AIH_VISUAL_TEST_NAVIGATION", "1")
+	navigation := config.Effective{Hash: strings.Repeat("c", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: adapter, Timeout: 10}}}
 	if _, err := c.captureVisual(context.Background(), navigation, &model.Task{ID: "task-navigation", HeadSHA: head}, worktree); err == nil {
 		t.Fatal("off-origin navigation redirect produced capture evidence")
 	}
@@ -203,6 +236,31 @@ func TestVisualRunnerOwnsLoopbackAndProfilePolicy(t *testing.T) {
 		if !strings.Contains(visualRunner, want) {
 			t.Fatalf("AIH runner omitted required policy %q", want)
 		}
+	}
+}
+
+// A listener that did not receive this capture's certificate cannot be mistaken
+// for the adapter, even if it presents a plausible application page.
+func TestVisualGatewayRejectsStaleListenerBeforeHTTP(t *testing.T) {
+	var requests atomic.Int32
+	stale := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("plausible stale application"))
+	}))
+	defer stale.Close()
+	target, err := url.Parse(stale.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, cert, err := visualCertificate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = startVisualGateway(context.Background(), target, cert); err == nil {
+		t.Fatal("stale listener with another certificate passed pinned gateway setup")
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("stale listener received HTTP after rejected TLS handshake: %d", requests.Load())
 	}
 }
 

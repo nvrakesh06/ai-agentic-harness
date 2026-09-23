@@ -52,11 +52,11 @@ type Check struct {
 	Class     string   `yaml:"class,omitempty" json:"class,omitempty"`
 }
 
-// VisualCapture declares a loopback target. AIH owns the browser runner; there
-// is intentionally no project-supplied argv that could evade its policy.
+// VisualCapture declares the project adapter command. AIH supplies ephemeral
+// TLS material, chooses no port itself, and owns the browser and gateway.
 type VisualCapture struct {
-	URL     string `yaml:"url" json:"url"`
-	Timeout int    `yaml:"timeout_seconds" json:"timeout_seconds"`
+	Server  []string `yaml:"server" json:"server"`
+	Timeout int      `yaml:"timeout_seconds" json:"timeout_seconds"`
 }
 type Policy struct {
 	ImplementationRetries int `yaml:"implementation_retries"`
@@ -280,9 +280,8 @@ func (p Project) Validate() error {
 		}
 	}
 	if p.VisualCapture != nil {
-		u, err := url.Parse(p.VisualCapture.URL)
-		if err != nil || u.Scheme != "http" || u.Hostname() != "127.0.0.1" || u.Port() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-			return errors.New("visual_capture needs an http://127.0.0.1:<port> URL without credentials, query, or fragment")
+		if len(p.VisualCapture.Server) == 0 || strings.TrimSpace(p.VisualCapture.Server[0]) == "" {
+			return errors.New("visual_capture needs a server command argv")
 		}
 		if p.VisualCapture.Timeout < 1 || p.VisualCapture.Timeout > 300 {
 			return errors.New("visual_capture timeout_seconds must be between 1 and 300")

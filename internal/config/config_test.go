@@ -159,16 +159,16 @@ func TestMachineAndNativeChecks(t *testing.T) {
 	}
 }
 
-func TestVisualCaptureAcceptsOnlyAIHOwnedLoopbackTarget(t *testing.T) {
+func TestVisualCaptureRequiresServerAdapterCommand(t *testing.T) {
 	p := Defaults()
-	p.VisualCapture = &VisualCapture{URL: "http://127.0.0.1:4318/", Timeout: 30}
+	p.VisualCapture = &VisualCapture{Server: []string{"node", "scripts/visual-server.mjs"}, Timeout: 30}
 	if err := p.Validate(); err != nil {
-		t.Fatalf("valid loopback capture rejected: %v", err)
+		t.Fatalf("valid server adapter rejected: %v", err)
 	}
-	for _, target := range []string{"https://127.0.0.1:4318/", "http://localhost:4318/", "http://example.test:4318/", "http://127.0.0.1:4318/?token=x", "http://127.0.0.1/"} {
-		p.VisualCapture.URL = target
+	for _, command := range [][]string{nil, {}, {""}} {
+		p.VisualCapture.Server = command
 		if err := p.Validate(); err == nil {
-			t.Fatalf("unowned capture target accepted: %q", target)
+			t.Fatalf("empty server adapter accepted: %#v", command)
 		}
 	}
 }

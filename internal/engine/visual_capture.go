@@ -1,22 +1,36 @@
 package engine
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
@@ -27,11 +41,12 @@ import (
 )
 
 const visualFileLimit = 8 << 20
+const visualReadyPrefix = "AIH_VISUAL_READY "
 
 // The runner is deliberately AIH-owned. It creates a fresh browser context,
 // pins its viewport/channel, and aborts every request whose origin differs
 // from the configured loopback origin, including redirects, subresources, and
-// WebSockets. Project configuration supplies only the loopback URL.
+// WebSockets. Project configuration supplies no browser arguments or URL.
 const visualRunner = `
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -124,6 +139,116 @@ func playwrightModule() (string, error) {
 		return "", &visualCaptureUnavailableError{errors.New("AIH_PLAYWRIGHT_MODULE is not an available Playwright module")}
 	}
 	return module, nil
+}
+
+// visualCertificate creates capture-only credentials. They live in the AIH
+// temporary directory, never in the reviewed worktree, and are discarded with
+// the capture. The adapter receives their paths solely to terminate TLS.
+func visualCertificate(dir string) (certPath, keyPath string, cert *x509.Certificate, err error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", "", nil, err
+	}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil {
+		return "", "", nil, err
+	}
+	now := time.Now()
+	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "aih-visual-capture"}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(10 * time.Minute), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, DNSNames: []string{"aih-visual-capture"}, IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return "", "", nil, err
+	}
+	certPath, keyPath = filepath.Join(dir, "adapter-cert.pem"), filepath.Join(dir, "adapter-key.pem")
+	if err = os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
+		return "", "", nil, err
+	}
+	keyDER := x509.MarshalPKCS1PrivateKey(key)
+	if err = os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: keyDER}), 0600); err != nil {
+		return "", "", nil, err
+	}
+	cert, err = x509.ParseCertificate(der)
+	return certPath, keyPath, cert, err
+}
+
+func adapterReady(ctx context.Context, process *platform.ManagedProcess) (*url.URL, error) {
+	lines := make(chan string, 1)
+	errs := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(io.LimitReader(process.Stdout, 4096))
+		scanner.Buffer(make([]byte, 256), 4096)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, visualReadyPrefix) {
+				lines <- strings.TrimPrefix(line, visualReadyPrefix)
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			errs <- err
+		} else {
+			errs <- errors.New("server adapter exited before bounded readiness")
+		}
+	}()
+	select {
+	case line := <-lines:
+		target, err := url.Parse(line)
+		if err != nil || target.Scheme != "https" || target.Hostname() != "127.0.0.1" || target.Port() == "" || target.User != nil || target.RawQuery != "" || target.Fragment != "" || target.Path != "" {
+			return nil, errors.New("server adapter readiness must be https://127.0.0.1:<port>")
+		}
+		port, err := strconv.Atoi(target.Port())
+		if err != nil || port < 1 || port > 65535 {
+			return nil, errors.New("server adapter readiness must use a valid loopback port")
+		}
+		return target, nil
+	case err := <-errs:
+		return nil, err
+	case <-ctx.Done():
+		process.Close()
+		return nil, ctx.Err()
+	}
+}
+
+type visualGateway struct {
+	url    string
+	server *http.Server
+	listen net.Listener
+	once   sync.Once
+}
+
+func (g *visualGateway) Close() { g.once.Do(func() { _ = g.server.Close(); _ = g.listen.Close() }) }
+
+// startVisualGateway authenticates the adapter once through a fresh pinned TLS
+// transport, then gives the browser an AIH-owned HTTP loopback origin. No
+// system proxy or redirect-following client participates in either connection.
+func startVisualGateway(ctx context.Context, target *url.URL, cert *x509.Certificate) (*visualGateway, error) {
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	transport := &http.Transport{Proxy: nil, TLSClientConfig: &tls.Config{RootCAs: pool, ServerName: "aih-visual-capture", MinVersion: tls.VersionTLS12}}
+	client := &http.Client{Transport: transport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	probe, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := client.Do(probe)
+	if err != nil {
+		return nil, fmt.Errorf("server adapter pinned TLS handshake: %w", err)
+	}
+	_ = response.Body.Close()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = transport
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
+		http.Error(w, "AIH adapter connection failed", http.StatusBadGateway)
+	}
+	server := &http.Server{Handler: proxy, ReadHeaderTimeout: 5 * time.Second}
+	gateway := &visualGateway{url: "http://" + listener.Addr().String() + "/", server: server, listen: listener}
+	go func() { _ = server.Serve(listener) }()
+	return gateway, nil
 }
 
 type visualManifest struct {
@@ -370,11 +495,32 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	defer release()
 	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(capture.Timeout)*time.Second)
 	defer cancel()
-	env := append(cleanEnvironment(), "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA, "AIH_VISUAL_URL="+capture.URL, "AIH_VISUAL_PLAYWRIGHT_MODULE="+playwright)
+	certPath, keyPath, cert, err := visualCertificate(temporary)
+	if err != nil {
+		return nil, err
+	}
+	adapterEnv := append(cleanEnvironment(), "AIH_VISUAL_TLS_CERT="+certPath, "AIH_VISUAL_TLS_KEY="+keyPath)
+	adapter, err := platform.StartManaged(checkCtx, dir, adapterEnv, capture.Server[0], capture.Server[1:]...)
+	if err != nil {
+		return nil, visualCaptureRunError(capture.Server[0], err, "")
+	}
+	defer adapter.Close()
+	target, err := adapterReady(checkCtx, adapter)
+	if err != nil {
+		return nil, visualCaptureRunError(capture.Server[0], err, "")
+	}
+	gateway, err := startVisualGateway(checkCtx, target, cert)
+	if err != nil {
+		return nil, visualCaptureRunError(capture.Server[0], err, "")
+	}
+	defer gateway.Close()
+	env := append(cleanEnvironment(), "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA, "AIH_VISUAL_URL="+gateway.url, "AIH_VISUAL_PLAYWRIGHT_MODULE="+playwright)
 	out, err := platform.Run(checkCtx, dir, env, "", "node", runner)
 	if err != nil {
 		return nil, visualCaptureRunError("node", err, out)
 	}
+	gateway.Close()
+	adapter.Close()
 	sha, err = (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
 	if err != nil || sha != task.HeadSHA {
 		return nil, errors.New("visual capture changed the reviewed head")

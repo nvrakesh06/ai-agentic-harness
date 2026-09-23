@@ -70,6 +70,74 @@ type Observation struct {
 	LastActivity time.Time
 }
 
+// ManagedProcess is an AIH-owned child process. Unlike Background, it remains
+// in the supervisor's process tree and Close terminates all of its descendants.
+// It is for short-lived project adapters whose lifetime is bounded by a check.
+type ManagedProcess struct {
+	Stdout io.ReadCloser
+	cmd    *exec.Cmd
+	done   chan error
+	stop   func()
+	kill   func() error
+	clean  func()
+	once   sync.Once
+}
+
+// StartManaged starts an owned process and exposes its stdout for a bounded
+// readiness protocol. The caller must Close it, including on cancellation.
+func StartManaged(ctx context.Context, dir string, env []string, name string, args ...string) (*ManagedProcess, error) {
+	cmd, err := command(name, args)
+	if err != nil {
+		return nil, err
+	}
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Dir, cmd.Env = dir, env
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderr limitedBuffer
+	cmd.Stderr = &stderr
+	prepare(cmd, false)
+	lifeline, err := supervise(cmd)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		lifeline()
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		lifeline()
+		return nil, err
+	}
+	cleanup, kill, err := own(cmd)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		lifeline()
+		return nil, err
+	}
+	p := &ManagedProcess{Stdout: stdout, cmd: cmd, done: make(chan error, 1), kill: kill}
+	p.stop = func() {
+		_ = stopProcess(p.done, kill, cmd.Process.Kill)
+	}
+	p.clean = func() { cleanup(); lifeline() }
+	go func() { p.done <- cmd.Wait() }()
+	return p, nil
+}
+
+// Close kills the owned child tree and waits for it before releasing ownership.
+func (p *ManagedProcess) Close() {
+	if p == nil {
+		return
+	}
+	p.once.Do(func() {
+		p.stop()
+		p.clean()
+	})
+}
+
 func (b *limitedBuffer) snapshot() (string, time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
