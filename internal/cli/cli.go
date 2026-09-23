@@ -295,6 +295,41 @@ func active(p *engine.Project) bool {
 	_ = l.Close()
 	return false
 }
+
+const startupAckTimeout = 45 * time.Second
+
+var errStartupAckTimeout = errors.New("supervisor startup acknowledgement delayed")
+
+func waitForSupervisorStart(ctx context.Context, timeout, interval time.Duration, ready func() bool, failure func() string) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if ready() {
+			return nil
+		}
+		if message := failure(); message != "" {
+			return fmt.Errorf("supervisor failed during startup: %s", message)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			// Check once more at the deadline: the supervisor may have acquired its
+			// lease while this process was waiting to be scheduled.
+			if ready() {
+				return nil
+			}
+			if message := failure(); message != "" {
+				return fmt.Errorf("supervisor failed during startup: %s", message)
+			}
+			return fmt.Errorf("%w after %s", errStartupAckTimeout, timeout)
+		case <-ticker.C:
+		}
+	}
+}
+
 func background(cmd *cobra.Command, p *engine.Project) error {
 	if active(p) {
 		fmt.Fprintln(cmd.OutOrStdout(), "Local supervisor is running.")
@@ -318,22 +353,34 @@ func background(cmd *cobra.Command, p *engine.Project) error {
 	if e = os.MkdirAll(logs, 0700); e != nil {
 		return e
 	}
-	_ = p.DB.Set("last_error", "")
+	// A crashed previous supervisor may have left a stale PID in the local cache.
+	// The lock was free above, so only a new controller can acknowledge this start.
+	if e = p.DB.Set("pid", ""); e != nil {
+		return e
+	}
+	if e = p.DB.Set("last_error", ""); e != nil {
+		return e
+	}
 	if e = platform.Background(exe, []string{"start", "--foreground", "--repo", p.Root, "--home", p.Home}, p.Root, filepath.Join(logs, "supervisor.log")); e != nil {
 		return e
 	}
-	for i := 0; i < 30; i++ {
-		if active(p) && p.DB.Get("pid") != "" {
-			fmt.Fprintln(cmd.OutOrStdout(), "Supervisor started. Use aih status or aih watch.")
+	if e = waitForSupervisorStart(cmd.Context(), startupAckTimeout, 200*time.Millisecond,
+		func() bool { return active(p) && p.DB.Get("pid") != "" },
+		func() string {
+			if active(p) {
+				return ""
+			}
+			return p.DB.Get("last_error")
+		},
+	); e != nil {
+		if errors.Is(e, errStartupAckTimeout) && active(p) {
+			fmt.Fprintln(cmd.OutOrStdout(), "Supervisor is still initializing; use aih status or aih watch to confirm startup.")
 			return nil
 		}
-		select {
-		case <-cmd.Context().Done():
-			return cmd.Context().Err()
-		case <-time.After(200 * time.Millisecond):
-		}
+		return fmt.Errorf("%w; inspect %s", e, filepath.Join(logs, "supervisor.log"))
 	}
-	return fmt.Errorf("supervisor did not acknowledge startup; inspect %s", filepath.Join(logs, "supervisor.log"))
+	fmt.Fprintln(cmd.OutOrStdout(), "Supervisor started. Use aih status or aih watch.")
+	return nil
 }
 func checkUpdate(cmd *cobra.Command, p *engine.Project) {
 	if p.Config.Lock.AutoUpdate == "off" {

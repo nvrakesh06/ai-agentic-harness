@@ -34,6 +34,10 @@ or `aih handoff` to stop it. Foreground operation responds to interruption.
 If the supervisor dies, owned workers are terminated and logical state remains on
 GitHub/Git. Wait for the remote lease to expire plus five seconds, then use
 `aih takeover` (or resume). No command silently overrides a live lease.
+If `aih resume` reports that the supervisor is still initializing, its local lock
+is held but lease acquisition has not yet been acknowledged. Use `aih status` or
+`aih watch` to observe the result instead of starting another controller. A
+reported startup error includes the supervisor log path for diagnosis.
 The local status heartbeat may stop before the durable lease expires; it does not
 shorten this wait. During normal operation, meaningful state saves refresh the lease
 immediately and otherwise the supervisor renews it at half-life, so a live owner
