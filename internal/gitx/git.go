@@ -340,6 +340,16 @@ func (g Git) Rebase(ctx context.Context, path, base string) error {
 	if status != "" {
 		return errors.New("cannot rebase a dirty task worktree")
 	}
+	// A task-owned merge may already contain the current base. Plain rebase
+	// drops that merge and replays its earlier checkpoints, which can recreate
+	// a conflict that the task owner has already resolved.
+	head, e := w.SHA(ctx, "HEAD")
+	if e != nil {
+		return e
+	}
+	if w.Ancestor(ctx, base, head) {
+		return nil
+	}
 	_, e = w.Run(ctx, "", "rebase", base)
 	if e != nil {
 		_, abortErr := w.Run(context.Background(), "", "rebase", "--abort")

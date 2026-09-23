@@ -201,6 +201,12 @@ func TestConflictRecoveryAndCheckpointMarkers(t *testing.T) {
 	if !g.Ancestor(ctx, base, head) {
 		t.Fatal("resolved checkpoint lost main ancestry")
 	}
+	if e = g.Rebase(ctx, dir, base); e != nil {
+		t.Fatal("resolved merge must not replay old checkpoints:", e)
+	}
+	if got, e := (gitx.Git{Dir: dir}).SHA(ctx, "HEAD"); e != nil || got != head {
+		t.Fatalf("rebase changed resolved merge head: got %q, want %q, error %v", got, head, e)
+	}
 }
 func TestWorktreeCheckpointAndRebase(t *testing.T) {
 	ctx := context.Background()
