@@ -30,6 +30,60 @@ func requiredPreflightRoles(effective config.Effective, t *model.Task) ([]roles.
 	return pre, nil
 }
 
+type preflightDispatch struct {
+	task   *model.Task
+	guided bool
+}
+
+// selectPreflights bounds both worktree preparation and reader waiters. A
+// separate fast allowance keeps tasks without guidance moving when readers are
+// occupied by unrelated reviews or UI preflights.
+func selectPreflights(s *model.Snapshot, active map[string]bool, guidedActive map[string]bool, maxReaders, maxWriters int, configured map[string]roles.Role) []preflightDispatch {
+	fastActive, guidedCount := 0, 0
+	for id, writing := range active {
+		if writing {
+			continue
+		}
+		if guidedActive[id] {
+			guidedCount++
+		} else {
+			fastActive++
+		}
+	}
+	fastSlots, guidedSlots := maxWriters-fastActive, maxReaders+1-guidedCount
+	if fastSlots < 0 {
+		fastSlots = 0
+	}
+	if guidedSlots < 0 {
+		guidedSlots = 0
+	}
+	var fastReady, guidedReady []preflightDispatch
+	for _, t := range model.Ordered(s) {
+		if hasActive(active, t.ID) || (t.State != model.Ready && t.State != model.Fix) || (t.Preflight != nil && t.Preflight.Phase == "ready") {
+			continue
+		}
+		waiting := false
+		for _, dep := range t.Dependencies {
+			if s.Tasks[dep] == nil || s.Tasks[dep].State != model.Done {
+				waiting = true
+				break
+			}
+		}
+		if waiting {
+			continue
+		}
+		pre, err := roles.Required(configured, t, t.Areas, "pre-implementation")
+		needsReader := err != nil || len(pre) > 0 || t.UI
+		if needsReader && len(guidedReady) < guidedSlots {
+			guidedReady = append(guidedReady, preflightDispatch{task: t, guided: true})
+		}
+		if !needsReader && len(fastReady) < fastSlots {
+			fastReady = append(fastReady, preflightDispatch{task: t})
+		}
+	}
+	return append(fastReady, guidedReady...)
+}
+
 // preflight runs reader guidance without occupying a writer slot. Each completed
 // role is committed before the next one starts, so takeover resumes at the first
 // unfinished role without depending on provider conversation history.

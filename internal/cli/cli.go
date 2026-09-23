@@ -487,6 +487,9 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		if queued[t.ID] {
 			status = "WAITING_CHECK_CAPACITY"
 		}
+		if (t.State == model.Ready || t.State == model.Fix) && t.Preflight == nil {
+			status = "PREFLIGHT_QUEUED"
+		}
 		if t.Preflight != nil && (t.State == model.Ready || t.State == model.Fix) {
 			switch t.Preflight.Phase {
 			case "queued":

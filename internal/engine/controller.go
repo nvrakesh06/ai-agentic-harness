@@ -321,6 +321,7 @@ func (c *Controller) Serve(parent context.Context) error {
 	ticker := time.NewTicker(400 * time.Millisecond)
 	defer ticker.Stop()
 	active := map[string]bool{}
+	guidedPreflights := map[string]bool{}
 	done := make(chan string, 64)
 	merging := false
 	planning := false
@@ -335,6 +336,7 @@ func (c *Controller) Serve(parent context.Context) error {
 			c.cancel()
 		case id := <-done:
 			delete(active, id)
+			delete(guidedPreflights, id)
 			if strings.HasPrefix(id, "@merge:") {
 				delete(active, strings.TrimPrefix(id, "@merge:"))
 				merging = false
@@ -378,23 +380,17 @@ func (c *Controller) Serve(parent context.Context) error {
 				active[id] = true
 				c.launch(func() { c.work(id, true); done <- id })
 			}
-			for _, t := range model.Ordered(c.Snapshot()) {
-				if hasActive(active, t.ID) || (t.State != model.Ready && t.State != model.Fix) || (t.Preflight != nil && t.Preflight.Phase == "ready") {
-					continue
-				}
-				waiting := false
-				for _, dep := range t.Dependencies {
-					peer := c.Snapshot().Tasks[dep]
-					if peer == nil || peer.State != model.Done {
-						waiting = true
-						break
-					}
-				}
-				if waiting {
-					continue
-				}
-				id := t.ID
+			configuredRoles, roleErr := roles.Load(c.P.Config.Files)
+			if roleErr != nil {
+				e = roleErr
+				stopping = true
+				c.cancel()
+				break
+			}
+			for _, candidate := range selectPreflights(c.Snapshot(), active, guidedPreflights, c.P.Config.Project.MaxReaders, c.P.Config.Project.MaxWriters, configuredRoles) {
+				id := candidate.task.ID
 				active[id] = false
+				guidedPreflights[id] = candidate.guided
 				c.launch(func() { c.preflight(id); done <- id })
 			}
 			if capacity.planObjective != "" {
