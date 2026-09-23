@@ -974,19 +974,6 @@ func (c *Controller) preserveReviewFindings(id string, findings []model.Finding)
 	})
 }
 
-func (c *Controller) reviewFollowups(task *model.Task, findings []model.Finding) error {
-	for _, finding := range findings {
-		if finding.Severity != "medium" {
-			continue
-		}
-		key := fmt.Sprintf("%s-followup-%x", task.ID, sha256.Sum256([]byte(finding.Role+finding.Location+finding.Reason)))
-		if _, err := c.P.Hub.EnsureIssue(c.ctx, key, "Follow-up: "+short(finding.Reason, 90), fmt.Sprintf("From #%d\n\n%s\n\n%s", task.Issue, finding.Reason, finding.Resolution)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (c *Controller) verifyReview(id string) error {
 	effective, e := c.syncTask(c.ctx, id)
 	if e != nil {
