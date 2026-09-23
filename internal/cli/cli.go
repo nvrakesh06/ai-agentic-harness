@@ -409,6 +409,12 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		s.Capacity.GraceSeconds = p.Config.Project.Scheduling.UnderutilizationGraceSeconds
 		s.Capacity.BacklogSource = p.Config.Project.Scheduling.BacklogSource
 	}
+	if s.Capacity.MaxHeavyChecks == 0 {
+		s.Capacity.MaxHeavyChecks = p.Config.Project.Resources.MaxHeavyChecks
+	}
+	if s.Capacity.MaxLightChecks == 0 {
+		s.Capacity.MaxLightChecks = p.Config.Project.Resources.MaxLightChecks
+	}
 	if asJSON {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
