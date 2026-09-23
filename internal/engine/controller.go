@@ -482,8 +482,12 @@ func (c *Controller) Serve(parent context.Context) error {
 func (c *Controller) launch(fn func()) { c.jobs.Add(1); go func() { defer c.jobs.Done(); fn() }() }
 
 type guidanceCommand struct {
-	Source string `json:"source_task"`
-	Text   string `json:"text"`
+	Source   string `json:"source_task"`
+	Operator bool   `json:"operator,omitempty"`
+	Head     string `json:"head,omitempty"`
+	Config   string `json:"config,omitempty"`
+	Rules    string `json:"rules,omitempty"`
+	Text     string `json:"text"`
 }
 type guidanceRejection struct{ error }
 
@@ -496,6 +500,15 @@ func validateGuidanceCommand(s *model.Snapshot, cmd store.Command) (guidanceComm
 		return guidance, err
 	}
 	target := s.Tasks[cmd.Target]
+	if guidance.Operator {
+		if target == nil {
+			return guidance, errors.New("operator guidance requires known task ID")
+		}
+		if err := model.QueueOperatorGuidance(target, cmd.ID, guidance.Head, guidance.Config, guidance.Rules, guidance.Text); err != nil {
+			return guidance, err
+		}
+		return guidance, nil
+	}
 	source := s.Tasks[guidance.Source]
 	if target == nil || source == nil {
 		return guidance, errors.New("guidance requires known task IDs")
@@ -565,7 +578,13 @@ func (c *Controller) commands() (bool, error) {
 				continue
 			}
 			err = c.save(c.ctx, func(s *model.Snapshot) error {
-				if err := model.QueueGuidance(s.Tasks[cmd.Target], s.Tasks[guidance.Source], cmd.ID, guidance.Text); err != nil {
+				var err error
+				if guidance.Operator {
+					err = model.QueueOperatorGuidance(s.Tasks[cmd.Target], cmd.ID, guidance.Head, guidance.Config, guidance.Rules, guidance.Text)
+				} else {
+					err = model.QueueGuidance(s.Tasks[cmd.Target], s.Tasks[guidance.Source], cmd.ID, guidance.Text)
+				}
+				if err != nil {
 					return guidanceRejection{err}
 				}
 				s.Applied[cmd.ID] = true

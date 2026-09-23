@@ -112,6 +112,10 @@ type Guidance struct {
 	CommandID string `json:"command_id"`
 	SourceID  string `json:"source_task"`
 	SourceSHA string `json:"source_head"`
+	Operator  bool   `json:"operator,omitempty"`
+	Head      string `json:"target_head,omitempty"`
+	Config    string `json:"config,omitempty"`
+	Rules     string `json:"rules,omitempty"`
 	Text      string `json:"text"`
 }
 
@@ -147,6 +151,30 @@ func QueueGuidance(target, source *Task, commandID, message string) error {
 		return errors.New("task guidance limit reached")
 	}
 	encoded, err := json.Marshal(Guidance{CommandID: commandID, SourceID: source.ID, SourceSHA: source.HeadSHA, Text: message})
+	if err != nil {
+		return err
+	}
+	target.Decisions = append(target.Decisions, guidancePrefix+string(encoded))
+	return nil
+}
+
+// QueueOperatorGuidance is deliberately scoped to the exact task checkpoint
+// and active policy hashes. It shares the durable delivery/replay mechanism
+// with cross-task guidance, but requires no synthetic source task.
+func QueueOperatorGuidance(target *Task, commandID, head, configHash, rules, message string) error {
+	if target == nil || (target.State != Ready && target.State != Fix && target.State != SyncRequired) || target.HeadSHA != head || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(head) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(configHash) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(rules) {
+		return errors.New("operator guidance requires a READY, FIX, or SYNC_REQUIRED exact task head and policy scope")
+	}
+	message = strings.TrimSpace(message)
+	if message == "" || len(message) > MaxGuidanceBytes || !utf8.ValidString(message) || strings.ContainsRune(message, '\x00') || len(TaskGuidance(target)) >= MaxTaskGuidance {
+		return errors.New("operator guidance must be bounded and unique")
+	}
+	for _, prior := range TaskGuidance(target) {
+		if prior.Operator && prior.Head == head && prior.Config == configHash && prior.Rules == rules && prior.Text == message {
+			return errors.New("duplicate operator guidance")
+		}
+	}
+	encoded, err := json.Marshal(Guidance{CommandID: commandID, SourceID: "operator", SourceSHA: head, Operator: true, Head: head, Config: configHash, Rules: rules, Text: message})
 	if err != nil {
 		return err
 	}
