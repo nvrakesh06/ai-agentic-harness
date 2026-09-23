@@ -820,6 +820,7 @@ func (c *Controller) retry(id, kind, reason string) {
 		c.block(id, "Restore canonical policy access before retrying.", err.Error(), model.Fix)
 		return
 	}
+	preflightRoles, preflightErr := requiredPreflightRoles(effective, t)
 	limit := effective.Policy.ReviewCycles
 	count := t.FixCycles[kind] + 1
 	if kind == "implementation" {
@@ -864,6 +865,9 @@ func (c *Controller) retry(id, kind, reason string) {
 		}
 		task.Findings = append(task.Findings, model.Finding{Severity: "high", Category: kind, Reason: reason, Role: kind})
 		task.State = model.Fix
+		if preflightErr == nil {
+			reusePreflightForFix(task.Preflight, task, effective, preflightRoles)
+		}
 		return nil
 	}) == nil {
 		c.mirror(id)

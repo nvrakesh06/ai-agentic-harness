@@ -29,7 +29,10 @@ per lease duration.
 
 Writers are limited to three (configurable downward), each with a branch/worktree.
 Pre-implementation reader guidance enters a bounded preflight queue before writer
-admission. At most `max_readers + 1` guidance tasks and `max_writers` tasks without
+admission. A fully completed preflight may bypass that reader queue for a bounded
+FIX retry only when its durable task-scope, base, policy, and role-rule inputs still
+match; exact-head verification and final reviews still run after every code change.
+At most `max_readers + 1` guidance tasks and `max_writers` tasks without
 guidance prepare concurrently, so reader saturation cannot hide ready coding work.
 Dependencies must be DONE. Active conflict domains exclude overlapping writers.
 Advisory roles use a bounded reader semaphore. Native checks use separate heavy

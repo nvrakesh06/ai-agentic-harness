@@ -547,6 +547,9 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 			}
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "#%-5d %-22s %s [%s]\n", t.Issue, status, t.Title, t.ID)
+		if t.Preflight != nil && t.Preflight.ReuseReason != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "  Preflight: %s (reuse %d)\n", t.Preflight.ReuseReason, t.Preflight.ReuseCount)
+		}
 		if t.Blocker != nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n  Reason: %s\n", t.Blocker.Question, t.Blocker.Reason)
 		}
