@@ -121,15 +121,17 @@ type Finding struct {
 	Role       string `json:"role,omitempty"`
 }
 type Evidence struct {
-	Base             string            `json:"base"`
-	Head             string            `json:"head"`
-	Config           string            `json:"config"`
-	Rules            string            `json:"rules"`
-	Checks           []string          `json:"checks"`
-	Reviews          map[string]string `json:"reviews"`
-	IntegrationSHA   string            `json:"integration_sha,omitempty"`
-	IntegrationOwner string            `json:"integration_owner,omitempty"`
-	At               time.Time         `json:"at"`
+	Base               string            `json:"base"`
+	Head               string            `json:"head"`
+	Config             string            `json:"config"`
+	Rules              string            `json:"rules"`
+	Checks             []string          `json:"checks"`
+	Reviews            map[string]string `json:"reviews"`
+	ReviewRoster       []string          `json:"review_roster,omitempty"`
+	ReviewRosterReason string            `json:"review_roster_reason,omitempty"`
+	IntegrationSHA     string            `json:"integration_sha,omitempty"`
+	IntegrationOwner   string            `json:"integration_owner,omitempty"`
+	At                 time.Time         `json:"at"`
 }
 type Objective struct {
 	ID       string `json:"id"`
