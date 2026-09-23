@@ -87,10 +87,13 @@ ID is in the snapshot, preventing duplicate application after a local crash.
 
 `READY` and `FIX` tasks first record pre-implementation reader guidance in a
 portable preflight record. Completed roles resume after takeover; a change to the
-canonical base, task contract/scope, configuration, or role rules invalidates the
-record. A changed task head alone can reuse fully completed guidance only for a
+canonical base, task contract/scope, accepted cross-task corrections, configuration,
+or role rules invalidates the record. A changed task head alone can reuse fully
+completed guidance only for a
 bounded `FIX` retry, with its durable scope fingerprint and reuse reason recorded.
 Exact-head native checks and final independent reviews are never reused.
+Shutdown and takeover clear interrupted reader ownership while preserving completed
+guidance eligibility and its reuse counter across verification recovery.
 The scheduler admits only prepared tasks to `RUNNING` after rechecking dependencies
 and writer conflict domains. `RUNNING` therefore counts an actual reserved writer.
 Failed checks/reviews take a bounded `FIX -> RUNNING` route. `BLOCKED_HUMAN`

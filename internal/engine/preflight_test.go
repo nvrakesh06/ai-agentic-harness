@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
@@ -37,6 +39,91 @@ func TestManyReadyPreflightsAreBoundedWithoutStarvingCoding(t *testing.T) {
 	selected = selectPreflights(s, active, guided, 2, 2, roles.Builtins())
 	if len(selected) != 1 || selected[0].task.ID != "z_code_02" {
 		t.Fatalf("released fast slot was not reused deterministically: %#v", selected)
+	}
+}
+
+func TestAcceptedCorrectionInvalidatesCompletedPreflight(t *testing.T) {
+	effective := config.Effective{BaseSHA: "base", Hash: "config", Policy: config.Policy{ImplementationRetries: 2}}
+	task := &model.Task{ID: "ui", ObjectiveID: "objective", State: model.Running, HeadSHA: "old-head", UI: true}
+	source := &model.Task{ID: "api", ObjectiveID: "objective", HeadSHA: strings.Repeat("a", 40)}
+	required := []roles.Role{{Name: "designer", Stage: "pre-implementation"}}
+	p := &model.Preflight{Phase: "writing", BaseSHA: "base", HeadSHA: task.HeadSHA, Config: "config", Rules: roles.Hash(), Scope: preflightScope(task), Completed: []string{"designer"}}
+	if err := model.QueueGuidance(task, source, "correction", "The durable API uses cursor pagination; update the navigation contract."); err != nil {
+		t.Fatal(err)
+	}
+	if preflightMatches(p, task, effective) {
+		t.Fatal("accepted correction retained stale same-head guidance")
+	}
+	// A failed implementer checkpoints its edits before requesting FIX. It must
+	// not inherit advice that predates the accepted correction.
+	task.HeadSHA = "new-head"
+	task.State = model.Fix
+	if reusePreflightForFix(p, task, effective, required) {
+		t.Fatal("failed implementation reused guidance predating its correction")
+	}
+	// Specialist output and checkpoint bookkeeping are not new task inputs.
+	p.Scope = preflightScope(task)
+	task.Decisions = append(task.Decisions, "designer: use existing navigation", "Checkpoint: repaired navigation")
+	if !reusePreflightForFix(p, task, effective, required) {
+		t.Fatal("ordinary progress invalidated unchanged task guidance")
+	}
+}
+
+func TestCompletedPreflightSurvivesVerificationRecovery(t *testing.T) {
+	for _, state := range []model.State{model.Verifying, model.Review, model.SyncRequired, model.Fix} {
+		for _, cleanStop := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/clean-stop=%t", state, cleanStop), func(t *testing.T) {
+				effective := config.Effective{BaseSHA: strings.Repeat("a", 40), Hash: strings.Repeat("b", 64), Policy: config.Policy{ImplementationRetries: 2}}
+				s := model.NewSnapshot("project123")
+				task := &model.Task{ID: "ui", State: state, HeadSHA: strings.Repeat("c", 40), UI: true, Attempts: 1}
+				task.Preflight = &model.Preflight{Phase: "writing", BaseSHA: effective.BaseSHA, HeadSHA: strings.Repeat("d", 40), Config: effective.Hash, Rules: roles.Hash(), Scope: preflightScope(task), Completed: []string{"designer"}, ReuseCount: 1}
+				s.Tasks[task.ID] = task
+				if cleanStop {
+					resetInterruptedPreflight(task.Preflight)
+				}
+				data, err := json.Marshal(s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				recovered, _, err := model.Decode(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := recoverSnapshot(recovered); err != nil {
+					t.Fatal(err)
+				}
+				task = recovered.Tasks["ui"]
+				if state == model.Verifying || state == model.Review {
+					if task.State != model.SyncRequired {
+						t.Fatal("verification recovery skipped synchronization")
+					}
+				}
+				// Exact-head verification runs again and requests a bounded repair.
+				task.State = model.Fix
+				required := []roles.Role{{Name: "designer", Stage: "pre-implementation"}}
+				if !reusePreflightForFix(task.Preflight, task, effective, required) {
+					t.Fatal("restart discarded completed guidance eligibility")
+				}
+				if task.Preflight.Phase != "ready" || task.Preflight.ReuseCount != 2 || task.Attempts != 1 {
+					t.Fatalf("restart changed retry accounting: %+v", task)
+				}
+				task.Preflight.Phase = "writing"
+				task.HeadSHA = strings.Repeat("e", 40)
+				if reusablePreflightForFix(task.Preflight, task, effective, required) {
+					t.Fatal("restart reset the durable reuse budget")
+				}
+			})
+		}
+	}
+}
+
+func TestInterruptedPreflightReaderOwnershipIsCleared(t *testing.T) {
+	for _, phase := range []string{"queued", "waiting", "running"} {
+		p := &model.Preflight{Phase: phase, Completed: []string{"architecture"}}
+		resetInterruptedPreflight(p)
+		if p.Phase != "queued" || len(p.Completed) != 1 {
+			t.Fatalf("interrupted reader was not safely resumable: %+v", p)
+		}
 	}
 }
 

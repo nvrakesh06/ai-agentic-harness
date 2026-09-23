@@ -278,9 +278,7 @@ func recoverSnapshot(s *model.Snapshot) error {
 			t.State = model.SyncRequired
 		}
 		t.RunID = ""
-		if t.Preflight != nil && t.Preflight.Phase != "ready" {
-			t.Preflight.Phase = "queued"
-		}
+		resetInterruptedPreflight(t.Preflight)
 	}
 	for i := range s.Runs {
 		if s.Runs[i].Outcome == "running" {
@@ -464,9 +462,7 @@ func (c *Controller) Serve(parent context.Context) error {
 				if t.State == model.Running {
 					t.State = model.Ready
 				}
-				if t.Preflight != nil && t.Preflight.Phase != "ready" {
-					t.Preflight.Phase = "queued"
-				}
+				resetInterruptedPreflight(t.Preflight)
 			}
 			for i := range s.Runs {
 				if s.Runs[i].Outcome == "running" {

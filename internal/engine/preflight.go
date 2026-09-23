@@ -55,15 +55,16 @@ func reusePreflightForFix(p *model.Preflight, t *model.Task, effective config.Ef
 }
 
 type preflightScopeInput struct {
-	Objective  string   `json:"objective"`
-	Acceptance []string `json:"acceptance"`
-	Areas      []string `json:"areas"`
-	Domains    []string `json:"domains"`
-	Risk       string   `json:"risk"`
-	UI         bool     `json:"ui"`
-	Security   bool     `json:"security"`
-	Roles      []string `json:"roles"`
-	DependsOn  []string `json:"depends_on"`
+	Objective  string           `json:"objective"`
+	Acceptance []string         `json:"acceptance"`
+	Areas      []string         `json:"areas"`
+	Domains    []string         `json:"domains"`
+	Risk       string           `json:"risk"`
+	UI         bool             `json:"ui"`
+	Security   bool             `json:"security"`
+	Roles      []string         `json:"roles"`
+	DependsOn  []string         `json:"depends_on"`
+	Guidance   []model.Guidance `json:"guidance,omitempty"`
 }
 
 // preflightScope records inputs that define the task's specialist contract.
@@ -71,12 +72,21 @@ type preflightScopeInput struct {
 // review cover those changes after the bounded repair.
 func preflightScope(t *model.Task) string {
 	input := preflightScopeInput{Objective: t.Objective, Acceptance: append([]string(nil), t.Acceptance...), Areas: append([]string(nil), t.Areas...), Domains: append([]string(nil), t.Domains...), Risk: t.Risk, UI: t.UI, Security: t.Security, Roles: append([]string(nil), t.Roles...), DependsOn: append([]string(nil), t.Dependencies...)}
+	input.Guidance = model.TaskGuidance(t)
 	for _, values := range [][]string{input.Acceptance, input.Areas, input.Domains, input.Roles, input.DependsOn} {
 		sort.Strings(values)
 	}
 	b, _ := json.Marshal(input)
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// resetInterruptedPreflight releases reader ownership without discarding the
+// completed guidance marker needed by a later FIX after verification recovery.
+func resetInterruptedPreflight(p *model.Preflight) {
+	if p != nil && p.Phase != "ready" && p.Phase != "writing" {
+		p.Phase = "queued"
+	}
 }
 
 func requiredPreflightRoles(effective config.Effective, t *model.Task) ([]roles.Role, error) {
