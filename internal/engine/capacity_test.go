@@ -46,6 +46,11 @@ func TestQueuedDesignerDoesNotConsumeWriterCapacity(t *testing.T) {
 	if decision.status.ActiveWriters != 1 || decision.status.ActivePreflights != 1 || decision.status.ActiveReaders != 2 {
 		t.Fatalf("capacity does not distinguish actual writers and waiting guidance: %#v", decision.status)
 	}
+	snapshot.Capacity = decision.status
+	again := decideCapacity(snapshot, active, project, false, 2, now.Add(time.Second))
+	if again.status.ActivePreflights != 1 {
+		t.Fatalf("preflight count accumulated across ticks: %#v", again.status)
+	}
 }
 
 func TestCapacityConsumesQueuedObjectivesWithoutReplanningCompletedWork(t *testing.T) {

@@ -470,6 +470,9 @@ func (c *Controller) Serve(parent context.Context) error {
 				if t.State == model.Running {
 					t.State = model.Ready
 				}
+				if t.Preflight != nil && t.Preflight.Phase != "ready" {
+					t.Preflight.Phase = "queued"
+				}
 			}
 			for i := range s.Runs {
 				if s.Runs[i].Outcome == "running" {

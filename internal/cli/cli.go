@@ -489,7 +489,9 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		}
 		if t.Preflight != nil && (t.State == model.Ready || t.State == model.Fix) {
 			switch t.Preflight.Phase {
-			case "queued", "waiting":
+			case "queued":
+				status = "PREFLIGHT_QUEUED"
+			case "waiting":
 				status = "PREFLIGHT_WAITING"
 			case "running":
 				status = "PREFLIGHT_RUNNING"
