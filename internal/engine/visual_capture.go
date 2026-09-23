@@ -54,6 +54,7 @@ await context.route('**/*', async route => {
 await context.routeWebSocket('**/*', async ws => {
   const url = new URL(ws.url());
   if (url.origin !== origin.replace(/^http/, 'ws')) { network.push('BLOCKED WEBSOCKET ' + url.origin); return ws.close(); }
+  await ws.connectToServer();
 });
 context.on('response', response => network.push(response.request().method() + ' ' + response.status() + ' ' + new URL(response.url()).pathname));
 const page = await context.newPage();

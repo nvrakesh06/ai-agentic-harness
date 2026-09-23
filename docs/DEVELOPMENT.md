@@ -94,6 +94,12 @@ cannot choose a profile or CDP endpoint. AIH writes `manifest.json`, a screensho
 and redacted network diagnostics outside source, seals their hashes, and gives the
 requesting reviewer one exact-head retry. Capture is evidence, never a visual pass.
 
+The browser package is a supervisor capability, not a project dependency. Install
+Playwright in an AIH-managed tools directory outside every target worktree and set
+`AIH_PLAYWRIGHT_MODULE` to that absolute `.../node_modules/playwright` directory
+before starting the supervisor. AIH rejects a missing, relative, or non-Playwright
+path and never resolves browser code from the reviewed project.
+
 This feature adds portable state schema 4. Before activating a schema-4
 supervisor, hand off the schema-3 supervisor, retain the local SQLite database
 and `aih-state` checkpoint, build a separate new binary, and resume it once.
