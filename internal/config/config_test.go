@@ -121,3 +121,26 @@ func TestMachineAndNativeChecks(t *testing.T) {
 		}
 	}
 }
+
+func TestParseLocalIncludesCustomRoles(t *testing.T) {
+	root := t.TempDir()
+	files := canonicalFiles()
+	if err := os.MkdirAll(filepath.Join(root, ".aih", "roles"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range files {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, ".aih", "roles", "custom.yaml"), []byte("name: custom-review\nextends: reviewer\ncapability: strongest\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ParseLocal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.Files[".aih/roles/custom.yaml"]; !ok {
+		t.Fatal("custom role was omitted from local configuration")
+	}
+}

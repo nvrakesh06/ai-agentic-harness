@@ -132,5 +132,26 @@ func ParseLocal(root string) (Effective, error) {
 		}
 		files[".aih/"+name] = string(bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf}))
 	}
+	rolesDir := filepath.Join(root, ".aih", "roles")
+	if err := filepath.WalkDir(rolesDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || (!strings.HasSuffix(entry.Name(), ".yaml") && !strings.HasSuffix(entry.Name(), ".yml")) {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		files[filepath.ToSlash(rel)] = string(bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf}))
+		return nil
+	}); err != nil && !os.IsNotExist(err) {
+		return Effective{}, err
+	}
 	return Parse(files)
 }
