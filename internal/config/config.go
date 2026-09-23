@@ -25,6 +25,7 @@ type Project struct {
 	Base           string            `yaml:"base_branch" json:"base_branch"`
 	MaxWriters     int               `yaml:"max_parallel_writers" json:"max_parallel_writers"`
 	MaxReaders     int               `yaml:"max_parallel_readers" json:"max_parallel_readers"`
+	Resources      Resources         `yaml:"resources" json:"resources"`
 	Models         map[string]string `yaml:"models" json:"models"`
 	ProviderModels map[string]string `yaml:"provider_models" json:"provider_models"`
 	Checks         []Check           `yaml:"checks" json:"checks"`
@@ -38,11 +39,16 @@ type Scheduling struct {
 	UnderutilizationGraceSeconds int    `yaml:"underutilization_grace_seconds" json:"underutilization_grace_seconds"`
 	BacklogSource                string `yaml:"backlog_source" json:"backlog_source"`
 }
+type Resources struct {
+	MaxHeavyChecks int `yaml:"max_heavy_checks" json:"max_heavy_checks"`
+	MaxLightChecks int `yaml:"max_light_checks" json:"max_light_checks"`
+}
 type Check struct {
 	Name      string   `yaml:"name" json:"name"`
 	Command   []string `yaml:"command" json:"command"`
 	Platforms []string `yaml:"platforms,omitempty" json:"platforms,omitempty"`
 	Timeout   int      `yaml:"timeout_seconds" json:"timeout_seconds"`
+	Class     string   `yaml:"class,omitempty" json:"class,omitempty"`
 }
 type Policy struct {
 	ImplementationRetries int `yaml:"implementation_retries"`
@@ -59,9 +65,10 @@ type Lock struct {
 	AutoUpdate string `yaml:"auto_update"`
 }
 type Machine struct {
-	ID       string `yaml:"machine_id"`
-	Platform string `yaml:"platform"`
-	Provider string `yaml:"default_provider"`
+	ID             string `yaml:"machine_id"`
+	Platform       string `yaml:"platform"`
+	Provider       string `yaml:"default_provider"`
+	MaxHeavyChecks int    `yaml:"max_heavy_checks,omitempty"`
 }
 type Registration struct {
 	ProjectID  string `json:"project_id"`
@@ -141,7 +148,7 @@ func (p Project) ModelMappingWarningsForRoles(roleCapabilities map[string]string
 }
 
 func Defaults() Project {
-	return Project{ID: model.ID(), Provider: "codex", Base: "main", MaxWriters: 3, MaxReaders: 2, Models: map[string]string{"orchestrator": "strong", "implementer": "normal", "reviewer": "strong", "qa": "normal", "designer": "strong", "security": "strong", "advisor": "strongest"}, ProviderModels: map[string]string{}, WorkerSeconds: 900, LeaseSeconds: 180, ReleaseRepo: UpstreamRepository, Scheduling: Scheduling{TargetWriters: 2, UnderutilizationGraceSeconds: 30, BacklogSource: "queued_objectives"}}
+	return Project{ID: model.ID(), Provider: "codex", Base: "main", MaxWriters: 3, MaxReaders: 2, Resources: Resources{MaxHeavyChecks: 1, MaxLightChecks: 2}, Models: map[string]string{"orchestrator": "strong", "implementer": "normal", "reviewer": "strong", "qa": "normal", "designer": "strong", "security": "strong", "advisor": "strongest"}, ProviderModels: map[string]string{}, WorkerSeconds: 900, LeaseSeconds: 180, ReleaseRepo: UpstreamRepository, Scheduling: Scheduling{TargetWriters: 2, UnderutilizationGraceSeconds: 30, BacklogSource: "queued_objectives"}}
 }
 func DefaultPolicy() Policy { return Policy{2, 3, 3, 3} }
 func DefaultLock() Lock {
@@ -161,6 +168,7 @@ func Decode(data []byte, out any) error {
 }
 func DecodeProject(data []byte, out *Project) error {
 	hasScheduling := regexp.MustCompile(`(?m)^scheduling\s*:`).Match(data)
+	hasResources := regexp.MustCompile(`(?m)^resources\s*:`).Match(data)
 	if err := Decode(data, out); err != nil {
 		return err
 	}
@@ -169,6 +177,9 @@ func DecodeProject(data []byte, out *Project) error {
 		if out.MaxWriters > 0 && out.Scheduling.TargetWriters > out.MaxWriters {
 			out.Scheduling.TargetWriters = out.MaxWriters
 		}
+	}
+	if !hasResources {
+		out.Resources = Resources{MaxHeavyChecks: 1, MaxLightChecks: 2}
 	}
 	return nil
 }
@@ -229,6 +240,9 @@ func (p Project) Validate() error {
 	if p.MaxWriters < 1 || p.MaxWriters > 3 || p.MaxReaders < 1 || p.MaxReaders > 8 {
 		return errors.New("writer limit must be 1..3 and reader limit 1..8")
 	}
+	if p.Resources.MaxHeavyChecks < 1 || p.Resources.MaxHeavyChecks > 8 || p.Resources.MaxLightChecks < 1 || p.Resources.MaxLightChecks > 8 {
+		return errors.New("check resource limits must be 1..8")
+	}
 	if p.Scheduling.TargetWriters < 1 || p.Scheduling.TargetWriters > p.MaxWriters {
 		return errors.New("target_active_writers must be between 1 and max_parallel_writers")
 	}
@@ -247,6 +261,9 @@ func (p Project) Validate() error {
 		}
 		if strings.TrimSpace(c.Command[0]) == "" {
 			return errors.New("verification executable cannot be empty")
+		}
+		if c.Class != "" && c.Class != "heavy" && c.Class != "light" {
+			return errors.New("check class must be heavy or light")
 		}
 		for _, platform := range c.Platforms {
 			if platform != "windows" && platform != "darwin" && platform != "linux" {
@@ -284,10 +301,16 @@ func Install(home string) (Machine, error) {
 		return Machine{}, e
 	}
 	p := filepath.Join(home, "machine.yaml")
-	m := Machine{model.ID(), runtime.GOOS, "codex"}
+	m := Machine{ID: model.ID(), Platform: runtime.GOOS, Provider: "codex", MaxHeavyChecks: 1}
 	b, e := os.ReadFile(p)
 	if e == nil {
 		e = Decode(b, &m)
+		if m.MaxHeavyChecks == 0 {
+			m.MaxHeavyChecks = 1
+		}
+		if m.MaxHeavyChecks < 1 || m.MaxHeavyChecks > 8 {
+			return m, errors.New("machine max_heavy_checks must be 1..8")
+		}
 		return m, e
 	}
 	if !os.IsNotExist(e) {
@@ -344,7 +367,7 @@ func GitHubRepo(remote string) (string, error) {
 }
 func DetectChecks(root string) []Check {
 	if _, e := os.Stat(filepath.Join(root, "go.mod")); e == nil {
-		return []Check{{"unit tests", []string{"go", "test", "./..."}, nil, 600}, {"vet", []string{"go", "vet", "./..."}, nil, 300}}
+		return []Check{{Name: "unit tests", Command: []string{"go", "test", "./..."}, Timeout: 600, Class: "heavy"}, {Name: "vet", Command: []string{"go", "vet", "./..."}, Timeout: 300, Class: "heavy"}}
 	}
 	if b, e := os.ReadFile(filepath.Join(root, "package.json")); e == nil {
 		var p struct {
@@ -354,14 +377,14 @@ func DetectChecks(root string) []Check {
 			var checks []Check
 			for _, n := range []string{"lint", "typecheck", "test", "build"} {
 				if _, ok := p.Scripts[n]; ok {
-					checks = append(checks, Check{n, []string{"npm", "run", n}, nil, 600})
+					checks = append(checks, Check{Name: n, Command: []string{"npm", "run", n}, Timeout: 600, Class: "heavy"})
 				}
 			}
 			return checks
 		}
 	}
 	if _, e := os.Stat(filepath.Join(root, "Cargo.toml")); e == nil {
-		return []Check{{"tests", []string{"cargo", "test"}, nil, 600}}
+		return []Check{{Name: "tests", Command: []string{"cargo", "test"}, Timeout: 600, Class: "heavy"}}
 	}
 	return nil
 }

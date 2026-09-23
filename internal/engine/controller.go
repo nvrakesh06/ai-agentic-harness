@@ -39,12 +39,14 @@ type Controller struct {
 	cancel      context.CancelFunc
 	fatal       chan error
 	readers     chan struct{}
+	heavyChecks chan struct{}
+	lightChecks chan struct{}
 	jobs        sync.WaitGroup
 	now         func() time.Time
 }
 
 func New(p *Project) *Controller {
-	return &Controller{P: p, owner: model.ID(), fatal: make(chan error, 1), readers: make(chan struct{}, p.Config.Project.MaxReaders)}
+	return &Controller{P: p, owner: model.ID(), fatal: make(chan error, 1), readers: make(chan struct{}, p.Config.Project.MaxReaders), heavyChecks: make(chan struct{}, p.Config.Project.Resources.MaxHeavyChecks), lightChecks: make(chan struct{}, p.Config.Project.Resources.MaxLightChecks)}
 }
 func (c *Controller) Snapshot() *model.Snapshot {
 	c.mu.Lock()
