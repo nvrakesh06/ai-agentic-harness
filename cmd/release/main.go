@@ -15,6 +15,12 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 )
 
+// releaseTestTimeout bounds a single package test binary. The engine package
+// creates real temporary Git repositories and has repeatedly taken more than
+// six minutes on a clean, serialized Windows host. Individual integration
+// fixtures retain their own, shorter context deadlines.
+const releaseTestTimeout = "10m"
+
 func main() {
 	if e := release(); e != nil {
 		fmt.Fprintln(os.Stderr, e)
@@ -44,7 +50,10 @@ func release() error {
 			return fmt.Errorf("HEAD must be tagged v%s", model.Version)
 		}
 	}
-	for _, args := range [][]string{{"test", "./...", "-count=1", "-timeout", "6m"}, {"vet", "./..."}} {
+	// Serialize package workers: the suite intentionally exercises real Git and
+	// process lifecycles, and concurrent package runs can make its bounded
+	// Windows timings unreliable on a constrained development machine.
+	for _, args := range [][]string{{"test", "-p=1", "./...", "-count=1", "-timeout", releaseTestTimeout}, {"vet", "./..."}} {
 		if e := run(nil, "go", args...); e != nil {
 			return e
 		}

@@ -12,7 +12,7 @@ state, credentials, private task data and provider transcripts out of commits.
 Before submitting:
 
 ```sh
-go test ./... -timeout 6m
+go test -p 1 ./... -timeout 10m
 go run ./cmd/checkfmt
 go vet ./...
 go run ./cmd/release

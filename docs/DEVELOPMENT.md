@@ -7,7 +7,7 @@ agent CLIs or authenticating. Tests use temporary repositories and fake provider
 adapters; no authentication or paid model usage is required for tests.
 
 ```sh
-go test ./... -timeout 6m
+go test -p 1 ./... -timeout 10m
 go vet ./...
 go run ./cmd/checkfmt                # formatting lint
 go build -o bin/aih ./cmd/aih          # use bin/aih.exe on Windows
@@ -18,8 +18,10 @@ The end-to-end suite performs many real Git operations and can take minutes,
 especially with Windows antivirus. Do not replace its durability assertions with
 only in-memory mocks. `internal/platform` tests exercise timeout and parent-death
 cleanup. On Linux with GCC, also run `go test -race ./... -timeout 10m`.
-On a loaded/constrained machine, serialize package workers with
-`go test -p 1 ./... -count=1 -timeout 6m`; avoid several concurrent validation runs.
+The release command serializes package workers. On a loaded/constrained machine,
+use `go test -p 1 ./... -count=1 -timeout 10m` and avoid several concurrent
+validation runs. The ten-minute timeout bounds each package test binary; individual
+integration fixtures keep their own shorter context deadlines.
 Run native tests on macOS before claiming macOS runtime validation.
 
 ## Application configuration
