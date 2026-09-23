@@ -69,32 +69,37 @@ func TestReviewFollowupsGroupsDuplicateRolesAndRefreshesSameHead(t *testing.T) {
 	}
 }
 
-func TestReviewFollowupsKeepsDistinctConcernsAtSameLocation(t *testing.T) {
+func TestReviewFollowupsPreservesDistinctConcernsInOneOwnerIssue(t *testing.T) {
 	task := &model.Task{ID: "review-followups-distinct", Issue: 48, HeadSHA: "abc123"}
 	findings := []model.Finding{
 		{Severity: "medium", Category: "protocol", Location: "http.ts:288", Role: "qa", Reason: "CONNECT bypasses the JSON error envelope.", Resolution: "Use the protocol error writer."},
 		{Severity: "medium", Category: "privacy", Location: "http.ts:288", Role: "security", Reason: "Authentication tokens appear in response logs.", Resolution: "Redact tokens before logging."},
 	}
 	groups := groupReviewFollowups(task, findings)
-	if len(groups) != 2 {
-		t.Fatalf("unrelated findings at one line must remain separate work items: %#v", groups)
+	if len(groups) != 1 || len(groups[0].findings) != 2 {
+		t.Fatalf("same-file concerns should share one owner issue with both observations: %#v", groups)
 	}
-	if groups[0].key == groups[1].key {
-		t.Fatalf("distinct concerns produced the same durable issue identity: %#v", groups)
+	for _, want := range []string{"CONNECT bypasses", "Authentication tokens", "Redact tokens"} {
+		if !strings.Contains(groups[0].body(task), want) {
+			t.Fatalf("owner issue dropped distinct concern %q: %s", want, groups[0].body(task))
+		}
 	}
 }
 
-func TestReviewFollowupsDoesNotGroupGenericSameFileSubjects(t *testing.T) {
+func TestReviewFollowupsKeepsGenericSameFileRemediesVisible(t *testing.T) {
 	task := &model.Task{ID: "review-followups-generic", Issue: 48, HeadSHA: "abc123"}
 	findings := []model.Finding{
 		{Severity: "medium", Category: "reliability", Location: "http.ts:288", Reason: "Connection timeout needs a bounded retry.", Resolution: "Retry the connection after timeout."},
 		{Severity: "medium", Category: "privacy", Location: "http.ts:290", Reason: "Connection credentials leak into logs.", Resolution: "Redact connection credentials."},
 	}
-	if groups := groupReviewFollowups(task, findings); len(groups) != 2 {
-		t.Fatalf("generic shared wording merged unrelated remedies: %#v", groups)
+	groups := groupReviewFollowups(task, findings)
+	if len(groups) != 1 || len(groups[0].findings) != 2 {
+		t.Fatalf("one source owner must retain both independent remedies: %#v", groups)
 	}
-	if nearbyFollowupLocations("http.ts:288:4", "http.ts:290:2") != true || nearbyFollowupLocations("http.ts:288", "http.ts:350") {
-		t.Fatal("line and column parsing did not preserve source proximity")
+	for _, want := range []string{"bounded retry", "credentials leak", "Redact connection credentials"} {
+		if !strings.Contains(groups[0].body(task), want) {
+			t.Fatalf("owner issue dropped independent remedy %q", want)
+		}
 	}
 }
 
@@ -102,7 +107,9 @@ func TestReviewFollowupIdentitySurvivesAdditionalAcronym(t *testing.T) {
 	task := &model.Task{ID: "review-followups-stable", Issue: 48, HeadSHA: "abc123"}
 	first := model.Finding{Severity: "medium", Category: "protocol", Location: "http.ts:288", Reason: "CONNECT bypasses error envelope."}
 	second := first
-	second.Reason = "CONNECT bypasses API error envelope."
+	second.Reason = "CONNECT bypasses WEBSOCKET and API error envelopes."
+	second.Category = "HTTP contract"
+	second.Location = "http.ts:291"
 	before := groupReviewFollowups(task, []model.Finding{first})
 	after := groupReviewFollowups(task, []model.Finding{second})
 	if len(before) != 1 || len(after) != 1 || before[0].key != after[0].key {

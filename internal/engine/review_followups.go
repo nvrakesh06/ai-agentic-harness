@@ -12,18 +12,17 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
 )
 
-// reviewFollowups turns nonblocking review observations into a small set of
-// actionable work items. Reviewers often describe the same defect differently;
-// grouping must therefore not include the reviewer role or full prose in its key.
+// reviewFollowups creates one durable work item per source file. Distinct
+// observations in that file remain separate bullets so one owner can address
+// them together without duplicate issues from independent review roles.
 func (c *Controller) reviewFollowups(task *model.Task, findings []model.Finding) error {
 	for _, group := range groupReviewFollowups(task, findings) {
 		issue, err := c.P.Hub.EnsureIssue(c.ctx, group.key, group.title, group.body(task))
 		if err != nil {
 			return err
 		}
-		// EnsureIssue intentionally only creates. Refresh the durable issue body so
-		// a repeated exact-head review preserves every current source role, location,
-		// and suggested resolution without creating another notification.
+		// The key is independent of review prose and role, so a re-review
+		// refreshes the same issue even if the wording or acronyms change.
 		if err = c.P.Hub.UpdateIssue(c.ctx, issue, github.Marker(group.key)+"\n\n"+group.body(task), false); err != nil {
 			return err
 		}
@@ -34,9 +33,7 @@ func (c *Controller) reviewFollowups(task *model.Task, findings []model.Finding)
 type reviewFollowupGroup struct {
 	key      string
 	title    string
-	category string
-	source   string
-	topic    string
+	scope    string
 	findings []model.Finding
 }
 
@@ -49,40 +46,26 @@ func groupReviewFollowups(task *model.Task, findings []model.Finding) []reviewFo
 	}
 	sort.Slice(medium, func(i, j int) bool { return followupFindingKey(medium[i]) < followupFindingKey(medium[j]) })
 
-	groups := []reviewFollowupGroup{}
+	byScope := map[string]*reviewFollowupGroup{}
 	for _, finding := range medium {
-		placed := false
-		for i := range groups {
-			if !sameFollowupConcern(groups[i], finding) {
-				continue
-			}
-			groups[i].findings = append(groups[i].findings, finding)
-			placed = true
-			break
+		source := followupSourceFile(finding.Location)
+		scope := "file:" + source
+		if source == "" {
+			scope = "category:" + normalizedCategory(finding.Category)
 		}
-		if !placed {
-			groups = append(groups, reviewFollowupGroup{category: normalizedCategory(finding.Category), source: followupSourceFile(finding.Location), findings: []model.Finding{finding}})
+		group := byScope[scope]
+		if group == nil {
+			group = &reviewFollowupGroup{scope: scope}
+			byScope[scope] = group
 		}
+		group.findings = append(group.findings, finding)
 	}
 
-	for i := range groups {
-		group := &groups[i]
-		sort.Slice(group.findings, func(i, j int) bool {
-			return followupFindingKey(group.findings[i]) < followupFindingKey(group.findings[j])
-		})
-		group.topic = followupTopic(group.findings)
-		if group.source == "" {
-			group.source = followupSourceFile(group.findings[0].Location)
-		}
-		// The source file and primary semantic anchor are durable across reviewers
-		// with different category labels and prose. Category remains visible in the
-		// body but is deliberately not part of an anchored issue identity.
-		scope := group.category
-		if group.source != "" {
-			scope = group.source
-		}
-		group.key = fmt.Sprintf("%s-review-followup-%x", task.ID, sha256.Sum256([]byte(scope+"\n"+group.topic)))
-		group.title = "Review follow-up: " + followupTitle(group.topic)
+	groups := make([]reviewFollowupGroup, 0, len(byScope))
+	for _, group := range byScope {
+		group.key = fmt.Sprintf("%s-review-followup-%x", task.ID, sha256.Sum256([]byte(group.scope)))
+		group.title = short("Review follow-ups: "+strings.TrimPrefix(strings.TrimPrefix(group.scope, "file:"), "category:"), 90)
+		groups = append(groups, *group)
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].key < groups[j].key })
 	return groups
@@ -90,15 +73,15 @@ func groupReviewFollowups(task *model.Task, findings []model.Finding) []reviewFo
 
 func (g reviewFollowupGroup) body(task *model.Task) string {
 	var body strings.Builder
-	fmt.Fprintf(&body, "Nonblocking review follow-up for implementation issue #%d.\n\n", task.Issue)
+	fmt.Fprintf(&body, "Nonblocking review follow-ups for implementation issue #%d.\n\n", task.Issue)
 	if task.PR != 0 {
 		fmt.Fprintf(&body, "Implementation PR: #%d\n", task.PR)
 	}
 	if task.HeadSHA != "" {
 		fmt.Fprintf(&body, "Review head: `%s`\n", task.HeadSHA)
 	}
-	fmt.Fprintf(&body, "Category: `%s`\n\n", g.category)
-	body.WriteString("Address this one semantic concern, then verify the affected paths. Source observations:\n")
+	fmt.Fprintf(&body, "Owner scope: `%s`\n\n", g.scope)
+	body.WriteString("Address each observation below and verify the affected paths. Similar wording may describe one defect; different remedies remain visible separately.\n")
 	for _, finding := range g.findings {
 		role := finding.Role
 		if role == "" {
@@ -124,147 +107,17 @@ func normalizedCategory(category string) string {
 	return category
 }
 
-func sameFollowupConcern(group reviewFollowupGroup, candidate model.Finding) bool {
-	for _, finding := range group.findings {
-		shared, distinctive := sharedFollowupTerms(finding, candidate)
-		if group.source != "" && group.source == followupSourceFile(candidate.Location) && nearbyFollowupLocations(finding.Location, candidate.Location) && (distinctive || (group.category == normalizedCategory(candidate.Category) && shared >= 2)) {
-			return true
-		}
-	}
-	return false
-}
-
-// A shared subject in one large source file is not enough to make two
-// findings the same work item. Reviewers may point to nearby lines of one
-// defect, while distant occurrences generally need separate fixes.
-func nearbyFollowupLocations(left, right string) bool {
-	leftLine, leftOK := followupLine(left)
-	rightLine, rightOK := followupLine(right)
-	if !leftOK || !rightOK {
-		return normalizedLocation(left) == normalizedLocation(right)
-	}
-	if leftLine > rightLine {
-		leftLine, rightLine = rightLine, leftLine
-	}
-	return rightLine-leftLine <= 8
-}
-
-func followupLine(location string) (int, bool) {
-	parts := strings.Split(strings.TrimSpace(location), ":")
-	lastNonNumeric := len(parts) - 1
-	for lastNonNumeric > 0 && numericLocationPart(parts[lastNonNumeric]) {
-		lastNonNumeric--
-	}
-	if lastNonNumeric == len(parts)-1 {
-		return 0, false
-	}
-	var line int
-	if _, err := fmt.Sscan(strings.TrimSpace(parts[lastNonNumeric+1]), &line); err == nil {
-		return line, true
-	}
-	return 0, false
-}
-
-func sharedFollowupTerms(a, b model.Finding) (int, bool) {
-	left, right := followupTerms(a), followupTerms(b)
-	shared := 0
-	distinctive := false
-	for term := range left {
-		if _, ok := right[term]; !ok {
-			continue
-		}
-		shared++
-		if len([]rune(term)) >= 5 && !genericFollowupTerm(term) {
-			distinctive = true
-		}
-	}
-	return shared, distinctive
-}
-
-func followupTopic(findings []model.Finding) string {
-	counts := map[string]int{}
-	for _, finding := range findings {
-		for term := range followupNarrativeTerms(finding) {
-			counts[term]++
-		}
-	}
-	type candidate struct {
-		term         string
-		count, score int
-	}
-	terms := []candidate{}
-	for term, count := range counts {
-		if !genericFollowupTerm(term) {
-			score := count * 100
-			if isExplicitTechnicalAnchor(findings, term) {
-				score += 10000
-			}
-			terms = append(terms, candidate{term, count, score})
-		}
-	}
-	sort.Slice(terms, func(i, j int) bool {
-		if terms[i].score != terms[j].score {
-			return terms[i].score > terms[j].score
-		}
-		if terms[i].count != terms[j].count {
-			return terms[i].count > terms[j].count
-		}
-		if len([]rune(terms[i].term)) != len([]rune(terms[j].term)) {
-			return len([]rune(terms[i].term)) > len([]rune(terms[j].term))
-		}
-		return terms[i].term < terms[j].term
-	})
-	if len(terms) > 0 {
-		// One primary anchor is intentionally more stable than a collection whose
-		// secondary wording can vary as reviewers are added on recovery.
-		return terms[0].term
-	}
-	for _, finding := range findings {
-		if location := normalizedLocation(finding.Location); location != "" {
-			return location
-		}
-	}
-	return "general"
-}
-
-func isExplicitTechnicalAnchor(findings []model.Finding, wanted string) bool {
-	for _, finding := range findings {
-		for _, text := range []string{finding.Reason, finding.Resolution} {
-			for _, token := range strings.FieldsFunc(text, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
-				if strings.EqualFold(token, wanted) && token == strings.ToUpper(token) && len([]rune(token)) >= 3 {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-func followupTitle(topic string) string {
-	words := strings.FieldsFunc(topic, func(r rune) bool { return r == '-' || r == '_' || r == '/' || r == ':' })
-	for i, word := range words {
-		if len(word) <= 4 {
-			words[i] = strings.ToUpper(word)
-		} else {
-			words[i] = strings.ToUpper(word[:1]) + word[1:]
-		}
-	}
-	return strings.Join(words, " ")
-}
-
-func normalizedLocation(location string) string {
-	location = strings.TrimSpace(strings.ToLower(location))
-	location = strings.Map(func(r rune) rune {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '/' || r == '.' || r == '_' || r == '-' {
-			return r
-		}
-		return -1
-	}, location)
-	return location
-}
-
 func followupSourceFile(location string) string {
 	location = strings.TrimSpace(strings.ToLower(location))
+	if location == "" {
+		return ""
+	}
+	// Reviewers sometimes give multiple locations. Keep the first concrete
+	// path as the owning scope and preserve every original location in the body.
+	if parts := strings.FieldsFunc(location, func(r rune) bool { return r == ';' || r == ',' || r == '\n' }); len(parts) > 0 {
+		location = strings.TrimSpace(parts[0])
+	}
+	location = strings.ReplaceAll(location, "\\", "/")
 	parts := strings.Split(location, ":")
 	for i := len(parts) - 1; i > 0; i-- {
 		if numericLocationPart(parts[i]) {
@@ -273,7 +126,13 @@ func followupSourceFile(location string) string {
 		}
 		break
 	}
-	return normalizedLocation(strings.Join(parts, ":"))
+	location = strings.Join(parts, ":")
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '/' || r == '.' || r == '_' || r == '-' {
+			return r
+		}
+		return -1
+	}, location)
 }
 
 func numericLocationPart(part string) bool {
@@ -289,47 +148,6 @@ func numericLocationPart(part string) bool {
 	return true
 }
 
-func followupTerms(finding model.Finding) map[string]struct{} {
-	terms := map[string]struct{}{}
-	for _, text := range []string{finding.Reason, finding.Resolution} {
-		for _, token := range followupTextTerms(text) {
-			if len([]rune(token)) >= 3 && !genericFollowupTerm(token) {
-				terms[token] = struct{}{}
-			}
-		}
-	}
-	return terms
-}
-
-func followupNarrativeTerms(finding model.Finding) map[string]struct{} {
-	terms := map[string]struct{}{}
-	for _, text := range []string{finding.Reason, finding.Resolution} {
-		for _, token := range followupTextTerms(text) {
-			if len([]rune(token)) >= 3 && !genericFollowupTerm(token) {
-				terms[token] = struct{}{}
-			}
-		}
-	}
-	return terms
-}
-
-func followupTextTerms(text string) []string {
-	return strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
-}
-
-func genericFollowupTerm(term string) bool {
-	_, generic := map[string]bool{
-		"add": true, "affected": true, "after": true, "and": true, "assertion": true, "check": true, "code": true,
-		"configured": true, "current": true, "defect": true, "finding": true, "for": true, "from": true,
-		"implementation": true, "issue": true, "missing": true, "native": true, "path": true, "review": true,
-		"reviewer": true, "should": true, "suggested": true, "test": true, "the": true, "this": true,
-		"use": true, "verify": true, "with": true, "arrow": true, "body": true, "branch": true,
-		"connection": true, "connections": true, "error": true, "helper": true, "label": true, "opacity": true, "response": true, "state": true,
-		"text": true, "through": true,
-	}[term]
-	return generic
-}
-
 func followupFindingKey(finding model.Finding) string {
-	return strings.Join([]string{normalizedCategory(finding.Category), normalizedLocation(finding.Location), strings.ToLower(finding.Reason), strings.ToLower(finding.Resolution), strings.ToLower(finding.Role)}, "\x00")
+	return strings.Join([]string{normalizedCategory(finding.Category), strings.ToLower(finding.Location), strings.ToLower(finding.Reason), strings.ToLower(finding.Resolution), strings.ToLower(finding.Role)}, "\x00")
 }
