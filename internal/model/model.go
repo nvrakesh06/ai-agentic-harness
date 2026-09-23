@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const Version = "1.0.0"
@@ -19,6 +20,9 @@ const StateSchema = 3
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
+const MaxTaskGuidance = 8
+const MaxGuidanceBytes = 1600
+const guidancePrefix = "AIH_GUIDANCE_V1:"
 
 type State string
 
@@ -97,6 +101,55 @@ type Preflight struct {
 	Rules     string   `json:"rules"`
 	Completed []string `json:"completed,omitempty"`
 }
+// Guidance is encoded in the existing durable Decisions field so a correction
+// survives attach without introducing a competing task-state schema while the
+// capacity-state migration is in flight. The command ID makes delivery auditable.
+type Guidance struct {
+	CommandID string `json:"command_id"`
+	SourceID  string `json:"source_task"`
+	SourceSHA string `json:"source_head"`
+	Text      string `json:"text"`
+}
+
+func TaskGuidance(t *Task) []Guidance {
+	var out []Guidance
+	for _, decision := range t.Decisions {
+		if !strings.HasPrefix(decision, guidancePrefix) {
+			continue
+		}
+		var item Guidance
+		if json.Unmarshal([]byte(strings.TrimPrefix(decision, guidancePrefix)), &item) == nil {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func QueueGuidance(target, source *Task, commandID, message string) error {
+	if target == nil || source == nil || target.ID == source.ID || target.ObjectiveID == "" || target.ObjectiveID != source.ObjectiveID {
+		return errors.New("guidance requires distinct tasks in the same objective")
+	}
+	if target.State != Ready && target.State != Running && target.State != Fix {
+		return errors.New("guidance target must be READY, RUNNING, or FIX")
+	}
+	if !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(source.HeadSHA) {
+		return errors.New("guidance source needs a durable code checkpoint")
+	}
+	message = strings.TrimSpace(message)
+	if message == "" || len(message) > MaxGuidanceBytes || !utf8.ValidString(message) || strings.ContainsRune(message, '\x00') {
+		return errors.New("guidance must contain 1..1600 UTF-8 bytes without NUL")
+	}
+	if len(TaskGuidance(target)) >= MaxTaskGuidance {
+		return errors.New("task guidance limit reached")
+	}
+	encoded, err := json.Marshal(Guidance{CommandID: commandID, SourceID: source.ID, SourceSHA: source.HeadSHA, Text: message})
+	if err != nil {
+		return err
+	}
+	target.Decisions = append(target.Decisions, guidancePrefix+string(encoded))
+	return nil
+}
+
 type Verification struct {
 	Environment       string `json:"environment"`
 	SourceEnvironment string `json:"source_environment,omitempty"`

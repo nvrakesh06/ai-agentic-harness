@@ -45,6 +45,14 @@ the source revision, a normalized fingerprint and attempt count; it contains no
 machine paths or provider conversation state.
 No SQLite files or provider sessions are pushed.
 
+Accepted cross-task guidance uses a bounded, versioned record in the existing
+task decisions list. It contains the command ID, source task ID, exact source
+checkpoint SHA, and correction text. This avoids a new remote schema while the
+capacity-state migration is being deployed. A locally queued command is not
+portable until the supervisor accepts and publishes it. Guidance enters the next
+implementer prompt; if accepted mid-run, the completed worker's edits are
+checkpointed and the task returns to READY for one corrected pass.
+
 Git state commits form an independent append-only ancestry. Source/state changes
 are fenced together; state-only changes use the same compare-and-swap mechanism.
 SQLite is updated after remote acknowledgement. A crash in that gap is recovered

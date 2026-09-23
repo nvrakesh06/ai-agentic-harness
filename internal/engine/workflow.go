@@ -628,6 +628,7 @@ func (c *Controller) implement(id string) bool {
 		}
 	}
 	t = c.Snapshot().Tasks[id]
+	guidanceAtStart := len(model.TaskGuidance(t))
 	r, e := c.role(c.ctx, effective, all["implementer"], t, dir, t.Objective, "", "")
 	if c.ctx.Err() != nil {
 		return false
@@ -690,7 +691,16 @@ func (c *Controller) implement(id string) bool {
 		c.retry(id, "implementation", r.Summary)
 		return false
 	case "completed":
-		if c.mutate(func(s *model.Snapshot) error { return model.Transition(s.Tasks[id], model.Implemented) }) != nil {
+		replay := false
+		if c.mutate(func(s *model.Snapshot) error {
+			var err error
+			replay, err = completeImplementation(s.Tasks[id], guidanceAtStart)
+			return err
+		}) != nil {
+			return false
+		}
+		if replay {
+			_ = c.P.DB.Event(id, c.Snapshot().Tasks[id].RunID, "implementer", effective.Project.Provider, "task_guidance_replay", "new guidance requires one fresh implementer invocation after safe source checkpoint")
 			return false
 		}
 		return true
@@ -698,6 +708,14 @@ func (c *Controller) implement(id string) bool {
 		c.retry(id, "implementation", "invalid result status")
 		return false
 	}
+}
+
+func completeImplementation(task *model.Task, guidanceAtStart int) (bool, error) {
+	if len(model.TaskGuidance(task)) > guidanceAtStart {
+		task.Decisions = append(task.Decisions, "Checkpoint: task guidance arrived while this implementer invocation was running; next bounded pass must reconcile it.")
+		return true, model.Transition(task, model.Ready)
+	}
+	return false, model.Transition(task, model.Implemented)
 }
 
 func (c *Controller) verificationFailure(id string, failure *checkFailure) {

@@ -10,6 +10,7 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
 	"log"
 	"os"
 	"path/filepath"
@@ -483,6 +484,31 @@ func (c *Controller) Serve(parent context.Context) error {
 	return nil
 }
 func (c *Controller) launch(fn func()) { c.jobs.Add(1); go func() { defer c.jobs.Done(); fn() }() }
+
+type guidanceCommand struct {
+	Source string `json:"source_task"`
+	Text   string `json:"text"`
+}
+type guidanceRejection struct{ error }
+
+func validateGuidanceCommand(s *model.Snapshot, cmd store.Command) (guidanceCommand, error) {
+	var guidance guidanceCommand
+	if err := json.Unmarshal([]byte(cmd.Payload), &guidance); err != nil {
+		return guidance, errors.New("invalid guidance payload")
+	}
+	target := s.Tasks[cmd.Target]
+	source := s.Tasks[guidance.Source]
+	if target == nil || source == nil {
+		return guidance, errors.New("guidance requires known task IDs")
+	}
+	probe := *target
+	probe.Decisions = append([]string(nil), target.Decisions...)
+	if err := model.QueueGuidance(&probe, source, cmd.ID, guidance.Text); err != nil {
+		return guidance, err
+	}
+	return guidance, nil
+}
+
 func (c *Controller) commands() (bool, error) {
 	commands, e := c.P.DB.Pending()
 	if e != nil {
@@ -532,6 +558,34 @@ func (c *Controller) commands() (bool, error) {
 				_ = c.P.DB.Ack(cmd.ID, "assign a known specialist to a READY, FIX, or unmerged BLOCKED task using its task ID")
 				continue
 			}
+		}
+		if cmd.Kind == "guide" {
+			guidance, err := validateGuidanceCommand(s, cmd)
+			if err != nil {
+				_ = c.P.DB.Ack(cmd.ID, err.Error())
+				continue
+			}
+			err = c.save(c.ctx, func(s *model.Snapshot) error {
+				if err := model.QueueGuidance(s.Tasks[cmd.Target], s.Tasks[guidance.Source], cmd.ID, guidance.Text); err != nil {
+					return guidanceRejection{err}
+				}
+				s.Applied[cmd.ID] = true
+				return nil
+			})
+			if err != nil {
+				var rejection guidanceRejection
+				if errors.As(err, &rejection) {
+					_ = c.P.DB.Ack(cmd.ID, err.Error())
+					continue
+				}
+				c.fail(err)
+				return false, err
+			}
+			if err = c.P.DB.Ack(cmd.ID, ""); err != nil {
+				return false, err
+			}
+			_ = c.P.DB.Event(cmd.Target, "", "", "", "task_guidance_queued", "guidance command "+cmd.ID+" will reach the next implementer invocation")
+			continue
 		}
 		e = c.mutate(func(s *model.Snapshot) error {
 			switch cmd.Kind {
