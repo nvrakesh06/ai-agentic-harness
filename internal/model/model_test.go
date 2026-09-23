@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestTransitionsAndBlockers(t *testing.T) {
@@ -81,13 +82,32 @@ func TestSchemaMigrationAndFutureRejection(t *testing.T) {
 	s.Schema = 0
 	b, _ := json.Marshal(s)
 	m, migrated, e := Decode(b)
-	if e != nil || !migrated || m.Schema != 1 {
+	if e != nil || !migrated || m.Schema != StateSchema {
 		t.Fatal(e)
 	}
-	s.Schema = 2
+	s.Schema = StateSchema + 1
 	b, _ = json.Marshal(s)
 	if _, _, e = Decode(b); e == nil {
 		t.Fatal("newer schema accepted")
+	}
+}
+
+func TestSchemaOneMigratesAuthorizedBacklogAndCapacityRoundTrips(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Schema = 1
+	s.Backlog = nil
+	s.Objectives["objective-b"] = &Objective{ID: "objective-b", Text: "b"}
+	s.Objectives["objective-a"] = &Objective{ID: "objective-a", Text: "a"}
+	b, _ := json.Marshal(s)
+	migrated, changed, err := Decode(b)
+	if err != nil || !changed || migrated.Schema != StateSchema || fmt.Sprint(migrated.Backlog) != "[objective-a objective-b]" {
+		t.Fatal(migrated, changed, err)
+	}
+	migrated.Capacity = Capacity{TargetWriters: 2, MaxWriters: 3, MaxReaders: 4, GraceSeconds: 30, BacklogSource: "queued_objectives", BacklogCursor: 1, State: "underutilized", ReasonCode: "dependencies", Transitions: []CapacityTransition{{At: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC), Kind: "capacity_backfill_suppressed", ActiveWriters: 1, TargetWriters: 2, ReasonCode: "dependencies"}}}
+	b, _ = json.Marshal(migrated)
+	roundTrip, changed, err := Decode(b)
+	if err != nil || changed || roundTrip.Schema != StateSchema || roundTrip.Capacity.BacklogCursor != 1 || roundTrip.Capacity.ReasonCode != "dependencies" || len(roundTrip.Capacity.Transitions) != 1 {
+		t.Fatal(roundTrip, changed, err)
 	}
 }
 

@@ -9,6 +9,10 @@
    selected provider independently. Run `aih attach`, inspect `aih status`, then
    `aih resume`.
 
+Before a deployment that changes the remote state schema, upgrade both the current
+and replacement machines. Once the newer supervisor publishes state, an older
+runtime fails closed and cannot be used for attach, resume, or takeover.
+
 `attach` checks provider/runtime compatibility, fetches canonical configuration,
 loads remote logical state, queries issues/PRs, and recreates checkpoint worktrees.
 It is observational; it does not steal ownership or run agents until resume.

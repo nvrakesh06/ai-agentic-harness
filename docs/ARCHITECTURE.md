@@ -32,6 +32,13 @@ Dependencies must be DONE. Active conflict domains exclude overlapping writers.
 Advisory roles and native checks share a separate bounded reader semaphore. A task
 remains reserved across its merge workflow, including fresh-main re-review.
 The scheduler keeps running while only blocked or dependency-waiting tasks remain.
+A canonical target controls best-effort useful writer utilization below that hard
+maximum. The first queued objective starts immediately. When safe tasks later
+cannot meet the target beyond the configured grace period, the controller advances
+an ordered backlog containing only accepted `aih run` objectives. The portable
+snapshot records the policy, backlog cursor, latest dispatch, exact suppression
+reason and a bounded transition tail. Identical idle decisions do not create a
+state commit on every scheduler tick.
 
 The machine lease is not distributed consensus. Correct clocks and atomic Git push
 are required. An expired controller stops publication even before takeover. The

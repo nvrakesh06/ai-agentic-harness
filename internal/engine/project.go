@@ -50,7 +50,7 @@ func Init(ctx context.Context, root, home, selected string) error {
 	existing, readErr := os.ReadFile(filepath.Join(root, ".aih", "project.yaml"))
 	if readErr == nil {
 		p.ID = ""
-		if e = config.Decode(existing, &p); e != nil {
+		if e = config.DecodeProject(existing, &p); e != nil {
 			return e
 		}
 	} else if !os.IsNotExist(readErr) {
@@ -106,6 +106,7 @@ func Init(ctx context.Context, root, home, selected string) error {
 		}
 	}
 	s := model.NewSnapshot(p.ID)
+	s.Capacity = configuredCapacity(p, s.Capacity)
 	s.Revision = 1
 	h, e := g.StateCommit(ctx, "", s)
 	if e != nil {

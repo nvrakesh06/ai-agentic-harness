@@ -15,9 +15,10 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 1
+const StateSchema = 2
 const RulesVersion = 1
 const RoleSchema = 1
+const CapacityTransitionLimit = 20
 
 type State string
 
@@ -146,6 +147,31 @@ type Run struct {
 	Outcome    string    `json:"outcome"`
 	Epoch      uint64    `json:"epoch"`
 }
+type CapacityTransition struct {
+	At            time.Time `json:"at"`
+	Kind          string    `json:"kind"`
+	ActiveWriters int       `json:"active_writers"`
+	TargetWriters int       `json:"target_active_writers"`
+	ReasonCode    string    `json:"reason_code,omitempty"`
+	Objective     string    `json:"objective,omitempty"`
+}
+type Capacity struct {
+	ActiveWriters      int                  `json:"active_writers"`
+	TargetWriters      int                  `json:"target_active_writers"`
+	MaxWriters         int                  `json:"max_parallel_writers"`
+	ActiveReaders      int                  `json:"active_readers"`
+	MaxReaders         int                  `json:"max_parallel_readers"`
+	GraceSeconds       int                  `json:"underutilization_grace_seconds"`
+	BacklogSource      string               `json:"backlog_source"`
+	BacklogCursor      int                  `json:"backlog_cursor"`
+	State              string               `json:"state"`
+	ReasonCode         string               `json:"underutilization_reason_code,omitempty"`
+	Reason             string               `json:"underutilization_reason,omitempty"`
+	NextSafeWork       string               `json:"next_safe_work,omitempty"`
+	LastDispatch       string               `json:"last_backfill_dispatch,omitempty"`
+	UnderutilizedSince time.Time            `json:"underutilized_since,omitempty"`
+	Transitions        []CapacityTransition `json:"transitions,omitempty"`
+}
 type Snapshot struct {
 	Schema             int                   `json:"state_schema"`
 	CreatedBy          string                `json:"created_by_version"`
@@ -153,6 +179,8 @@ type Snapshot struct {
 	Revision           uint64                `json:"revision"`
 	Controller         Lease                 `json:"controller"`
 	Objectives         map[string]*Objective `json:"objectives"`
+	Backlog            []string              `json:"authorized_objective_backlog"`
+	Capacity           Capacity              `json:"capacity"`
 	Tasks              map[string]*Task      `json:"tasks"`
 	Runs               []Run                 `json:"runs,omitempty"`
 	Applied            map[string]bool       `json:"applied_commands"`
@@ -162,7 +190,7 @@ type Snapshot struct {
 
 func NewSnapshot(project string) *Snapshot {
 	return &Snapshot{Schema: StateSchema, CreatedBy: Version, Project: project,
-		Objectives: map[string]*Objective{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}}
+		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}}
 }
 func ID() string {
 	var b [12]byte
@@ -185,12 +213,14 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 	if s.Schema > StateSchema || s.Schema < 0 {
 		return nil, false, fmt.Errorf("unsupported remote state schema %d", s.Schema)
 	}
-	migrated := s.Schema == 0
-	if migrated {
-		s.Schema = 1
+	migrated := s.Schema < StateSchema
+	if s.Schema == 0 {
 		if s.CreatedBy == "" {
 			s.CreatedBy = Version
 		}
+	}
+	if migrated {
+		s.Schema = StateSchema
 	}
 	if !regexp.MustCompile(`^[a-zA-Z0-9_-]{8,80}$`).MatchString(s.Project) {
 		return nil, false, errors.New("remote state has no project identity")
@@ -200,6 +230,12 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 	}
 	if s.Objectives == nil {
 		s.Objectives = map[string]*Objective{}
+	}
+	if s.Backlog == nil {
+		for id := range s.Objectives {
+			s.Backlog = append(s.Backlog, id)
+		}
+		sort.Strings(s.Backlog)
 	}
 	if s.Applied == nil {
 		s.Applied = map[string]bool{}
@@ -237,6 +273,38 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 	for id, o := range s.Objectives {
 		if o == nil || o.ID != id || !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(id) {
 			return nil, false, errors.New("invalid objective identity")
+		}
+	}
+	seenBacklog := map[string]bool{}
+	for _, id := range s.Backlog {
+		if s.Objectives[id] == nil || seenBacklog[id] {
+			return nil, false, errors.New("invalid authorized objective backlog")
+		}
+		seenBacklog[id] = true
+	}
+	if s.Capacity.BacklogCursor < 0 || s.Capacity.BacklogCursor > len(s.Backlog) {
+		return nil, false, errors.New("invalid backlog cursor")
+	}
+	if s.Capacity.TargetWriters != 0 {
+		if s.Capacity.TargetWriters < 1 || s.Capacity.MaxWriters < s.Capacity.TargetWriters || s.Capacity.MaxReaders < 1 || s.Capacity.GraceSeconds < 0 || s.Capacity.BacklogSource != "queued_objectives" {
+			return nil, false, errors.New("invalid capacity policy")
+		}
+	}
+	if s.Capacity.ReasonCode != "" && !regexp.MustCompile(`^[a-z_]+$`).MatchString(s.Capacity.ReasonCode) {
+		return nil, false, errors.New("invalid capacity reason code")
+	}
+	if len(s.Capacity.Transitions) > CapacityTransitionLimit {
+		return nil, false, errors.New("capacity transition history exceeds limit")
+	}
+	for _, transition := range s.Capacity.Transitions {
+		if transition.At.IsZero() || (transition.Kind != "capacity_underutilized" && transition.Kind != "capacity_backfill_selected" && transition.Kind != "capacity_backfill_suppressed") {
+			return nil, false, errors.New("invalid capacity transition")
+		}
+		if transition.ReasonCode != "" && !regexp.MustCompile(`^[a-z_]+$`).MatchString(transition.ReasonCode) {
+			return nil, false, errors.New("invalid capacity transition reason")
+		}
+		if transition.Objective != "" && s.Objectives[transition.Objective] == nil {
+			return nil, false, errors.New("capacity transition references unknown objective")
 		}
 	}
 	for _, t := range s.Tasks {

@@ -36,6 +36,10 @@ provider: codex
 base_branch: main
 max_parallel_writers: 3
 max_parallel_readers: 2
+scheduling:
+  target_active_writers: 2
+  underutilization_grace_seconds: 30
+  backlog_source: queued_objectives
 worker_timeout_seconds: 900
 lease_seconds: 180
 models:
@@ -125,7 +129,7 @@ in-progress checkpoint slices cause a human blocker to bound non-failing churn.
 major: 1
 minimum: 1.0.0
 engineering_rules_version: 1
-state_schema: 1
+state_schema: 2
 update_channel: stable
 auto_update: notify
 ```
@@ -135,6 +139,13 @@ live binary replacement. Invalid/unknown settings fail rather than silently doin
 something else. Stable identities must never be regenerated when reading config.
 Worker context, checks, roles and retry policy use canonical main. Changes to the
 supervisor's concurrency capacity or lease timing take effect on a clean restart.
+The first authorized objective starts without waiting for the scheduling grace;
+the grace applies when useful writer capacity later falls below target so transient
+completion and review transitions do not immediately trigger more planning.
+The writer target is best effort and never bypasses the maximum, dependencies,
+conflict domains, leases, or retry blockers. `queued_objectives` means only
+objectives explicitly accepted from `aih run` may be pulled to fill idle capacity;
+the scheduler never invents scope merely to satisfy the target.
 
 ## Extending the implementation
 
