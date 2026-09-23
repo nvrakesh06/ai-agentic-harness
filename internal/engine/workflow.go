@@ -728,7 +728,10 @@ func (c *Controller) verificationFailure(id string, failure *checkFailure) {
 	environment := nativeEnvironment(effective)
 	task := c.Snapshot().Tasks[id]
 	guard := task.Verification
-	repeated := guard != nil && guard.Environment == environment && guard.HeadSHA == task.HeadSHA
+	// A NativeOnly handoff is a request for the first supervisor-owned check,
+	// not a prior native failure. Only a guard with a recorded native attempt can
+	// suppress another check at the same revision.
+	repeated := guard != nil && guard.Attempts > 0 && guard.Environment == environment && guard.HeadSHA == task.HeadSHA
 	nativeOnly := guard != nil && guard.NativeOnly
 	capabilityMissing := errors.Is(failure, exec.ErrNotFound)
 	attempts := 1
@@ -740,15 +743,21 @@ func (c *Controller) verificationFailure(id string, failure *checkFailure) {
 		}
 	}
 	next := &model.Verification{Environment: environment, SourceEnvironment: source, HeadSHA: task.HeadSHA, Fingerprint: verificationFingerprint(environment+"/"+failure.command, reason), Attempts: attempts, NativeOnly: nativeOnly || capabilityMissing}
-	if nativeOnly || capabilityMissing || repeated {
+	// NativeOnly records why the supervisor, rather than the worker, owns this
+	// check. It does not turn a check that launched and exited non-zero into an
+	// environment failure. A launched check has actionable source evidence and
+	// must give the implementer one bounded FIX attempt.
+	if capabilityMissing || repeated {
 		question := "Native verification cannot complete in the current environment. Repair its tools or environment, then answer to retry verification."
-		if repeated && !nativeOnly && !capabilityMissing {
-			question = "Native verification failed again at the same source revision and environment. Diagnose the persistent failure, then answer to retry verification."
+		resume := model.SyncRequired
+		if repeated && !capabilityMissing {
+			question = "Native verification failed again at the same source revision and environment. Diagnose the persistent source failure, then answer to run one bounded implementer fix."
+			resume = model.Fix
 		}
 		if c.mutate(func(s *model.Snapshot) error {
 			t := s.Tasks[id]
 			t.Verification = next
-			model.Block(t, question, reason, model.SyncRequired)
+			model.Block(t, question, reason, resume)
 			return nil
 		}) == nil {
 			_ = c.P.DB.Event(id, task.RunID, "verification", "native", "retry_suppressed", environment+" head="+task.HeadSHA)
@@ -1225,6 +1234,17 @@ func (c *Controller) prBody(t *model.Task) string {
 			b.WriteString("- " + n + ": " + e.Reviews[n] + "\n")
 		}
 		fmt.Fprintf(&b, "\nPolicy hash: `%s`\nRules hash: `%s`\n", e.Config, e.Rules)
+	}
+	verificationFindings := false
+	for _, finding := range t.Findings {
+		if finding.Category != "verification" {
+			continue
+		}
+		if !verificationFindings {
+			b.WriteString("\nNative verification findings:\n")
+			verificationFindings = true
+		}
+		fmt.Fprintf(&b, "- %s: %s\n", finding.Severity, short(safety.Redact(finding.Reason), 8000))
 	}
 	b.WriteString("\nRisks: inspect recorded findings and acceptance evidence.\nRollback: propose and verify a revert of the integration commit; no automatic production rollback.\n")
 	return b.String()

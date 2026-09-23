@@ -2,14 +2,26 @@ package engine_test
 
 import (
 	"context"
+	"fmt"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/demo"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/engine"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func init() {
+	if len(os.Args) > 1 && os.Args[1] == "_aih-native-source-failure" {
+		fmt.Fprintln(os.Stderr, "src/studio-server/http.ts(291,69): TS2740: cannot use Duplex as Socket")
+		fmt.Fprintln(os.Stderr, "token=sk-abcdefghijklmnopqrstuvwxyz012345")
+		os.Exit(1)
+	}
+}
 
 func seedReadyTask(t *testing.T, ctx context.Context, f *demo.Fixture, title string) {
 	t.Helper()
@@ -118,6 +130,53 @@ func TestMissingNativeCapabilityBlocksWithoutImplementerRetry(t *testing.T) {
 	}
 }
 
+func TestNativeOnlySourceFailureRoutesToFixAndPersistsRedactedEvidence(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := demo.New(ctx, t.TempDir(), []string{exe, "_aih-native-source-failure"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Provider.EnvironmentBlocks = map[string]int{"native-source": 1}
+	seedReadyTask(t, ctx, f, "native-source")
+	task := runUntilTaskState(t, ctx, f, "native-source", model.Blocked)
+	if got := f.Provider.ImplementationCount("native-source"); got != 2 {
+		t.Fatalf("implementer ran %d times, want initial implementation plus one native source-failure fix", got)
+	}
+	if task.Blocker == nil || task.Blocker.Resume != model.Fix || task.Verification == nil || !task.Verification.NativeOnly || task.Verification.Attempts != 2 {
+		t.Fatalf("native source failure did not become a bounded FIX recovery: %+v", task)
+	}
+	if !strings.Contains(task.Blocker.Reason, "fixture acceptance failed") || !strings.Contains(task.Blocker.Reason, "TS2740") || strings.Contains(task.Blocker.Reason, "sk-abcdefghijklmnopqrstuvwxyz012345") {
+		t.Fatalf("native source evidence was not named and redacted: %q", task.Blocker.Reason)
+	}
+	pulls, _ := f.Hub.Pulls()
+	if len(pulls) != 1 || !strings.Contains(pulls[0].Body, "fixture acceptance failed") || strings.Contains(pulls[0].Body, "sk-abcdefghijklmnopqrstuvwxyz012345") {
+		t.Fatalf("draft PR did not preserve bounded redacted check evidence: %#v", pulls)
+	}
+	if err = f.P.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recoveredProject, err := f.Open(ctx, filepath.Join(f.Root, "machine-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recoveredProject.DB.Close()
+	if err = recoveredProject.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered, _, err := recoveredProject.DB.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Tasks["native-source"].State != model.Blocked || recovered.Tasks["native-source"].Blocker == nil || recovered.Tasks["native-source"].Blocker.Resume != model.Fix || recovered.Tasks["native-source"].Verification == nil {
+		t.Fatalf("restart recovery lost bounded native source-failure state: %+v", recovered.Tasks["native-source"])
+	}
+}
+
 func TestRepeatedNativeFailureAtSameHeadStopsEquivalentWriterLoop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -134,8 +193,8 @@ func TestRepeatedNativeFailureAtSameHeadStopsEquivalentWriterLoop(t *testing.T) 
 	if task.Verification == nil || task.Verification.Attempts != 2 || task.Verification.NativeOnly {
 		t.Fatalf("repeated verification failure was not fingerprinted: %+v", task.Verification)
 	}
-	if task.Blocker == nil || task.Blocker.Resume != model.SyncRequired {
-		t.Fatalf("repeated verification failure did not produce a durable verification blocker: %+v", task.Blocker)
+	if task.Blocker == nil || task.Blocker.Resume != model.Fix {
+		t.Fatalf("repeated verification failure did not produce a durable implementer recovery blocker: %+v", task.Blocker)
 	}
 }
 
