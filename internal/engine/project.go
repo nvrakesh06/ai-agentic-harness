@@ -274,6 +274,13 @@ func (p *Project) Attach(ctx context.Context) error {
 }
 func (p *Project) TaskPath(t *model.Task) string { return filepath.Join(p.Dir, "worktrees", t.ID) }
 
+// TaskScratchPath is machine-local disposable storage for worker tooling and
+// caches. It intentionally lives outside the checkpointed source worktree and
+// is derived from the durable task identity, so a resumed task keeps its cache.
+func (p *Project) TaskScratchPath(t *model.Task) string {
+	return filepath.Join(p.Dir, "scratch", t.ID)
+}
+
 func outsideSource(root, home string) error {
 	return config.OutsideSource(root, home)
 }

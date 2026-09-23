@@ -31,9 +31,9 @@ type Result struct {
 	RecoveredDeadlineHandoff bool             `json:"-"`
 }
 type Request struct {
-	Directory, Runtime, Prompt, Role, Model string
-	Write                                   bool
-	Timeout                                 time.Duration
+	Directory, Runtime, Scratch, Prompt, Role, Model string
+	Write                                            bool
+	Timeout                                          time.Duration
 }
 type Provider interface {
 	Name() string
@@ -112,6 +112,24 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 	if e := os.MkdirAll(r.Runtime, 0700); e != nil {
 		return result, e
 	}
+	if r.Scratch != "" {
+		workspace, e := filepath.Abs(r.Directory)
+		if e != nil {
+			return result, e
+		}
+		scratch, e := filepath.Abs(r.Scratch)
+		if e != nil {
+			return result, e
+		}
+		rel, e := filepath.Rel(workspace, scratch)
+		if e != nil || rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+			return result, errors.New("worker scratch must be outside the source worktree")
+		}
+		if e = os.MkdirAll(filepath.Join(scratch, "npm-cache"), 0700); e != nil {
+			return result, e
+		}
+		r.Scratch = scratch
+	}
 	schema := Schema()
 	schemaPath := filepath.Join(r.Runtime, "result.schema.json")
 	resultPath := filepath.Join(r.Runtime, "result.json")
@@ -155,6 +173,17 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 			continue
 		}
 		env = append(env, v)
+	}
+	if r.Scratch != "" {
+		npmCache := filepath.Join(r.Scratch, "npm-cache")
+		env = append(env,
+			"AIH_SCRATCH="+r.Scratch,
+			"TMP="+r.Scratch,
+			"TEMP="+r.Scratch,
+			"TMPDIR="+r.Scratch,
+			"npm_config_cache="+npmCache,
+			"NPM_CONFIG_CACHE="+npmCache,
+		)
 	}
 	ctx, cancel := context.WithTimeout(parent, r.Timeout)
 	defer cancel()

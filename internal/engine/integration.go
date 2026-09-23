@@ -6,6 +6,8 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
+	"os"
 	"path/filepath"
 	"time"
 )
@@ -196,6 +198,9 @@ func (c *Controller) postVerify(id string) {
 		return model.Transition(s.Tasks[id], model.Done)
 	}); e != nil {
 		return
+	}
+	if e = os.RemoveAll(c.P.TaskScratchPath(t)); e != nil {
+		_ = c.P.DB.Event(id, "", "", "", "scratch_cleanup_failed", safety.Redact(e.Error()))
 	}
 	c.mirror(id)
 	t = c.Snapshot().Tasks[id]

@@ -10,6 +10,7 @@ projects/<stable-project-id>/
   supervisor.lock
   control.git/
   worktrees/<task-id>/
+  scratch/<task-id>/
   sessions/<run-id>/
   logs/supervisor.log
   analysis/ integration/ post-verify/
@@ -18,6 +19,13 @@ projects/<stable-project-id>/
 With the Linux user service, supervisor stdout/stderr goes to the systemd journal;
 `logs/supervisor.log` is only used by detached CLI starts. Events stay in SQLite
 and worker diagnostics stay in sessions. See the [VM retention/backup runbook](VM_SETUP.md#storage-logs-and-backups).
+
+Each task also has a local-only `scratch/<task-id>/` directory outside its source
+worktree. AIH supplies it to workers as `AIH_SCRATCH`, `TMP`, `TEMP`, `TMPDIR`,
+and npm's cache location. Use it for downloaded tooling, caches, temporary files,
+and generated diagnostics; it survives checkpoint/resume and attach on the same
+machine, is never a checkpoint candidate, and is removed after the task reaches
+`DONE`.
 
 The application contains only `.aih/project.yaml`, `policies.yaml`, `harness.lock`,
 optional roles/platform files, and project-specific `AGENTS.md` instructions.

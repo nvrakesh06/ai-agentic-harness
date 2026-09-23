@@ -273,7 +273,15 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 	}
 	runtimeDir := filepath.Join(c.P.Dir, "sessions", id)
 	prompt := roles.Compile(e, r, runtime.GOOS, t, objective, diff, evidence)
-	request := provider.Request{Directory: dir, Runtime: runtimeDir, Prompt: prompt, Role: r.Name, Model: resolved.RequestModel, Write: r.Name == "implementer", Timeout: time.Duration(e.Project.WorkerSeconds) * time.Second}
+	scratch := ""
+	if t != nil {
+		scratch = c.P.TaskScratchPath(t)
+		if err := os.MkdirAll(scratch, 0700); err != nil {
+			return provider.Result{}, err
+		}
+		prompt += "\nWORKER SCRATCH\nUse the supplied external scratch directory for temporary tooling, package-manager caches, downloads, and generated diagnostics. Do not create worker caches or downloaded tools inside the source worktree. Scratch is local-only and is never checkpointed: " + scratch + "\n"
+	}
+	request := provider.Request{Directory: dir, Runtime: runtimeDir, Scratch: scratch, Prompt: prompt, Role: r.Name, Model: resolved.RequestModel, Write: r.Name == "implementer", Timeout: time.Duration(e.Project.WorkerSeconds) * time.Second}
 	var result provider.Result
 	var err error
 	if r.Name == "implementer" {

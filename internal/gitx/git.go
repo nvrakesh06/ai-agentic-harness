@@ -276,12 +276,12 @@ func (g Git) Checkpoint(ctx context.Context, path, task string) (string, error) 
 	for _, p := range strings.Split(files+"\x00"+changed, "\x00") {
 		if p != "" {
 			if e = safety.Path(p); e != nil {
-				return "", e
+				return "", fmt.Errorf("checkpoint candidate path %q rejected: %w", p, e)
 			}
 			content, re := os.ReadFile(filepath.Join(path, p))
 			if re == nil {
 				if e = safety.Check(string(content)); e != nil {
-					return "", e
+					return "", fmt.Errorf("checkpoint candidate %q contains prohibited secret-like content: %w", p, e)
 				}
 			}
 		}
