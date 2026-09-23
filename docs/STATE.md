@@ -30,14 +30,14 @@ machines. Install normal Git/provider credentials independently on each machine.
 identity, revision, controller lease, objectives, tasks, runs, accepted command IDs,
 the ordered authorized objective backlog, capacity policy/status, improvement
 candidates and the integration hold. Capacity state records active/target/maximum
-writer utilization, reader utilization, backlog cursor, grace boundary, latest
+writer utilization, queued preflight count, reader utilization, backlog cursor, grace boundary, latest
 backfill selection, a machine-readable suppression reason and the bounded tail of
 underutilization/selection/suppression transitions. It also records queued and
 running native checks with their task, class, check
 name, queue time and start time. Recovery discards interrupted check ownership
 and follows the ordinary verification retry route. Task records contain dependencies,
 conflict domains, issues/PRs, branch/base/head/merge revisions, retry counters,
-findings, human decisions, blocker/resume state, verification retry guards and exact
+findings, human decisions, portable preflight role progress, blocker/resume state, verification retry guards and exact
 verification evidence. Passed checks record their identity, executable, exit result
 and bounded redacted stdout alongside exact base/head/config/rules. A guard records
 only portable environment/command classes,
@@ -69,6 +69,11 @@ ID is in the snapshot, preventing duplicate application after a local crash.
 `PLANNED -> READY -> RUNNING -> IMPLEMENTED -> SYNC_REQUIRED -> VERIFYING -> REVIEW
 -> MERGE_READY -> MERGE_TRAIN -> POST_VERIFY -> DONE`
 
+`READY` and `FIX` tasks first record pre-implementation reader guidance in a
+portable preflight record. Completed roles resume after takeover; a change to the
+canonical base, task head, configuration, or role rules invalidates the record.
+The scheduler admits only prepared tasks to `RUNNING` after rechecking dependencies
+and writer conflict domains. `RUNNING` therefore counts an actual reserved writer.
 Failed checks/reviews take a bounded `FIX -> RUNNING` route. `BLOCKED_HUMAN`
 records a question, reason, impact and resume state. Only that task and dependants
 wait. Recovery maps interrupted writers to READY and interrupted verification to
@@ -89,8 +94,9 @@ state commit keeps the original remote commit as its parent, preserving the
 pre-migration backup in Git history. No automatic major-version migration exists.
 
 Schema 2 snapshots migrate to schema 3 with empty verification ownership and
-the configured resource limits. An interrupted controller's task states still
-follow the normal recovery route before checks start again.
+the configured resource limits. Preflight progress is absent until the new
+supervisor records it. An interrupted controller's task states still follow the
+normal recovery route before checks start again.
 
 Publishing schema 3 is a one-way deployment boundary: older runtimes reject
 the newer snapshot. Upgrade every machine that may attach, resume, or take over

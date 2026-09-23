@@ -43,15 +43,20 @@ func decideCapacity(s *model.Snapshot, active map[string]bool, project config.Pr
 	status := configuredCapacity(project, s.Capacity)
 	status.ActiveReaders = activeReaders
 	writers := map[string]bool{}
-	for id := range active {
-		if task := s.Tasks[id]; task != nil && task.State == model.Running {
+	for id, writing := range active {
+		if !writing {
+			status.ActivePreflights++
+		}
+		if task := s.Tasks[id]; writing && task != nil && task.State == model.Running {
 			writers[id] = true
 		}
 	}
-	runnable := model.Runnable(s, writers, project.MaxWriters)
-	status.ActiveWriters = len(writers) + len(runnable)
+	runnable := model.RunnableWhere(s, writers, project.MaxWriters, func(t *model.Task) bool {
+		return !hasActive(active, t.ID) && t.Preflight != nil && t.Preflight.Phase == "ready"
+	})
+	status.ActiveWriters = len(writers)
 	decision := capacityDecision{status: status, writers: runnable}
-	if status.ActiveWriters >= status.TargetWriters {
+	if status.ActiveWriters+len(runnable) >= status.TargetWriters {
 		decision.status.State = "satisfied"
 		decision.status.ReasonCode = ""
 		decision.status.Reason = ""
@@ -87,8 +92,18 @@ func decideCapacity(s *model.Snapshot, active map[string]bool, project config.Pr
 		decision.planObjective = objective
 		return decision
 	}
+	if status.ActivePreflights > 0 {
+		decision.status.ReasonCode = "preflight_in_progress"
+		decision.status.Reason = "pre-implementation reader guidance is queued or running"
+		return decision
+	}
 	decision.status.ReasonCode, decision.status.Reason, decision.status.NextSafeWork = capacitySuppression(s, writers)
 	return decision
+}
+
+func hasActive(active map[string]bool, id string) bool {
+	_, ok := active[id]
+	return ok
 }
 
 func nextBacklogObjective(s *model.Snapshot) (string, int) {
@@ -196,7 +211,7 @@ func withCapacityTransition(previous, next model.Capacity, planObjective string,
 	kind := ""
 	if planObjective != "" {
 		kind = "capacity_backfill_selected"
-	} else if next.ActiveWriters < next.TargetWriters && (previous.State != next.State || previous.ReasonCode != next.ReasonCode) {
+	} else if next.State != "satisfied" && next.ActiveWriters < next.TargetWriters && (previous.State != next.State || previous.ReasonCode != next.ReasonCode) {
 		kind = "capacity_underutilized"
 		if next.ReasonCode != "grace_period" && next.ReasonCode != "planning_in_progress" {
 			kind = "capacity_backfill_suppressed"

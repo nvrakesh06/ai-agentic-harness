@@ -75,6 +75,7 @@ type Task struct {
 	FixCycles        map[string]int `json:"fix_cycles"`
 	AdvisorUsed      bool           `json:"advisor_used"`
 	RunID            string         `json:"run_id,omitempty"`
+	Preflight        *Preflight     `json:"preflight,omitempty"`
 	Findings         []Finding      `json:"findings,omitempty"`
 	Summary          string         `json:"implementation_summary,omitempty"`
 	ReportedTests    []string       `json:"reported_tests,omitempty"`
@@ -84,6 +85,17 @@ type Task struct {
 	Verification     *Verification  `json:"verification_retry_guard,omitempty"`
 	Evidence         *Evidence      `json:"evidence,omitempty"`
 	Updated          time.Time      `json:"updated"`
+}
+
+// Preflight is portable so completed reader guidance survives a controller restart.
+// Ready means the same source and policy may proceed to writer admission.
+type Preflight struct {
+	Phase     string   `json:"phase"`
+	BaseSHA   string   `json:"base_sha"`
+	HeadSHA   string   `json:"head_sha,omitempty"`
+	Config    string   `json:"config"`
+	Rules     string   `json:"rules"`
+	Completed []string `json:"completed,omitempty"`
 }
 type Verification struct {
 	Environment       string `json:"environment"`
@@ -166,6 +178,7 @@ type VerificationCheck struct {
 }
 type Capacity struct {
 	ActiveWriters      int                  `json:"active_writers"`
+	ActivePreflights   int                  `json:"active_preflights,omitempty"`
 	TargetWriters      int                  `json:"target_active_writers"`
 	MaxWriters         int                  `json:"max_parallel_writers"`
 	ActiveReaders      int                  `json:"active_readers"`
@@ -282,6 +295,16 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 				return nil, false, errors.New("invalid verification retry revision")
 			}
 		}
+		if p := t.Preflight; p != nil {
+			if p.Phase != "queued" && p.Phase != "waiting" && p.Phase != "running" && p.Phase != "ready" && p.Phase != "writing" {
+				return nil, false, errors.New("invalid preflight phase")
+			}
+			if !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(p.BaseSHA) ||
+				(p.HeadSHA != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(p.HeadSHA)) ||
+				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(p.Config) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(p.Rules) {
+				return nil, false, errors.New("incomplete preflight identity")
+			}
+		}
 		if _, ok := edges[t.State]; !ok && t.State != Done {
 			return nil, false, fmt.Errorf("unknown task state %q", t.State)
 		}
@@ -392,6 +415,9 @@ func Ordered(s *Snapshot) []*Task {
 	return out
 }
 func Runnable(s *Snapshot, active map[string]bool, limit int) []*Task {
+	return RunnableWhere(s, active, limit, func(*Task) bool { return true })
+}
+func RunnableWhere(s *Snapshot, active map[string]bool, limit int, eligible func(*Task) bool) []*Task {
 	domains := map[string]bool{}
 	count := 0
 	for id := range active {
@@ -407,7 +433,7 @@ func Runnable(s *Snapshot, active map[string]bool, limit int) []*Task {
 		if count >= limit {
 			break
 		}
-		if active[t.ID] || (t.State != Ready && t.State != Fix) {
+		if active[t.ID] || (t.State != Ready && t.State != Fix) || !eligible(t) {
 			continue
 		}
 		ok := true

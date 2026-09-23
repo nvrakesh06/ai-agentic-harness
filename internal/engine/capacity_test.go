@@ -21,13 +21,30 @@ func capacityFixture() (*model.Snapshot, config.Project, time.Time) {
 func TestCapacityBackfillsWriterWhenPeerEntersReview(t *testing.T) {
 	snapshot, project, now := capacityFixture()
 	snapshot.Tasks["reviewing"] = &model.Task{ID: "reviewing", State: model.Review, Domains: []string{"reviewed"}}
-	snapshot.Tasks["independent"] = &model.Task{ID: "independent", State: model.Ready, Domains: []string{"independent"}}
+	snapshot.Tasks["independent"] = &model.Task{ID: "independent", State: model.Ready, Domains: []string{"independent"}, Preflight: &model.Preflight{Phase: "ready"}}
 	decision := decideCapacity(snapshot, map[string]bool{"reviewing": true}, project, false, 1, now)
 	if len(decision.writers) != 1 || decision.writers[0].ID != "independent" {
 		t.Fatalf("idle writer slot was not backfilled: %#v", decision)
 	}
-	if decision.status.ActiveWriters != 1 || decision.status.ActiveReaders != 1 {
+	if decision.status.ActiveWriters != 0 || decision.status.ActiveReaders != 1 {
 		t.Fatalf("useful writer/reader utilization was conflated: %#v", decision.status)
+	}
+}
+
+func TestQueuedDesignerDoesNotConsumeWriterCapacity(t *testing.T) {
+	snapshot, project, now := capacityFixture()
+	project.MaxWriters = 2
+	project.Scheduling.TargetWriters = 2
+	snapshot.Tasks["existing"] = &model.Task{ID: "existing", State: model.Running, Domains: []string{"existing"}}
+	snapshot.Tasks["dashboard"] = &model.Task{ID: "dashboard", State: model.Ready, UI: true, Domains: []string{"ui"}, Preflight: &model.Preflight{Phase: "waiting"}}
+	snapshot.Tasks["http"] = &model.Task{ID: "http", State: model.Ready, Domains: []string{"http"}, Preflight: &model.Preflight{Phase: "ready"}}
+	active := map[string]bool{"existing": true, "dashboard": false}
+	decision := decideCapacity(snapshot, active, project, false, 2, now)
+	if len(decision.writers) != 1 || decision.writers[0].ID != "http" {
+		t.Fatalf("reader-queued UI preflight suppressed independent writer: %#v", decision)
+	}
+	if decision.status.ActiveWriters != 1 || decision.status.ActivePreflights != 1 || decision.status.ActiveReaders != 2 {
+		t.Fatalf("capacity does not distinguish actual writers and waiting guidance: %#v", decision.status)
 	}
 }
 
