@@ -84,8 +84,12 @@ Human-decision blockers still require a question. Implementers return `failed` f
 code or implementation defects so those continue through the normal fix budget.
 
 Critical/high findings block by default. Custom roles can add blocking severities.
-Medium findings create stable-ID follow-up issues; low/nit findings do not create
-churn. Native check success does not replace independent acceptance review.
+Medium findings create stable-ID follow-up issues. AIH groups overlapping
+nonblocking observations by category, location and semantic terms, preserving each
+source role, location, reason and resolution in the grouped issue. Re-reviewing a
+head refreshes that issue rather than creating notification churn. Low/nit findings
+do not create churn. Native check success does not replace independent acceptance
+review.
 
 Review roles run concurrently and decide their own acceptance domain independently.
 An empty peer-review map is intentional and never a reason to wait or block. Native
