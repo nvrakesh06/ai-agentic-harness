@@ -56,3 +56,63 @@ func TestMachineCheckSlots(t *testing.T) {
 		})
 	}
 }
+
+func TestProjectCheckQueueReservesInOrder(t *testing.T) {
+	for _, slots := range []int{1, 2} {
+		t.Run(strconv.Itoa(slots), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			s := model.NewSnapshot("project123")
+			for _, id := range []string{"first", "second", "third"} {
+				s.Tasks[id] = &model.Task{ID: id, State: model.Verifying}
+				s.Capacity.Verification = append(s.Capacity.Verification, model.VerificationCheck{Task: id, Check: "release", Class: "heavy", Phase: "queued", QueuedAt: time.Now()})
+			}
+			c := &Controller{s: s}
+			limit := make(chan struct{}, slots)
+			thirdDone := make(chan error, 1)
+			go func() { thirdDone <- c.waitCheckTurn(ctx, "third", "release", "heavy", limit, slots) }()
+			select {
+			case err := <-thirdDone:
+				t.Fatalf("third bypassed queue: %v", err)
+			case <-time.After(75 * time.Millisecond):
+			}
+			if err := c.waitCheckTurn(ctx, "first", "release", "heavy", limit, slots); err != nil {
+				t.Fatal(err)
+			}
+			c.mu.Lock()
+			c.s.Capacity.Verification[0].Phase = "running"
+			c.mu.Unlock()
+			if slots == 2 {
+				if err := c.waitCheckTurn(ctx, "second", "release", "heavy", limit, slots); err != nil {
+					t.Fatal(err)
+				}
+				c.mu.Lock()
+				c.s.Capacity.Verification[1].Phase = "running"
+				c.mu.Unlock()
+			} else {
+				secondDone := make(chan error, 1)
+				go func() { secondDone <- c.waitCheckTurn(ctx, "second", "release", "heavy", limit, slots) }()
+				<-limit
+				if err := <-secondDone; err != nil {
+					t.Fatal(err)
+				}
+				c.mu.Lock()
+				c.s.Capacity.Verification[1].Phase = "running"
+				c.mu.Unlock()
+			}
+			select {
+			case err := <-thirdDone:
+				t.Fatalf("third acquired occupied capacity: %v", err)
+			case <-time.After(75 * time.Millisecond):
+			}
+			<-limit
+			if err := <-thirdDone; err != nil {
+				t.Fatal(err)
+			}
+			<-limit
+			if slots == 2 {
+				<-limit
+			}
+		})
+	}
+}

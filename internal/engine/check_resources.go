@@ -33,15 +33,9 @@ func (c *Controller) checkPermit(ctx context.Context, taskID string, check confi
 	} else if c.P.Machine.MaxHeavyChecks > 0 && c.P.Machine.MaxHeavyChecks < turns {
 		turns = c.P.Machine.MaxHeavyChecks
 	}
-	if err := c.waitCheckTurn(ctx, taskID, check.Name, class, turns); err != nil {
+	if err := c.waitCheckTurn(ctx, taskID, check.Name, class, limit, turns); err != nil {
 		clear()
 		return nil, err
-	}
-	select {
-	case limit <- struct{}{}:
-	case <-ctx.Done():
-		clear()
-		return nil, ctx.Err()
 	}
 	releaseLocal := func() { <-limit }
 	if class == "light" {
@@ -77,23 +71,30 @@ func (c *Controller) checkPermit(ctx context.Context, taskID string, check confi
 	return func() { clear(); releaseMachine(); releaseLocal() }, nil
 }
 
-// The durable queue order decides which checks on this project may contend
-// for slots. OS locks then enforce the shared machine ceiling.
-func (c *Controller) waitCheckTurn(ctx context.Context, taskID, name, class string, slots int) error {
+// Reserve a local slot while holding the snapshot mutex. This prevents a
+// later waiter from racing past an earlier queued check on this project.
+func (c *Controller) waitCheckTurn(ctx context.Context, taskID, name, class string, limit chan struct{}, slots int) error {
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c.mu.Lock()
 		rank := 0
-		for _, check := range c.Snapshot().Capacity.Verification {
+		for _, check := range c.s.Capacity.Verification {
 			if check.Phase != "queued" || check.Class != class {
 				continue
 			}
 			if check.Task == taskID && check.Check == name {
-				if rank < slots {
+				if rank == 0 && len(limit) < slots {
+					limit <- struct{}{}
+					c.mu.Unlock()
 					return nil
 				}
 				break
 			}
 			rank++
 		}
+		c.mu.Unlock()
 		timer := time.NewTimer(50 * time.Millisecond)
 		select {
 		case <-ctx.Done():

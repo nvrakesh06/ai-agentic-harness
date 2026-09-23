@@ -1070,7 +1070,7 @@ func (c *Controller) verifyReview(id string) error {
 			names = append(names, required[index].Name)
 		}
 		_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_requested", "roles="+strings.Join(names, ",")+" head="+t.HeadSHA)
-		checks, checkErr := c.checks(c.ctx, effective, dir)
+		checks, checkErr := c.checks(c.ctx, effective, dir, id)
 		if checkErr != nil {
 			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_failed", short(checkErr.Error(), 500))
 			return checkErr
