@@ -187,3 +187,37 @@ func TestVerificationRetryGuardRoundTripsAndValidates(t *testing.T) {
 		t.Fatal("invalid verification retry guard accepted")
 	}
 }
+
+func TestGuidanceIsBoundedPortableAndScopedToParallelTasks(t *testing.T) {
+	s := NewSnapshot("project123")
+	source := &Task{ID: "api", ObjectiveID: "objective", State: Running, HeadSHA: fmt.Sprintf("%040x", 42)}
+	target := &Task{ID: "ui", ObjectiveID: "objective", State: Running}
+	s.Tasks[source.ID], s.Tasks[target.ID] = source, target
+	if err := QueueGuidance(target, source, "command-1", "Use src/server/cli.ts --port 4318."); err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, _, err := Decode(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := TaskGuidance(recovered.Tasks["ui"])
+	if len(items) != 1 || items[0].SourceID != "api" || items[0].SourceSHA != source.HeadSHA || items[0].CommandID != "command-1" || items[0].Text != "Use src/server/cli.ts --port 4318." {
+		t.Fatalf("guidance did not survive portable snapshot: %#v", items)
+	}
+	other := &Task{ID: "other", ObjectiveID: "different", State: Ready}
+	if err := QueueGuidance(other, source, "command-2", "unrelated"); err == nil {
+		t.Fatal("cross-objective guidance accepted")
+	}
+	target.State = Review
+	if err := QueueGuidance(target, source, "command-3", "too late"); err == nil {
+		t.Fatal("review task accepted implementation guidance")
+	}
+	target.State = Ready
+	if err := QueueGuidance(target, source, "command-4", string(make([]byte, MaxGuidanceBytes+1))); err == nil {
+		t.Fatal("oversized guidance accepted")
+	}
+}

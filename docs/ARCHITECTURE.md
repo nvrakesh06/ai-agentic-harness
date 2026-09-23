@@ -77,6 +77,17 @@ Retry/rotation budgets prevent endless loops; repeated failures get one Advisor
 recovery approach before escalation. No provider conversation is needed to restart
 a worker.
 
+For a correction discovered across parallel tasks, `aih guide <target-task-id>
+--from <source-task-id> --file <text-file>` queues at most 1600 UTF-8 bytes.
+The supervisor accepts it only for distinct tasks in the same objective, with a
+durable source code checkpoint and a target in READY, RUNNING or FIX. The accepted
+command and source head are recorded in portable task state; secret-like text is
+rejected before publication. The next implementer
+invocation receives it explicitly. A correction accepted while a worker is running
+does not interrupt that provider call; the supervisor checkpoints its source edits
+and schedules one more bounded pass before verification. It does not deliver a
+live message inside an already-running provider call.
+
 An implementer blocker with a human question becomes `BLOCKED_HUMAN`. A questionless
 implementer blocker means the source change is complete but the worker environment
 could not finish verification; the supervisor checkpoints it and proceeds directly

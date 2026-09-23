@@ -153,6 +153,25 @@ func TestContextFilteringAndCanonicalRules(t *testing.T) {
 	}
 }
 
+func TestGuidanceAppearsOnlyInImplementerPrompt(t *testing.T) {
+	source := &model.Task{ID: "api", ObjectiveID: "shared", State: model.Running, HeadSHA: strings.Repeat("a", 40)}
+	target := &model.Task{ID: "ui", ObjectiveID: "shared", State: model.Ready}
+	if err := model.QueueGuidance(target, source, "correction-1", "Use the source task's real CLI entrypoint."); err != nil {
+		t.Fatal(err)
+	}
+	e := config.Effective{Files: map[string]string{}}
+	implementation := Compile(e, Builtins()["implementer"], "windows", target, target.Objective, "", "")
+	for _, expected := range []string{"SUPERVISOR TASK GUIDANCE correction-1", source.HeadSHA, "Use the source task's real CLI entrypoint.", "does not override canonical policy"} {
+		if !strings.Contains(implementation, expected) {
+			t.Fatalf("implementer did not receive bounded guidance %q", expected)
+		}
+	}
+	review := Compile(e, Builtins()["reviewer"], "windows", target, "review", "", "")
+	if strings.Contains(review, "SUPERVISOR TASK GUIDANCE") {
+		t.Fatal("reviewer received an implementer instruction")
+	}
+}
+
 func TestBuiltinPromptsKeepOrchestrationInSupervisor(t *testing.T) {
 	builtins := Builtins()
 	orchestrator := builtins["orchestrator"].Instructions

@@ -14,6 +14,7 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/update"
 	"github.com/spf13/cobra"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -165,6 +166,42 @@ func New() *cobra.Command {
 		fmt.Fprintf(cmd.OutOrStdout(), "Queued answer %s.\n", id)
 		return background(cmd, p)
 	}})
+	var guidanceSource, guidanceFile string
+	guide := &cobra.Command{Use: "guide <target-task-id>", Short: "Queue a bounded cross-task correction for the next implementer invocation", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if guidanceSource == "" || guidanceFile == "" {
+			return errors.New("guide requires --from and --file")
+		}
+		input, err := os.Open(guidanceFile)
+		if err != nil {
+			return err
+		}
+		defer input.Close()
+		contents, err := io.ReadAll(io.LimitReader(input, model.MaxGuidanceBytes+1))
+		if err != nil {
+			return err
+		}
+		if len(contents) == 0 || len(contents) > model.MaxGuidanceBytes {
+			return errors.New("guidance file must contain 1..1600 UTF-8 bytes")
+		}
+		p, err := o.open(cmd.Context(), false)
+		if err != nil {
+			return err
+		}
+		defer p.DB.Close()
+		payload, err := json.Marshal(map[string]string{"source_task": guidanceSource, "text": string(contents)})
+		if err != nil {
+			return err
+		}
+		id := model.ID()
+		if err = p.DB.Submit(store.Command{ID: id, Kind: "guide", Target: args[0], Payload: string(payload)}); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Queued task guidance %s locally; remote acceptance is shown in status. Delivery occurs at the next implementer invocation.\n", id)
+		return background(cmd, p)
+	}}
+	guide.Flags().StringVar(&guidanceSource, "from", "", "source task ID with a durable code checkpoint")
+	guide.Flags().StringVar(&guidanceFile, "file", "", "UTF-8 correction text file (maximum 1600 bytes)")
+	root.AddCommand(guide)
 	for _, name := range []string{"stop", "handoff"} {
 		name := name
 		root.AddCommand(&cobra.Command{Use: name, Short: "Stop scheduling, checkpoint workers, and release the lease", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
