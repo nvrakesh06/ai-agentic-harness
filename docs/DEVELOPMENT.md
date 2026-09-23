@@ -61,6 +61,11 @@ checks:
     command: [go, test, ./...]
     class: heavy
     timeout_seconds: 600
+# Optional. A project-owned script runs at the reviewed task head only when a
+# reviewer requests visual evidence that its sandbox cannot capture.
+visual_capture:
+  command: [node, scripts/capture-review.mjs]
+  timeout_seconds: 90
 release_repo: nvrakesh06/ai-agentic-harness
 ```
 
@@ -79,6 +84,28 @@ timeouts start after a slot is acquired. `status` and `watch` show each queued
 or running check and its elapsed wait or run time.
 Checks must leave tracked source and unignored files unchanged. Use check-mode
 formatters and ignore build outputs in the application itself.
+
+`visual_capture` is optional and separate from build/test checks. AIH runs its
+configured argv with the task worktree as cwd and a bounded lifetime. The command
+receives `AIH_VISUAL_OUTPUT_DIR` (outside source) and `AIH_VISUAL_HEAD`. It must
+write `manifest.json` with `{"summary":"...","artifacts":["desktop.png",
+"network.txt"]}` and the named files in that directory. At least one screenshot
+is required; AIH accepts at most eight flat files, 8 MiB each and 16 MiB total.
+Text diagnostics and the manifest must contain no secret-like values. The
+supervisor records artifact hashes and an exact-head local reference, then gives
+that reference to the requesting reviewer for one retry. Capture output is
+evidence for review, never a visual pass by itself. Projects must make their
+capture script use disposable profiles, loopback-only URLs, and clean fixture
+data; AIH does not yet enforce browser navigation or profile policy for this
+project-defined command.
+
+This feature adds portable state schema 4. Before activating a schema-4
+supervisor, hand off the schema-3 supervisor, retain the local SQLite database
+and `aih-state` checkpoint, build a separate new binary, and resume it once.
+Confirm status shows the same tasks, heads, and PRs. Do not restart an older
+schema-3 binary after schema-4 state is published. Captures remain local to the
+machine; after reconstruction elsewhere, rerun a capture at the same head if
+the reviewer needs the images.
 
 AIH runs configured checks on the synchronized task head and again on the exact
 merge commit before its atomic publication. After publication, the same controller

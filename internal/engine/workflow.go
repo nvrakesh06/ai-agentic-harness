@@ -69,7 +69,7 @@ func supervisorEvidenceText(text string) bool {
 		}
 	}
 	evidence := false
-	for _, marker := range []string{"verification evidence", "native verification", "native check", "native logs", "test output", "validation output", "check output", "runtime evidence", "review evidence", "peer review", "peer approval", "independent review", "exact-head", "current-head", "cannot run", "could not run", "tool unavailable"} {
+	for _, marker := range []string{"verification evidence", "native verification", "native check", "native logs", "test output", "validation output", "check output", "runtime evidence", "review evidence", "peer review", "peer approval", "independent review", "exact-head", "current-head", "cannot run", "could not run", "tool unavailable", "screenshot", "visual evidence", "browser capture", "playwright"} {
 		if strings.Contains(text, marker) {
 			evidence = true
 			break
@@ -83,6 +83,27 @@ func supervisorEvidenceText(text string) bool {
 	}
 	for _, request := range []string{"provide", "rerun", "run the", "missing", "lack", "unavailable", "cannot", "can't", "could not", "need"} {
 		if strings.Contains(text, request) {
+			return true
+		}
+	}
+	return false
+}
+func visualEvidenceRequest(result provider.Result) bool {
+	if !supervisorEvidenceRequest(result) {
+		return false
+	}
+	text := strings.ToLower(strings.Join([]string{result.Question, result.Summary, strings.Join(result.Risks, " ")}, " "))
+	for _, marker := range []string{"screenshot", "visual evidence", "browser capture", "playwright", "rendered frame"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+func sourceEvidenceRequest(result provider.Result) bool {
+	text := strings.ToLower(strings.Join([]string{result.Question, result.Summary, strings.Join(result.Risks, " ")}, " "))
+	for _, marker := range []string{"native check", "test output", "validation output", "check output", "npm", "node", "bun", "peer approval"} {
+		if strings.Contains(text, marker) {
 			return true
 		}
 	}
@@ -964,6 +985,9 @@ func (c *Controller) checks(ctx context.Context, e config.Effective, dir, taskID
 func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Task, dir, diff string, evidence *model.Evidence, attempt int, required []roles.Role) []reviewOutcome {
 	outcomes := make([]reviewOutcome, len(required))
 	payload := reviewEvidencePayload(evidence, attempt)
+	if evidence.Visual != nil {
+		payload += "\nVISUAL ARTIFACT ROOT (local, read-only): " + filepath.Join(c.P.Dir, filepath.FromSlash(filepath.Dir(evidence.Visual.Manifest))) + "\nInspect the screenshot and diagnostics listed in visual.artifacts. A capture artifact is evidence, not a visual pass.\n"
+	}
 	var reviews sync.WaitGroup
 	for i, role := range required {
 		reviews.Add(1)
@@ -1092,17 +1116,40 @@ func (c *Controller) verifyReview(id string) error {
 	if len(assessment.evidence) > 0 {
 		refreshRoles := make([]roles.Role, 0, len(assessment.evidence))
 		names := make([]string, 0, len(assessment.evidence))
+		visualRequested := false
+		sourceRequested := false
 		for _, index := range assessment.evidence {
 			refreshRoles = append(refreshRoles, required[index])
 			names = append(names, required[index].Name)
+			visualRequested = visualRequested || visualEvidenceRequest(outcomes[index].result)
+			sourceRequested = sourceRequested || sourceEvidenceRequest(outcomes[index].result)
 		}
 		_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_requested", "roles="+strings.Join(names, ",")+" head="+t.HeadSHA)
-		checks, checkErr := c.checks(c.ctx, effective, dir, id)
-		if checkErr != nil {
-			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_failed", short(checkErr.Error(), 500))
-			return checkErr
+		if visualRequested {
+			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_queued", "head="+t.HeadSHA)
 		}
-		evidence.Checks = checks
+		if !visualRequested || sourceRequested {
+			checks, checkErr := c.checks(c.ctx, effective, dir, id)
+			if checkErr != nil {
+				_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_failed", short(checkErr.Error(), 500))
+				return checkErr
+			}
+			evidence.Checks = checks
+		}
+		if visualRequested {
+			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_running", "head="+t.HeadSHA)
+			visual, visualErr := c.captureVisual(c.ctx, effective, t, dir)
+			if visualErr != nil {
+				kind := "visual_capture_failed"
+				if effective.Project.VisualCapture == nil {
+					kind = "visual_capture_unavailable"
+				}
+				_ = c.P.DB.Event(id, t.RunID, "verification", "native", kind, short(safety.Redact(visualErr.Error()), 500))
+				return visualErr
+			}
+			evidence.Visual = visual
+			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_completed", "head="+t.HeadSHA+" manifest="+visual.Manifest)
+		}
 		evidence.At = time.Now().UTC()
 		if e = c.publishReviewProgress(id, evidence); e != nil {
 			return e
