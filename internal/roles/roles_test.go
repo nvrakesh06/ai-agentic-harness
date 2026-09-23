@@ -59,6 +59,12 @@ func TestRequiredReviewRosterDeduplicatesExtendingValidators(t *testing.T) {
 	if !Blocking(all["animation-architecture"], []model.Finding{{Severity: "medium"}}) {
 		t.Fatal("specialist blocking severity was not preserved")
 	}
+	if !strings.Contains(all["animation-architecture"].Instructions, Builtins()["reviewer"].Instructions) {
+		t.Fatal("specialist did not retain inherited reviewer instructions")
+	}
+	if !Blocking(all["security"], []model.Finding{{Severity: "high"}}) {
+		t.Fatal("built-in security blocking severity was not preserved")
+	}
 }
 
 func TestRequiredReviewRosterRetainsParentWithoutMatchingValidator(t *testing.T) {
