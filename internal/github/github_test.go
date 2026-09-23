@@ -27,11 +27,14 @@ func init() {
 		if json.Unmarshal(data, &b) != nil || b["title"] == nil || b["body"] == nil {
 			os.Exit(2)
 		}
+		if strings.Contains(joined, "repos/owner/repo/pulls") && b["draft"] != true {
+			os.Exit(3)
+		}
 		fmt.Print(`{"number":9}`)
 	} else if strings.Contains(joined, "/pulls?") {
 		fmt.Print(`[]`)
 	} else if strings.Contains(joined, "/pulls/9") {
-		fmt.Print(`{"number":9,"state":"open","head":{"sha":"head","ref":"aih/task"},"base":{"ref":"main"}}`)
+		fmt.Print(`{"number":9,"state":"open","draft":true,"head":{"sha":"head","ref":"aih/task"},"base":{"ref":"main"}}`)
 	} else {
 		fmt.Print(`{"has_issues":true,"archived":false,"permissions":{"push":true}}`)
 	}
@@ -60,7 +63,10 @@ func TestGHProtocolPaginationAndIdempotency(t *testing.T) {
 		t.Fatal("structured PR creation failed", n, e)
 	}
 	p, e := c.Pull(ctx, 9)
-	if e != nil || p.Head.Ref != "aih/task" || p.Base.Ref != "main" {
+	if e != nil || p.Head.Ref != "aih/task" || p.Base.Ref != "main" || !p.Draft {
 		t.Fatal(p, e)
+	}
+	if e = c.SetPRDraft(ctx, 9, false); e != nil {
+		t.Fatal("ready-for-review transition failed", e)
 	}
 }

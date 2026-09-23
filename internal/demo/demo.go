@@ -122,11 +122,18 @@ func (f *Fixture) Open(ctx context.Context, home string) (*engine.Project, error
 }
 
 type Hub struct {
-	mu     sync.Mutex
-	Remote gitx.Git
-	issues map[int]github.Issue
-	pulls  map[int]github.Pull
-	seq    int
+	mu      sync.Mutex
+	Remote  gitx.Git
+	issues  map[int]github.Issue
+	pulls   map[int]github.Pull
+	updates []PullUpdate
+	seq     int
+}
+
+type PullUpdate struct {
+	Number int
+	Body   string
+	Draft  bool
 }
 
 func (h *Hub) EnsureIssue(_ context.Context, key, title, body string) (int, error) {
@@ -172,13 +179,46 @@ func (h *Hub) EnsurePR(_ context.Context, branch, base, title, body string) (int
 		}
 	}
 	h.seq++
-	p := github.Pull{Number: h.seq, State: "open"}
+	p := github.Pull{Number: h.seq, State: "open", Draft: true, Body: body}
 	p.Head.Ref = branch
 	p.Base.Ref = base
 	h.pulls[h.seq] = p
+	h.updates = append(h.updates, PullUpdate{Number: p.Number, Body: p.Body, Draft: p.Draft})
 	return p.Number, nil
 }
-func (h *Hub) UpdatePR(context.Context, int, string) error { return nil }
+func (h *Hub) UpdatePR(_ context.Context, n int, body string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p, ok := h.pulls[n]
+	if !ok {
+		return errors.New("missing mock PR")
+	}
+	p.Body = body
+	h.pulls[n] = p
+	h.updates = append(h.updates, PullUpdate{Number: p.Number, Body: p.Body, Draft: p.Draft})
+	return nil
+}
+func (h *Hub) SetPRDraft(_ context.Context, n int, draft bool) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p, ok := h.pulls[n]
+	if !ok {
+		return errors.New("missing mock PR")
+	}
+	p.Draft = draft
+	h.pulls[n] = p
+	h.updates = append(h.updates, PullUpdate{Number: p.Number, Body: p.Body, Draft: p.Draft})
+	return nil
+}
+func (h *Hub) Pulls() ([]github.Pull, []PullUpdate) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	pulls := make([]github.Pull, 0, len(h.pulls))
+	for _, p := range h.pulls {
+		pulls = append(pulls, p)
+	}
+	return pulls, append([]PullUpdate(nil), h.updates...)
+}
 func (h *Hub) Pull(ctx context.Context, n int) (github.Pull, error) {
 	h.mu.Lock()
 	p, ok := h.pulls[n]
@@ -212,6 +252,7 @@ type Worker struct {
 	Failures          map[string]int
 	EnvironmentBlocks map[string]int
 	Implementations   map[string]int
+	NoChanges         map[string]bool
 }
 
 func (w *Worker) ImplementationCount(title string) int {
@@ -273,6 +314,10 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 		w.mu.Unlock()
 		if fail {
 			return result, errors.New("injected provider failure")
+		}
+		if w.NoChanges[task.Title] {
+			result.Summary = "Completed without source changes"
+			return result, nil
 		}
 		if e = os.WriteFile(filepath.Join(r.Directory, "feature-"+task.Title+".txt"), []byte("implemented\n"), 0600); e != nil {
 			return result, e
