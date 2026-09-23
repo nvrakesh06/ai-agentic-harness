@@ -51,6 +51,7 @@ func New(ctx context.Context, root string, checks []string) (*Fixture, error) {
 	}
 	f.Project.LeaseSeconds = 60
 	f.Project.WorkerSeconds = 30
+	f.Project.Scheduling.UnderutilizationGraceSeconds = 0
 	f.Project.Checks = []config.Check{{Name: "fixture acceptance", Command: checks, Timeout: 30}}
 	if e := os.MkdirAll(filepath.Join(f.Source, ".aih"), 0700); e != nil {
 		return nil, e

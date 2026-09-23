@@ -348,6 +348,13 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 	if e != nil {
 		return fmt.Errorf("no cached state; run aih attach: %w", e)
 	}
+	if s.Capacity.TargetWriters == 0 {
+		s.Capacity.TargetWriters = p.Config.Project.Scheduling.TargetWriters
+		s.Capacity.MaxWriters = p.Config.Project.MaxWriters
+		s.Capacity.MaxReaders = p.Config.Project.MaxReaders
+		s.Capacity.GraceSeconds = p.Config.Project.Scheduling.UnderutilizationGraceSeconds
+		s.Capacity.BacklogSource = p.Config.Project.Scheduling.BacklogSource
+	}
 	if asJSON {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -367,6 +374,17 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 	}
 	if message := p.DB.Get("last_error"); message != "" {
 		fmt.Fprintln(cmd.OutOrStdout(), "Last supervisor error:", message)
+	}
+	capacity := s.Capacity
+	fmt.Fprintf(cmd.OutOrStdout(), "Writers: %d active / %d target / %d max\n", capacity.ActiveWriters, capacity.TargetWriters, capacity.MaxWriters)
+	fmt.Fprintf(cmd.OutOrStdout(), "Readers: %d active / %d max\n", capacity.ActiveReaders, capacity.MaxReaders)
+	if capacity.ReasonCode != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Backfill: %s — %s (%s)\n", capacity.State, capacity.Reason, capacity.ReasonCode)
+	} else {
+		fmt.Fprintf(cmd.OutOrStdout(), "Backfill: %s\n", capacity.State)
+	}
+	if capacity.NextSafeWork != "" {
+		fmt.Fprintln(cmd.OutOrStdout(), "Next safe work:", capacity.NextSafeWork)
 	}
 	for _, t := range model.Ordered(s) {
 		if blockers && t.State != model.Blocked {

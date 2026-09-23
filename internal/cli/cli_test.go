@@ -178,6 +178,40 @@ func TestStatusDistinguishesLocalAndDurableLeaseHeartbeats(t *testing.T) {
 	}
 }
 
+func TestStatusShowsMachineReadableCapacityAndHumanReason(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	snapshot := model.NewSnapshot("capacity-project")
+	snapshot.Capacity = model.Capacity{ActiveWriters: 1, TargetWriters: 2, MaxWriters: 3, ActiveReaders: 2, MaxReaders: 4, GraceSeconds: 30, BacklogSource: "queued_objectives", State: "underutilized", ReasonCode: "dependencies", Reason: "3 tasks wait on unfinished dependencies", NextSafeWork: "task-b after task-a"}
+	if err = db.Save("0123456789abcdef", snapshot); err != nil {
+		t.Fatal(err)
+	}
+	p := &engine.Project{DB: db, Dir: dir}
+	var human bytes.Buffer
+	cmd := New()
+	cmd.SetOut(&human)
+	if err = showStatus(cmd, p, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Writers: 1 active / 2 target / 3 max", "Readers: 2 active / 4 max", "dependencies", "Next safe work: task-b after task-a"} {
+		if !strings.Contains(human.String(), want) {
+			t.Fatalf("human status omitted %q: %s", want, human.String())
+		}
+	}
+	var machine bytes.Buffer
+	cmd.SetOut(&machine)
+	if err = showStatus(cmd, p, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(machine.String(), `"target_active_writers": 2`) || !strings.Contains(machine.String(), `"underutilization_reason_code": "dependencies"`) {
+		t.Fatalf("JSON status omitted capacity fields: %s", machine.String())
+	}
+}
+
 func TestDoctorPolicyDriftIgnoresAdditionalContext(t *testing.T) {
 	local := config.Effective{Files: map[string]string{".aih/project.yaml": "provider: codex\r\nbase_branch: main\r\n"}}
 	canonical := config.Effective{Files: map[string]string{".aih/project.yaml": "provider: codex\nbase_branch: main", "AGENTS.md": "Project instructions"}}

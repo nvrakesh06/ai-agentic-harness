@@ -28,7 +28,11 @@ machines. Install normal Git/provider credentials independently on each machine.
 
 `aih-state:snapshot.json` stores `state_schema`, `created_by_version`, project
 identity, revision, controller lease, objectives, tasks, runs, accepted command IDs,
-improvement candidates and the integration hold. Task records contain dependencies,
+the ordered authorized objective backlog, capacity policy/status, improvement
+candidates and the integration hold. Capacity state records active/target/maximum
+writer utilization, reader utilization, backlog cursor, grace boundary, latest
+backfill selection, a machine-readable suppression reason and the bounded tail of
+underutilization/selection/suppression transitions. Task records contain dependencies,
 conflict domains, issues/PRs, branch/base/head/merge revisions, retry counters,
 findings, human decisions, blocker/resume state, verification retry guards and exact
 verification evidence. A guard records only portable environment/command classes,
@@ -71,11 +75,18 @@ environment and recheck without starting another implementer.
 
 ## Schema compatibility and migrations
 
-V1 uses remote schema 1, role schema 1, rules version 1, and local schema 1.
+V1 uses remote schema 2, role schema 1, rules version 1, and local schema 1.
 Unknown newer schemas fail closed before writes. Legacy schema 0 snapshots gain
-version metadata and missing maps, then undergo validation. The first subsequent
+version metadata and missing maps; schema 1 snapshots deterministically reconstruct
+the authorized objective backlog from existing objectives. Both then undergo
+validation. The first subsequent
 state commit keeps the original remote commit as its parent, preserving the
 pre-migration backup in Git history. No automatic major-version migration exists.
+
+Publishing schema 2 is a one-way deployment boundary: a schema-1 runtime rejects
+the newer snapshot. Upgrade every machine that may attach, resume, or take over
+before allowing a schema-2 supervisor to acquire and publish state. Do not hand
+control back to a schema-1 installation after that first schema-2 save.
 
 Remote task identities and branches are constrained before use as filesystem or
 Git targets. Schema changes require tests for old fixtures and new-runtime refusal.

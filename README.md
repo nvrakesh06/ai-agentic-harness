@@ -197,6 +197,13 @@ meaningful state saves refresh that lease and coalesce the pending renewal. `aih
 status` displays both timestamps. Only the durable remote expiry authorizes
 takeover or publication.
 
+Projects also persist a best-effort active-writer target below the hard concurrency
+limit. The first authorized objective starts immediately; after later capacity
+drops, AIH deterministically pulls the next explicitly queued objective once the
+grace period expires. `status --json`, human
+`status`, and `watch` expose utilization, backlog decisions, and exact suppression
+reasons without treating review readers as active writers.
+
 There is no HTTP API, management port, browser dashboard, Redis, or external queue.
 See [architecture](docs/ARCHITECTURE.md), [state layout](docs/STATE.md),
 [integration decision](docs/DECISIONS.md), and [custom roles](docs/ROLES.md).

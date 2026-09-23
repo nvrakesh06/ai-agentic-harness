@@ -30,6 +30,12 @@ type Project struct {
 	WorkerSeconds  int               `yaml:"worker_timeout_seconds" json:"worker_timeout_seconds"`
 	LeaseSeconds   int               `yaml:"lease_seconds" json:"lease_seconds"`
 	ReleaseRepo    string            `yaml:"release_repo" json:"release_repo"`
+	Scheduling     Scheduling        `yaml:"scheduling" json:"scheduling"`
+}
+type Scheduling struct {
+	TargetWriters                int    `yaml:"target_active_writers" json:"target_active_writers"`
+	UnderutilizationGraceSeconds int    `yaml:"underutilization_grace_seconds" json:"underutilization_grace_seconds"`
+	BacklogSource                string `yaml:"backlog_source" json:"backlog_source"`
 }
 type Check struct {
 	Name      string   `yaml:"name" json:"name"`
@@ -72,7 +78,7 @@ type Effective struct {
 }
 
 func Defaults() Project {
-	return Project{ID: model.ID(), Provider: "codex", Base: "main", MaxWriters: 3, MaxReaders: 2, Models: map[string]string{"orchestrator": "strong", "implementer": "normal", "reviewer": "strong", "qa": "normal", "designer": "strong", "security": "strong", "advisor": "strongest"}, ProviderModels: map[string]string{}, WorkerSeconds: 900, LeaseSeconds: 180, ReleaseRepo: UpstreamRepository}
+	return Project{ID: model.ID(), Provider: "codex", Base: "main", MaxWriters: 3, MaxReaders: 2, Models: map[string]string{"orchestrator": "strong", "implementer": "normal", "reviewer": "strong", "qa": "normal", "designer": "strong", "security": "strong", "advisor": "strongest"}, ProviderModels: map[string]string{}, WorkerSeconds: 900, LeaseSeconds: 180, ReleaseRepo: UpstreamRepository, Scheduling: Scheduling{TargetWriters: 2, UnderutilizationGraceSeconds: 30, BacklogSource: "queued_objectives"}}
 }
 func DefaultPolicy() Policy { return Policy{2, 3, 3, 3} }
 func DefaultLock() Lock {
@@ -90,6 +96,19 @@ func Decode(data []byte, out any) error {
 	}
 	return nil
 }
+func DecodeProject(data []byte, out *Project) error {
+	hasScheduling := regexp.MustCompile(`(?m)^scheduling\s*:`).Match(data)
+	if err := Decode(data, out); err != nil {
+		return err
+	}
+	if !hasScheduling {
+		out.Scheduling = Scheduling{TargetWriters: 2, UnderutilizationGraceSeconds: 30, BacklogSource: "queued_objectives"}
+		if out.MaxWriters > 0 && out.Scheduling.TargetWriters > out.MaxWriters {
+			out.Scheduling.TargetWriters = out.MaxWriters
+		}
+	}
+	return nil
+}
 func Parse(files map[string]string) (Effective, error) {
 	e := Effective{Project: Defaults(), Policy: DefaultPolicy(), Lock: DefaultLock(), Files: files}
 	e.Project.ID = "" // Identity must be committed, never silently generated on load.
@@ -98,7 +117,13 @@ func Parse(files map[string]string) (Effective, error) {
 		if !ok {
 			return e, fmt.Errorf("canonical base missing %s; commit and push AIH configuration first", name)
 		}
-		if err := Decode([]byte(data), out); err != nil {
+		var err error
+		if name == ".aih/project.yaml" {
+			err = DecodeProject([]byte(data), &e.Project)
+		} else {
+			err = Decode([]byte(data), out)
+		}
+		if err != nil {
 			return e, fmt.Errorf("%s: %w", name, err)
 		}
 	}
@@ -140,6 +165,15 @@ func (p Project) Validate() error {
 	}
 	if p.MaxWriters < 1 || p.MaxWriters > 3 || p.MaxReaders < 1 || p.MaxReaders > 8 {
 		return errors.New("writer limit must be 1..3 and reader limit 1..8")
+	}
+	if p.Scheduling.TargetWriters < 1 || p.Scheduling.TargetWriters > p.MaxWriters {
+		return errors.New("target_active_writers must be between 1 and max_parallel_writers")
+	}
+	if p.Scheduling.UnderutilizationGraceSeconds < 0 || p.Scheduling.UnderutilizationGraceSeconds > 3600 {
+		return errors.New("underutilization_grace_seconds must be between 0 and 3600")
+	}
+	if p.Scheduling.BacklogSource != "queued_objectives" {
+		return errors.New("V1 scheduling backlog_source must be queued_objectives")
 	}
 	if p.WorkerSeconds < 10 || p.LeaseSeconds < 60 {
 		return errors.New("worker timeout must be >=10s and lease >=60s")

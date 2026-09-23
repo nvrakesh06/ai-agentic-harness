@@ -91,6 +91,7 @@ func (c *Controller) acquire(ctx context.Context) error {
 		return fmt.Errorf("%w: held by %s until %s", ErrLease, s.Controller.Machine, s.Controller.Expires)
 	}
 	s.Controller = model.Lease{Machine: c.P.Machine.ID, Owner: c.owner, Epoch: s.Controller.Epoch + 1, Heartbeat: now, Expires: now.Add(c.leaseDuration())}
+	s.Capacity = configuredCapacity(c.P.Config.Project, s.Capacity)
 	s.Revision++
 	next, e := c.P.Git.StateCommit(ctx, h, s)
 	if e != nil {
@@ -345,22 +346,14 @@ func (c *Controller) Serve(parent context.Context) error {
 				break
 			}
 			s := c.Snapshot()
-			if !planning {
-				for _, o := range s.Objectives {
-					if (!o.Planned || needsProvision(s, o.ID)) && o.Blocker == "" {
-						planning = true
-						c.launch(func() { c.plan(o.ID); done <- "@plan" })
-						break
-					}
-				}
+			capacity := decideCapacity(s, active, c.P.Config.Project, planning, len(c.readers), time.Now().UTC())
+			if ce = c.persistCapacity(capacity.status, capacity.planObjective); ce != nil {
+				e = ce
+				stopping = true
+				c.cancel()
+				break
 			}
-			writers := map[string]bool{}
-			for id := range active {
-				if t := s.Tasks[id]; t != nil && t.State == model.Running {
-					writers[id] = true
-				}
-			}
-			for _, t := range model.Runnable(s, writers, c.P.Config.Project.MaxWriters) {
+			for _, t := range capacity.writers {
 				if active[t.ID] {
 					continue
 				}
@@ -370,6 +363,11 @@ func (c *Controller) Serve(parent context.Context) error {
 				}
 				active[id] = true
 				c.launch(func() { c.work(id, true); done <- id })
+			}
+			if capacity.planObjective != "" {
+				id := capacity.planObjective
+				planning = true
+				c.launch(func() { c.plan(id); done <- "@plan" })
 			}
 			for _, t := range model.Ordered(s) {
 				if active[t.ID] {
@@ -427,6 +425,12 @@ func (c *Controller) Serve(parent context.Context) error {
 		e = c.save(ctx, func(s *model.Snapshot) error {
 			s.Controller.Owner = ""
 			s.Controller.Expires = time.Now().UTC()
+			s.Capacity.ActiveWriters = 0
+			s.Capacity.ActiveReaders = 0
+			s.Capacity.State = "stopped"
+			s.Capacity.ReasonCode = "supervisor_stopped"
+			s.Capacity.Reason = "the local supervisor is stopped"
+			s.Capacity.NextSafeWork = ""
 			for _, t := range s.Tasks {
 				if t.State == model.Running {
 					t.State = model.Ready
@@ -502,6 +506,7 @@ func (c *Controller) commands() (bool, error) {
 			switch cmd.Kind {
 			case "run":
 				s.Objectives[cmd.ID] = &model.Objective{ID: cmd.ID, Text: cmd.Payload}
+				s.Backlog = append(s.Backlog, cmd.ID)
 			case "answer":
 				t := s.Tasks[cmd.Target]
 				if t == nil {

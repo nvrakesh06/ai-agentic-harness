@@ -4,6 +4,7 @@ import (
 	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +32,48 @@ func TestCanonicalValidation(t *testing.T) {
 	}
 	if _, e := ProjectDir(t.TempDir(), "../escape"); e == nil {
 		t.Fatal("path traversal")
+	}
+}
+
+func TestSchedulingPolicyDefaultsAndValidation(t *testing.T) {
+	p := Defaults()
+	if p.Scheduling.TargetWriters != 2 || p.Scheduling.UnderutilizationGraceSeconds != 30 || p.Scheduling.BacklogSource != "queued_objectives" {
+		t.Fatalf("unexpected scheduling defaults: %#v", p.Scheduling)
+	}
+	for _, mutate := range []func(*Project){
+		func(project *Project) { project.Scheduling.TargetWriters = project.MaxWriters + 1 },
+		func(project *Project) { project.Scheduling.UnderutilizationGraceSeconds = -1 },
+		func(project *Project) { project.Scheduling.BacklogSource = "invented_scope" },
+	} {
+		invalid := Defaults()
+		mutate(&invalid)
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("invalid scheduling policy accepted: %#v", invalid.Scheduling)
+		}
+	}
+}
+
+func TestLegacyProjectWithoutSchedulingUsesSafeDefaults(t *testing.T) {
+	files := canonicalFiles()
+	legacy := files[".aih/project.yaml"]
+	index := strings.Index(legacy, "scheduling:\n")
+	if index < 0 {
+		t.Fatal("fixture has no scheduling block")
+	}
+	files[".aih/project.yaml"] = legacy[:index]
+	effective, err := Parse(files)
+	if err != nil || effective.Project.Scheduling.TargetWriters != 2 || effective.Project.Scheduling.BacklogSource != "queued_objectives" {
+		t.Fatal(effective.Project.Scheduling, err)
+	}
+	legacyProject := effective.Project
+	legacyProject.MaxWriters = 1
+	legacyProject.Scheduling = Scheduling{}
+	legacyYAML, _ := yaml.Marshal(legacyProject)
+	index = strings.Index(string(legacyYAML), "scheduling:\n")
+	legacyYAML = legacyYAML[:index]
+	decoded := Defaults()
+	if err = DecodeProject(legacyYAML, &decoded); err != nil || decoded.Scheduling.TargetWriters != 1 {
+		t.Fatal(decoded.Scheduling, err)
 	}
 }
 func TestMachineAndNativeChecks(t *testing.T) {
