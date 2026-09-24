@@ -227,3 +227,70 @@ func TestOperatorGuidanceAcceptsOnlyLiveCanonicalPolicyWithoutRestart(t *testing
 		t.Fatalf("live policy guidance was not accepted by running supervisor: %#v %v", persisted.Tasks["ui"], err)
 	}
 }
+
+func TestScratchFailurePreservesOperatorGuidanceAcrossAttach(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	fixture, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.P.DB.Close()
+	s, stateHead, err := fixture.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := fixture.P.Git.Run(ctx, "", "rev-parse", "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = fixture.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih/ui", New: base}}); err != nil {
+		t.Fatal(err)
+	}
+	task := &model.Task{ID: "ui", ObjectiveID: "objective", Title: "ui", Objective: "exercise bounded guidance recovery", State: model.Ready, Branch: "aih/ui", BaseSHA: base, HeadSHA: base}
+	if err = model.QueueOperatorGuidance(task, "operator", base, fixture.P.Config.BaseSHA, fixture.P.Config.Hash, roles.Hash(), "Keep this constraint until an implementer starts."); err != nil {
+		t.Fatal(err)
+	}
+	s.Tasks[task.ID] = task
+	next, err := fixture.P.Git.StateCommit(ctx, stateHead, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = fixture.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateHead, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = fixture.P.DB.Save(next, s); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(fixture.P.Dir, "scratch"), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	controller := engine.New(fixture.P)
+	done := make(chan error, 1)
+	go func() { done <- controller.Serve(ctx) }()
+	waitStarted(t, fixture.P)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		persisted, _, loadErr := fixture.P.Git.Load(ctx)
+		if loadErr == nil && persisted.Tasks[task.ID].Attempts > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if fixture.Provider.ImplementationCount(task.Title) != 0 {
+		t.Fatal("provider ran despite scratch setup failure")
+	}
+	if err = fixture.P.DB.Submit(store.Command{ID: "stop", Kind: "handoff"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err = fixture.P.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered, _, err := fixture.P.DB.Load()
+	if err != nil || len(model.EligibleGuidance(recovered.Tasks[task.ID], fixture.P.Config.BaseSHA, fixture.P.Config.Hash, roles.Hash())) != 1 {
+		t.Fatalf("scratch failure consumed guidance before restart: %#v %v", recovered.Tasks[task.ID], err)
+	}
+}

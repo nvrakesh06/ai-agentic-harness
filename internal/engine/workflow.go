@@ -273,14 +273,9 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 	}
 	runtimeDir := filepath.Join(c.P.Dir, "sessions", id)
 	prompt := roles.Compile(e, r, runtime.GOOS, t, objective, diff, evidence)
+	var operatorGuidance []model.Guidance
 	if r.Name == "implementer" && t != nil {
-		guidance := model.EligibleGuidance(t, e.BaseSHA, e.Hash, roles.Hash())
-		if err := c.mutate(func(s *model.Snapshot) error {
-			model.MarkOperatorGuidanceDelivered(s.Tasks[t.ID], guidance)
-			return nil
-		}); err != nil {
-			return provider.Result{}, err
-		}
+		operatorGuidance = model.EligibleGuidance(t, e.BaseSHA, e.Hash, roles.Hash())
 	}
 	var err error
 	scratch := ""
@@ -313,6 +308,12 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 	}
 	if ctx.Err() == nil {
 		saveErr := c.mutate(func(s *model.Snapshot) error {
+			// A failed provider call has no durable acceptance acknowledgement, so
+			// retain the record for at-least-once recovery. A structured result is
+			// the bounded invocation acknowledgement used for one-time delivery.
+			if err == nil && t != nil {
+				model.MarkOperatorGuidanceDelivered(s.Tasks[t.ID], operatorGuidance)
+			}
 			for i := range s.Runs {
 				if s.Runs[i].ID == id {
 					s.Runs[i].DurationMS = time.Since(started).Milliseconds()
