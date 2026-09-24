@@ -8,6 +8,7 @@ import (
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 )
 
@@ -39,6 +40,31 @@ func TestManyReadyPreflightsAreBoundedWithoutStarvingCoding(t *testing.T) {
 	selected = selectPreflights(s, active, guided, 2, 2, roles.Builtins())
 	if len(selected) != 1 || selected[0].task.ID != "z_code_02" {
 		t.Fatalf("released fast slot was not reused deterministically: %#v", selected)
+	}
+}
+
+func TestPreflightVisualEvidenceFixRequiresConcreteSourceFinding(t *testing.T) {
+	designer := roles.Builtins()["designer"]
+	result := provider.Result{Status: "in_progress", Question: "Please provide an exact-head rendered frame or Playwright screenshot for this visual review.", Summary: "The restricted reviewer cannot launch Playwright, but found two source defects.", Findings: []model.Finding{
+		{Severity: "medium", Category: "layout validation", Location: "src/engine/layout.ts:462", Reason: "The measured label path does not reject a narrow overflow.", Resolution: "Add the existing narrow-width validation before rendering the label."},
+		{Severity: "medium", Category: "schema compatibility", Location: "src/project-model/schemas.ts:26", Reason: "The scene schema omits the compatible text-fit field used by the renderer.", Resolution: "Add the compatible optional field and validate it with the existing schema test."},
+		{Severity: "high", Category: "visual verification", Reason: "No exact-head rendered frames or browser capture were available.", Resolution: "Have the supervisor supply native captures of healthy, timeout, failure, and rebalance frames for final visual review."},
+	}}
+	if !preflightEvidenceFix(designer, result) {
+		t.Fatalf("concrete source defects plus supervisor-owned visual evidence request were not admitted: supervisor=%t visual=%t actionable=%t role=%+v", supervisorEvidenceRequest(result), visualEvidenceRequest(result), actionablePreflightSourceFinding(result.Findings[0]), designer)
+	}
+	if sources, ok := preflightEvidenceSourceFindings(designer, result); !ok || len(sources) != 2 || sources[1].Category != "schema compatibility" {
+		t.Fatalf("evidence-only visual finding was not partitioned from source repairs: %#v %t", sources, ok)
+	}
+
+	result.Findings[0].Reason = "The label looks wrong."
+	if preflightEvidenceFix(designer, result) {
+		t.Fatal("vague visual advice was admitted as a source repair")
+	}
+	result.Findings[0].Reason = "The measured label path does not reject a narrow overflow."
+	result.Question = "Provide an exact-head screenshot, then choose whether the product should permit clipping this caption."
+	if preflightEvidenceFix(designer, result) || !preflightHumanDecision(result) {
+		t.Fatal("product decision was admitted as a supervisor-owned evidence repair")
 	}
 }
 

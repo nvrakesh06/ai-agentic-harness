@@ -68,6 +68,7 @@ func findingsFingerprint(findings []model.Finding) string {
 }
 
 var directFixLocation = regexp.MustCompile(`^[A-Za-z0-9_./-]+\.(?:tsx|jsx|css|scss|html|vue|svelte):[1-9][0-9]*$`)
+var actionableSourceLocation = regexp.MustCompile(`^[A-Za-z0-9_./-]+\.[A-Za-z0-9_+-]+:[1-9][0-9]*$`)
 
 func directFixSensitive(text string) bool {
 	text = strings.ToLower(text)
@@ -77,6 +78,97 @@ func directFixSensitive(text string) bool {
 		}
 	}
 	return false
+}
+
+// preflightEvidenceFix is intentionally narrower than ordinary guidance. It
+// permits one implementer pass only when a pre-implementation specialist has
+// located a concrete source defect but cannot inspect the exact rendered frame
+// in its restricted environment. It does not make a visual approval claim:
+// final review must still receive supervisor-captured visual evidence.
+func preflightEvidenceFix(role roles.Role, result provider.Result) bool {
+	_, ok := preflightEvidenceSourceFindings(role, result)
+	return ok
+}
+
+// preflightEvidenceSourceFindings separates an evidence-only visual finding
+// from source repairs. A specialist may report that it cannot inspect the
+// rendered frame and still identify one or two exact source changes. Only the
+// latter are passed to the implementer; the former remains a final-review
+// requirement and can never count as visual approval.
+func preflightEvidenceSourceFindings(role roles.Role, result provider.Result) ([]model.Finding, bool) {
+	// UI tasks currently inject the built-in designer into preflight even though
+	// that reusable role is also configured as a review-stage validator.
+	preflightSpecialist := role.Stage == "pre-implementation" || role.Name == "designer"
+	if !preflightSpecialist || result.Status != "in_progress" ||
+		preflightHumanDecision(result) || !supervisorEvidenceRequest(result) || !visualEvidenceRequest(result) || len(result.Findings) == 0 {
+		return nil, false
+	}
+	sources := make([]model.Finding, 0, 2)
+	for _, finding := range result.Findings {
+		if actionablePreflightSourceFinding(finding) {
+			sources = append(sources, finding)
+			continue
+		}
+		if !preflightVisualEvidenceOnlyFinding(finding) {
+			return nil, false
+		}
+	}
+	return sources, len(sources) > 0 && len(sources) <= 2
+}
+
+func actionablePreflightSourceFinding(finding model.Finding) bool {
+	if !actionableSourceLocation.MatchString(strings.TrimSpace(finding.Location)) {
+		return false
+	}
+	severity := strings.ToLower(strings.TrimSpace(finding.Severity))
+	if severity != "high" && severity != "medium" {
+		return false
+	}
+	detail := strings.ToLower(strings.Join([]string{finding.Category, finding.Location, finding.Reason, finding.Resolution}, " "))
+	if strings.TrimSpace(finding.Category) == "" || strings.Contains(detail, "verification") || preflightEvidenceSensitive(detail) {
+		return false
+	}
+	for _, vague := range []string{"?", "maybe", "might", "consider", "investigate", "unclear", "unknown", "looks wrong", "make it better"} {
+		if strings.Contains(detail, vague) {
+			return false
+		}
+	}
+	return strings.TrimSpace(finding.Reason) != "" &&
+		containsAny(strings.ToLower(finding.Resolution), "use ", "replace", "apply", "add", "remove", "set ", "adjust", "ensure", "render", "measure", "validate", "test", "wrap")
+}
+
+func preflightVisualEvidenceOnlyFinding(finding model.Finding) bool {
+	category := strings.ToLower(strings.TrimSpace(finding.Category))
+	if !containsAny(category, "visual", "verification") {
+		return false
+	}
+	// The enclosing result has already been classified by the shared
+	// supervisorEvidenceRequest and visualEvidenceRequest helpers. Do not make
+	// this partition depend on a second copy of their request vocabulary: a
+	// finding can accurately say "have the supervisor supply captures" without
+	// repeating the word "provide". It must still name visual evidence and avoid
+	// a source location or a consequential scope marker.
+	text := strings.ToLower(strings.Join([]string{finding.Reason, finding.Resolution}, " "))
+	return strings.TrimSpace(finding.Location) == "" &&
+		containsAny(text, "rendered", "frame", "browser", "capture", "screenshot", "playwright", "visual evidence") &&
+		!preflightEvidenceSensitive(text)
+}
+
+func preflightEvidenceSensitive(text string) bool {
+	for _, marker := range []string{"security", "auth", "secret", "permission", "credential", "product decision", "choose whether", "accept risk", "authorize", "production access", "destructive migration", "api contract", "database", "network", "subprocess"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func preflightHumanDecision(result provider.Result) bool {
+	if result.Status != "blocked" && result.Status != "in_progress" {
+		return false
+	}
+	text := strings.ToLower(strings.Join([]string{result.Question, result.Summary, strings.Join(result.Risks, " ")}, " "))
+	return containsAny(text, "product decision", "choose whether", "accept risk", "authorize an exception", "approve an exception", "provide credentials", "threat model", "security boundary")
 }
 
 func directFixFinding(finding model.Finding, visualRoles map[string]bool) bool {
@@ -397,10 +489,24 @@ func (c *Controller) preflight(id string) {
 		}
 		result, roleErr := c.roleWithCompletion(c.ctx, effective, r, t, c.P.TaskPath(t), "Provide pre-implementation guidance for the assigned task.", "", "", func(s *model.Snapshot, result provider.Result, runErr error) error {
 			task := s.Tasks[id]
-			if task == nil || !preflightMatches(task.Preflight, task, effective) || runErr != nil || result.Status != "completed" || (r.Stage == "pre-implementation" && roles.Blocking(r, result.Findings)) {
+			if task == nil || !preflightMatches(task.Preflight, task, effective) || runErr != nil {
+				return nil
+			}
+			completed := result.Status == "completed" && !(r.Stage == "pre-implementation" && roles.Blocking(r, result.Findings))
+			evidenceFix := preflightEvidenceFix(r, result)
+			if !completed && !evidenceFix {
 				return nil
 			}
 			task.Decisions = append(task.Decisions, r.Name+": "+result.Summary)
+			if evidenceFix {
+				findings, _ := preflightEvidenceSourceFindings(r, result)
+				findings = append([]model.Finding(nil), findings...)
+				for index := range findings {
+					findings[index].Role = r.Name
+				}
+				task.Findings = appendUniqueFindings(task.Findings, findings)
+				task.Decisions = append(task.Decisions, r.Name+": supervisor-owned exact-head visual evidence requested; preserve the located source repairs for one bounded implementer pass. Final visual review must still use rendered evidence.")
+			}
 			task.Preflight.Completed = append(task.Preflight.Completed, r.Name)
 			task.Preflight.Phase = "queued"
 			return nil
@@ -416,12 +522,30 @@ func (c *Controller) preflight(id string) {
 			c.retry(id, "implementation", roleErr.Error())
 			return
 		}
+		if preflightEvidenceFix(r, result) {
+			_ = c.P.DB.Event(id, current.RunID, r.Name, effective.Project.Provider, "preflight_visual_evidence_fix_admitted", "exact-head visual evidence remains required for final review; concrete source findings preserved for one bounded implementer pass")
+			continue
+		}
 		if result.Status == "blocked" {
 			question := strings.TrimSpace(result.Question)
 			if question == "" {
 				question = "Resolve the pre-implementation guidance blocker."
 			}
 			c.block(id, question, result.Summary, model.Ready)
+			return
+		}
+		if preflightHumanDecision(result) {
+			question := strings.TrimSpace(result.Question)
+			if question == "" {
+				question = "Resolve the pre-implementation product decision."
+			}
+			c.block(id, question, result.Summary, model.Ready)
+			return
+		}
+		if result.Status == "in_progress" && supervisorEvidenceRequest(result) && visualEvidenceRequest(result) {
+			reason := "No concrete actionable source finding accompanied this exact-head visual evidence request. The specialist will not be rerun until visual capture is available."
+			_ = c.P.DB.Event(id, current.RunID, r.Name, effective.Project.Provider, "preflight_visual_evidence_unavailable", reason)
+			c.block(id, "Exact-head visual evidence is unavailable for pre-implementation guidance. Configure supervisor visual capture, then retry.", reason, model.Ready)
 			return
 		}
 		if result.Status != "completed" {

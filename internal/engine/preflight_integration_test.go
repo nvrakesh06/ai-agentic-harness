@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +19,165 @@ import (
 type heldPreflightProvider struct {
 	designers atomic.Int32
 	writers   atomic.Int32
+}
+
+type evidenceLoopProvider struct {
+	designers atomic.Int32
+	writers   atomic.Int32
+	decision  bool
+}
+
+func (p *evidenceLoopProvider) Name() string                   { return "codex" }
+func (p *evidenceLoopProvider) Validate(context.Context) error { return nil }
+func (p *evidenceLoopProvider) Run(ctx context.Context, request provider.Request) (provider.Result, error) {
+	switch request.Role {
+	case "designer":
+		p.designers.Add(1)
+		if p.decision {
+			return provider.Result{Schema: 1, Status: "in_progress", Question: "Provide an exact-head screenshot, then choose whether the product should permit clipping this caption.", Summary: "A product decision is required before changing the presentation.", Findings: preflightEvidenceLoopFindings()}, nil
+		}
+		return provider.Result{Schema: 1, Status: "in_progress", Question: "Please provide an exact-head rendered frame or Playwright screenshot for this visual review.", Summary: "The restricted designer cannot launch Playwright, but found two source defects.", Findings: preflightEvidenceLoopFindings()}, nil
+	case "implementer":
+		p.writers.Add(1)
+		<-ctx.Done()
+		return provider.Result{}, ctx.Err()
+	default:
+		return provider.Result{Schema: 1, Status: "completed"}, nil
+	}
+}
+
+func preflightEvidenceLoopFindings() []model.Finding {
+	return []model.Finding{
+		{Severity: "medium", Category: "layout validation", Location: "src/engine/layout.ts:462", Reason: "The measured label path does not reject a narrow overflow.", Resolution: "Add the existing narrow-width validation before rendering the label."},
+		{Severity: "medium", Category: "schema compatibility", Location: "src/project-model/schemas.ts:26", Reason: "The scene schema omits the compatible text-fit field used by the renderer.", Resolution: "Add the compatible optional field and validate it with the existing schema test."},
+		{Severity: "high", Category: "visual verification", Reason: "No exact-head rendered frames or browser capture were available.", Resolution: "Have the supervisor supply native captures of healthy, timeout, failure, and rebalance frames for final visual review."},
+	}
+}
+
+func TestPreflightEvidenceLoopAdmitsOneFixWithoutRepeatingDesigner(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	s, old, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective, err := engine.Canonical(ctx, f.P.Git)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := effective.BaseSHA
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Fix, Branch: "aih/ui", BaseSHA: base, HeadSHA: base, Attempts: 1}
+	s.Tasks[task.ID] = task
+	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, base); err != nil {
+		t.Fatal(err)
+	}
+	next, err := f.P.Git.StateCommit(ctx, old, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: old, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	workers := &evidenceLoopProvider{}
+	f.P.Provider = workers
+	c := engine.New(f.P)
+	done := make(chan error, 1)
+	go func() { done <- c.Serve(ctx) }()
+	deadline := time.NewTimer(60 * time.Second)
+	defer deadline.Stop()
+	for workers.writers.Load() == 0 {
+		select {
+		case err := <-done:
+			t.Fatalf("supervisor exited before admitting evidence-guided implementer fix: %v", err)
+		case <-deadline.C:
+			current := c.Snapshot().Tasks[task.ID]
+			t.Fatalf("designer calls=%d writer calls=%d state=%s preflight=%+v findings=%+v decisions=%q", workers.designers.Load(), workers.writers.Load(), current.State, current.Preflight, current.Findings, current.Decisions)
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	current := c.Snapshot().Tasks[task.ID]
+	if workers.designers.Load() != 1 || current.Preflight == nil || current.Preflight.HeadSHA != base || current.Preflight.Config != effective.Hash || !containsDecision(current.Decisions, "Final visual review must still use rendered evidence") || len(current.Findings) != 2 || current.Findings[1].Category != "schema compatibility" {
+		t.Fatalf("evidence-guided fix did not preserve exact-head guidance or bounded admission: designers=%d task=%#v", workers.designers.Load(), current)
+	}
+	cancel()
+	<-done
+}
+
+func TestPreflightEvidenceLoopBlocksProductDecisionWithoutImplementer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	s, old, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective, err := engine.Canonical(ctx, f.P.Git)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := effective.BaseSHA
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Fix, Branch: "aih/ui", BaseSHA: base, HeadSHA: base, Attempts: 1}
+	s.Tasks[task.ID] = task
+	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, base); err != nil {
+		t.Fatal(err)
+	}
+	next, err := f.P.Git.StateCommit(ctx, old, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: old, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	workers := &evidenceLoopProvider{decision: true}
+	f.P.Provider = workers
+	c := engine.New(f.P)
+	done := make(chan error, 1)
+	go func() { done <- c.Serve(ctx) }()
+	deadline := time.NewTimer(60 * time.Second)
+	defer deadline.Stop()
+	for {
+		snapshot := c.Snapshot()
+		if snapshot == nil {
+			continue
+		}
+		current := snapshot.Tasks[task.ID]
+		if current == nil {
+			continue
+		}
+		if current.State == model.Blocked {
+			if workers.designers.Load() != 1 || workers.writers.Load() != 0 {
+				t.Fatalf("product decision retried specialist or admitted writer: designers=%d writers=%d task=%#v", workers.designers.Load(), workers.writers.Load(), current)
+			}
+			cancel()
+			<-done
+			return
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("supervisor exited before preserving product decision: %v", err)
+		case <-deadline.C:
+			t.Fatalf("product decision was not blocked: designers=%d writers=%d snapshot=%#v", workers.designers.Load(), workers.writers.Load(), current)
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
+func containsDecision(decisions []string, want string) bool {
+	for _, decision := range decisions {
+		if strings.Contains(decision, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRecoveredCompletedDesignerIsNotRunAgain(t *testing.T) {
