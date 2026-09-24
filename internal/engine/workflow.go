@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -567,7 +568,14 @@ func (c *Controller) checkpoint(ctx context.Context, id string) error {
 	if sha == t.HeadSHA {
 		return nil
 	}
-	return c.save(ctx, func(s *model.Snapshot) error { s.Tasks[id].HeadSHA = sha; return nil }, gitx.Update{Branch: t.Branch, Old: t.HeadSHA, New: sha})
+	return c.save(ctx, func(s *model.Snapshot) error {
+		task := s.Tasks[id]
+		task.HeadSHA = sha
+		if task.VisualRequired != nil {
+			task.VisualRequired.Head = sha
+		}
+		return nil
+	}, gitx.Update{Branch: t.Branch, Old: t.HeadSHA, New: sha})
 }
 
 func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result provider.Result) error {
@@ -586,6 +594,9 @@ func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result 
 	return c.save(ctx, func(s *model.Snapshot) error {
 		task := s.Tasks[id]
 		task.HeadSHA = sha
+		if task.VisualRequired != nil {
+			task.VisualRequired.Head = sha
+		}
 		task.Summary = c.portable(result.Summary)
 		task.ReportedTests = portableStrings(c, result.Tests)
 		task.Risks = portableStrings(c, result.Risks)
@@ -912,6 +923,23 @@ func (c *Controller) retry(id, kind, reason string) {
 		} else {
 			task.FixCycles[kind] = count
 		}
+		if preflightErr == nil {
+			if direct := directFixRoute(effective, kind, task, preflightRoles); direct != nil {
+				task.Preflight = direct
+				allSatisfied := true
+				for _, role := range preflightRoles {
+					if !preflightRoleSatisfied(direct, task, effective, role) {
+						allSatisfied = false
+						break
+					}
+				}
+				if allSatisfied {
+					direct.Phase = "ready"
+				}
+				task.State = model.Fix
+				return nil
+			}
+		}
 		task.Findings = append(task.Findings, model.Finding{Severity: "high", Category: kind, Reason: reason, Role: kind})
 		task.State = model.Fix
 		if preflightErr == nil {
@@ -949,6 +977,12 @@ func (c *Controller) syncTask(ctx context.Context, id string) (config.Effective,
 		task.BaseSHA = base
 		task.SyncBase = ""
 		task.HeadSHA = head
+		if task.VisualRequired != nil {
+			task.VisualRequired.Base = base
+			task.VisualRequired.Head = head
+			task.VisualRequired.Config = effective.Hash
+			task.VisualRequired.Rules = roles.Hash()
+		}
 		task.State = model.Verifying
 		task.Evidence = nil
 		return nil
@@ -1028,6 +1062,14 @@ func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Ta
 	return outcomes
 }
 
+func visualRequirementMatches(task *model.Task, effective config.Effective) bool {
+	if task == nil || task.VisualRequired == nil {
+		return false
+	}
+	requirement := task.VisualRequired
+	return requirement.Base == effective.BaseSHA && requirement.Head == task.HeadSHA && requirement.Config == effective.Hash && requirement.Rules == roles.Hash()
+}
+
 func (c *Controller) preserveReviewFindings(id string, findings []model.Finding) error {
 	if len(findings) == 0 {
 		return nil
@@ -1091,6 +1133,17 @@ func (c *Controller) verifyReview(id string) error {
 	if e != nil {
 		return e
 	}
+	visualRequired := visualRequirementMatches(t, effective)
+	if visualRequired {
+		name := t.VisualRequired.Role
+		visualRole, ok := all[name]
+		if !ok || !designerReviewRole(visualRole) {
+			return errors.New("durable visual requirement has no configured visual reviewer")
+		}
+		if !slices.ContainsFunc(required, func(role roles.Role) bool { return role.Name == name }) {
+			required = append(required, visualRole)
+		}
+	}
 	roster, rosterReason := roles.ReviewRoster(required)
 	evidence := &model.Evidence{Base: t.BaseSHA, Head: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: checks, Reviews: map[string]string{}, ReviewRoster: roster, ReviewRosterReason: rosterReason, At: time.Now().UTC()}
 	if e = c.mutate(func(s *model.Snapshot) error {
@@ -1104,6 +1157,16 @@ func (c *Controller) verifyReview(id string) error {
 		return nil
 	}); e != nil {
 		return e
+	}
+	if visualRequired {
+		visual, visualErr := c.captureVisual(c.ctx, effective, t, dir)
+		if visualErr != nil {
+			return visualErr
+		}
+		evidence.Visual = visual
+		if e = c.publishReviewProgress(id, evidence); e != nil {
+			return e
+		}
 	}
 	if e = c.updatePR(id, true); e != nil {
 		return e
@@ -1221,6 +1284,10 @@ func (c *Controller) verifyReview(id string) error {
 			return c.refreshDraftPR(id)
 		}
 		_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_completed", "roles="+strings.Join(names, ",")+" head="+t.HeadSHA)
+	}
+	if visualRequired && (evidence.Visual == nil || strings.TrimSpace(evidence.Reviews[t.VisualRequired.Role]) == "") {
+		c.block(id, "Exact-head visual evidence and the designated visual review are required before merge.", "The durable preflight visual requirement was not satisfied; capture or reviewer completion is missing.", model.SyncRequired)
+		return c.refreshDraftPR(id)
 	}
 	if e = c.mutate(func(s *model.Snapshot) error {
 		task := s.Tasks[id]

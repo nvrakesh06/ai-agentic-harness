@@ -8,6 +8,7 @@ import (
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 )
 
@@ -39,6 +40,55 @@ func TestManyReadyPreflightsAreBoundedWithoutStarvingCoding(t *testing.T) {
 	selected = selectPreflights(s, active, guided, 2, 2, roles.Builtins())
 	if len(selected) != 1 || selected[0].task.ID != "z_code_02" {
 		t.Fatalf("released fast slot was not reused deterministically: %#v", selected)
+	}
+}
+
+func TestPreflightVisualEvidenceFixRequiresConcreteSourceFinding(t *testing.T) {
+	designer := roles.Builtins()["designer"]
+	result := provider.Result{Status: "in_progress", Question: "Please provide an exact-head rendered frame or Playwright screenshot for this visual review.", Summary: "The restricted reviewer cannot launch Playwright, but found two source defects.", Findings: []model.Finding{
+		{Severity: "medium", Category: "layout validation", Location: "src/engine/layout.ts:462", Reason: "The measured label path does not reject a narrow overflow.", Resolution: "Add the existing narrow-width validation before rendering the label."},
+		{Severity: "medium", Category: "schema compatibility", Location: "src/project-model/schemas.ts:26", Reason: "The scene schema omits the compatible text-fit field used by the renderer.", Resolution: "Add the compatible optional field and validate it with the existing schema test."},
+		{Severity: "high", Category: "visual verification", Location: "Rendered-frame evidence for head dae939776385f468aaf0818940925f384927782e", Reason: "No exact-head rendered frames or browser capture were available.", Resolution: "Have the supervisor supply native captures of healthy, timeout, failure, and rebalance frames for final visual review."},
+	}}
+	if !preflightEvidenceFix(designer, result) {
+		t.Fatalf("concrete source defects plus supervisor-owned visual evidence request were not admitted: supervisor=%t visual=%t actionable=%t role=%+v", supervisorEvidenceRequest(result), visualEvidenceRequest(result), actionablePreflightSourceFinding(result.Findings[0]), designer)
+	}
+	if sources, ok := preflightEvidenceSourceFindings(designer, result); !ok || len(sources) != 2 || sources[1].Category != "schema compatibility" {
+		t.Fatalf("evidence-only visual finding was not partitioned from source repairs: %#v %t", sources, ok)
+	}
+	result.Findings[2].Location = "src/renderer.tsx:1"
+	if preflightEvidenceFix(designer, result) {
+		t.Fatal("an arbitrary source path was accepted as rendered-frame evidence")
+	}
+	result.Findings[2].Location = "Rendered-frame evidence for head dae939776385f468aaf0818940925f384927782e"
+	noSource := provider.Result{Status: "in_progress", Question: "Please provide an exact-head rendered frame or Playwright screenshot for this visual review.", Summary: "The restricted designer cannot inspect the rendered frame."}
+	if !preflightVisualEvidenceDeferral(designer, noSource) {
+		t.Fatal("pure supervisor-owned visual evidence request was not eligible for configured final-review deferral")
+	}
+	if eligibleVisualPreflight(&model.Task{UI: true}, roles.Role{Name: "animation-preflight", Stage: "pre-implementation"}) || eligibleVisualPreflight(&model.Task{UI: false}, designer) {
+		t.Fatal("custom or non-UI preflight could create a final designer visual gate")
+	}
+
+	result.Findings[0].Reason = "The label looks wrong."
+	if preflightEvidenceFix(designer, result) {
+		t.Fatal("vague visual advice was admitted as a source repair")
+	}
+	result.Findings[0].Reason = "The measured label path does not reject a narrow overflow."
+	result.Question = "Provide an exact-head screenshot, then choose whether the product should permit clipping this caption."
+	if preflightEvidenceFix(designer, result) || !preflightHumanDecision(result) {
+		t.Fatal("product decision was admitted as a supervisor-owned evidence repair")
+	}
+}
+
+func TestVisualRequirementMatchesOnlyItsExactHeadAndPolicy(t *testing.T) {
+	effective := config.Effective{BaseSHA: strings.Repeat("a", 40), Hash: strings.Repeat("b", 64)}
+	task := &model.Task{HeadSHA: strings.Repeat("c", 40), VisualRequired: &model.VisualRequirement{Role: "designer", Base: effective.BaseSHA, Head: strings.Repeat("c", 40), Config: effective.Hash, Rules: roles.Hash(), Reason: "final rendered evidence required"}}
+	if !visualRequirementMatches(task, effective) {
+		t.Fatal("exact-head visual requirement was not recognized")
+	}
+	task.VisualRequired.Head = strings.Repeat("d", 40)
+	if visualRequirementMatches(task, effective) {
+		t.Fatal("stale visual requirement was accepted")
 	}
 }
 
@@ -229,6 +279,89 @@ func TestCompletedPreflightReusesOnlyBoundedUnchangedFixScope(t *testing.T) {
 			changed.update(p, task)
 			if reusablePreflightForFix(p, task, changed.eff, required) {
 				t.Fatal("stale or incomplete preflight was reusable")
+			}
+		})
+	}
+}
+
+func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
+	effective := config.Effective{BaseSHA: strings.Repeat("a", 40), Hash: strings.Repeat("b", 64), Files: map[string]string{
+		".aih/roles/animation-architecture.yaml": "name: animation-architecture\nextends: reviewer\nstage: review\n",
+		".aih/roles/visual-quality.yaml":         "name: visual-quality\nextends: designer\nstage: review\n",
+	}}
+	required := []roles.Role{{Name: "designer", Stage: "review"}, {Name: "animation-preflight", Stage: "pre-implementation"}}
+	task := &model.Task{
+		ID: "ui", State: model.Review, HeadSHA: strings.Repeat("c", 40), Objective: "Repair animation architecture caption layout", Acceptance: []string{"caption fits", "animation-architecture review completes"},
+		Areas: []string{"ui"}, Domains: []string{"ui"}, Risk: "high", Dependencies: []string{"semantic-engine"}, Roles: []string{"animation-architecture"}, UI: true,
+		Findings: []model.Finding{
+			{Role: "visual-quality", Severity: "high", Category: "text-layout", Location: "src/caption.tsx:42", Reason: "Caption overlaps the coordinator label at narrow widths.", Resolution: "Wrap the caption in the existing text-fit component."},
+			{Role: "visual-quality", Severity: "high", Category: "text-layout", Location: "src/labels.tsx:58", Reason: "Non-breaking-space labels bypass text-fit measurement and overflow.", Resolution: "Replace NBSP labels before the text-fit validation test."},
+		},
+	}
+	task.Evidence = &model.Evidence{Base: effective.BaseSHA, Head: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: []string{"native check passed"}, Reviews: map[string]string{"visual-quality": "two bounded layout defects", "animation-architecture": "completed", "qa": "completed", "security": "completed"}, ReviewRoster: []string{"animation-architecture", "qa", "security", "visual-quality"}}
+	p := directFixWaiver(task, effective, required)
+	if p == nil || p.DirectFix == nil || p.DirectFix.Role != "designer" || p.Phase != "queued" {
+		t.Fatalf("eligible exact-head review did not produce a structured designer waiver: %+v", p)
+	}
+	if directFixRoute(effective, "visual-quality", task, required) == nil {
+		t.Fatal("visual-quality retry did not take the direct designer route")
+	}
+	for _, role := range []string{"security", "animation-architecture"} {
+		if directFixRoute(effective, role, task, required) != nil {
+			t.Fatalf("%s retry took the direct designer route", role)
+		}
+	}
+	task.State = model.Fix
+	if !directFixWaiverMatches(p, task, effective) || !preflightRoleSatisfied(p, task, effective, required[0]) {
+		t.Fatal("valid direct FIX waiver was not accepted for the built-in designer")
+	}
+	if preflightRoleSatisfied(p, task, effective, required[1]) {
+		t.Fatal("direct FIX waiver completed a custom pre-implementation role")
+	}
+	vague := model.Clone(&model.Snapshot{Tasks: map[string]*model.Task{"ui": task}}).Tasks["ui"]
+	vague.State = model.Review
+	vague.Findings = []model.Finding{{Role: "visual-quality", Severity: "high", Category: "text-layout", Location: "src/labels.tsx:58", Reason: "Label looks wrong", Resolution: "Make label better."}}
+	if directFixWaiver(vague, effective, required) != nil {
+		t.Fatal("vague visual finding bypassed the designer preflight")
+	}
+	generic := model.Clone(&model.Snapshot{Tasks: map[string]*model.Task{"ui": task}}).Tasks["ui"]
+	generic.State = model.Review
+	generic.Findings = []model.Finding{{Role: "visual-quality", Severity: "high", Category: "layout", Location: "src/labels.tsx:58", Reason: "Spacing is wrong", Resolution: "Adjust layout"}}
+	if directFixWaiver(generic, effective, required) != nil {
+		t.Fatal("generic spacing/layout finding bypassed the designer preflight")
+	}
+	incompleteReview := model.Clone(&model.Snapshot{Tasks: map[string]*model.Task{"ui": task}}).Tasks["ui"]
+	incompleteReview.State = model.Review
+	delete(incompleteReview.Evidence.Reviews, "qa")
+	if directFixWaiver(incompleteReview, effective, required) != nil {
+		t.Fatal("missing QA review completion bypassed the designer preflight")
+	}
+	incompleteReview.State = model.Fix
+	if directFixWaiverMatches(p, incompleteReview, effective) {
+		t.Fatal("missing QA review completion was accepted on writer-admission replay")
+	}
+	for _, changed := range []struct {
+		name      string
+		edit      func(*model.Task)
+		effective config.Effective
+	}{
+		{"head", func(t *model.Task) { t.HeadSHA = strings.Repeat("d", 40) }, effective},
+		{"config", func(*model.Task) {}, config.Effective{BaseSHA: effective.BaseSHA, Hash: strings.Repeat("d", 64)}},
+		{"rules", func(*model.Task) {}, effective},
+		{"finding", func(t *model.Task) { t.Findings[0].Resolution = "Use a different component." }, effective},
+		{"security", func(t *model.Task) { t.Security = true }, effective},
+		{"schema path sensitivity", func(t *model.Task) { t.Areas = []string{"src/schema/labels.tsx"} }, effective},
+		{"dependency path sensitivity", func(t *model.Task) { t.Dependencies = []string{"src/schema-engine"} }, effective},
+	} {
+		t.Run(changed.name, func(t *testing.T) {
+			copy := model.Clone(&model.Snapshot{Tasks: map[string]*model.Task{"ui": task}}).Tasks["ui"]
+			changed.edit(copy)
+			if changed.name == "rules" {
+				p.DirectFix.Rules = strings.Repeat("d", 64)
+				defer func() { p.DirectFix.Rules = roles.Hash() }()
+			}
+			if directFixWaiverMatches(p, copy, changed.effective) {
+				t.Fatal("stale or sensitive direct FIX waiver was accepted")
 			}
 		})
 	}

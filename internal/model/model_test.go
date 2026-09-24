@@ -199,6 +199,23 @@ func TestSchemaThreeSnapshotMigratesVisualEvidenceAndRequiresMatchingConfig(t *t
 	}
 }
 
+func TestDirectFixWaiverRoundTripsAndRejectsIncompleteIdentity(t *testing.T) {
+	s := NewSnapshot("project123")
+	base, head := fmt.Sprintf("%040x", 1), fmt.Sprintf("%040x", 2)
+	configHash, rulesHash, scope, findings := fmt.Sprintf("%064x", 3), fmt.Sprintf("%064x", 4), fmt.Sprintf("%064x", 5), fmt.Sprintf("%064x", 6)
+	s.Tasks["task"] = &Task{ID: "task", State: Fix, HeadSHA: head, Preflight: &Preflight{Phase: "ready", BaseSHA: base, HeadSHA: head, Config: configHash, Rules: rulesHash, Scope: scope, DirectFix: &DirectFixWaiver{Role: "designer", Disposition: "waived", Reason: "exact-head visual repair", BaseSHA: base, HeadSHA: head, Config: configHash, Rules: rulesHash, Scope: scope, Findings: findings}}}
+	b, _ := json.Marshal(s)
+	decoded, changed, err := Decode(b)
+	if err != nil || changed || decoded.Tasks["task"].Preflight.DirectFix == nil || decoded.Tasks["task"].Preflight.DirectFix.Findings != findings {
+		t.Fatalf("direct FIX waiver did not round-trip: %#v changed=%t err=%v", decoded, changed, err)
+	}
+	s.Tasks["task"].Preflight.DirectFix.Findings = "not-a-fingerprint"
+	b, _ = json.Marshal(s)
+	if _, _, err = Decode(b); err == nil {
+		t.Fatal("incomplete direct FIX waiver identity accepted")
+	}
+}
+
 func TestEightVisualTargetsAndDiagnosticsRoundTrip(t *testing.T) {
 	s := NewSnapshot("project123")
 	head := strings.Repeat("a", 40)

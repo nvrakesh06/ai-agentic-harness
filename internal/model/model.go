@@ -16,7 +16,7 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 4
+const StateSchema = 5
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
@@ -55,57 +55,87 @@ var edges = map[State][]State{
 }
 
 type Task struct {
-	ID               string         `json:"id"`
-	ObjectiveID      string         `json:"objective_id"`
-	Issue            int            `json:"issue"`
-	PR               int            `json:"pr,omitempty"`
-	Title            string         `json:"title"`
-	Objective        string         `json:"objective"`
-	Acceptance       []string       `json:"acceptance"`
-	Dependencies     []string       `json:"dependencies"`
-	Areas            []string       `json:"areas"`
-	Domains          []string       `json:"conflict_domains"`
-	Risk             string         `json:"risk"`
-	UI               bool           `json:"ui"`
-	Security         bool           `json:"security"`
-	Roles            []string       `json:"roles"`
-	State            State          `json:"state"`
-	Branch           string         `json:"branch"`
-	BaseSHA          string         `json:"base_sha,omitempty"`
-	HeadSHA          string         `json:"head_sha,omitempty"`
-	MergeSHA         string         `json:"merge_sha,omitempty"`
-	PostVerifySHA    string         `json:"post_verify_sha,omitempty"`
-	RecoveryRequired bool           `json:"recovery_required,omitempty"`
-	SyncBase         string         `json:"conflict_base,omitempty"`
-	Attempts         int            `json:"attempts"`
-	Rotations        int            `json:"checkpoint_rotations"`
-	FixCycles        map[string]int `json:"fix_cycles"`
-	AdvisorUsed      bool           `json:"advisor_used"`
-	RunID            string         `json:"run_id,omitempty"`
-	Preflight        *Preflight     `json:"preflight,omitempty"`
-	Findings         []Finding      `json:"findings,omitempty"`
-	Summary          string         `json:"implementation_summary,omitempty"`
-	ReportedTests    []string       `json:"reported_tests,omitempty"`
-	Risks            []string       `json:"remaining_risks,omitempty"`
-	Decisions        []string       `json:"decisions,omitempty"`
-	Blocker          *Blocker       `json:"blocker,omitempty"`
-	Verification     *Verification  `json:"verification_retry_guard,omitempty"`
-	Evidence         *Evidence      `json:"evidence,omitempty"`
-	Updated          time.Time      `json:"updated"`
+	ID               string             `json:"id"`
+	ObjectiveID      string             `json:"objective_id"`
+	Issue            int                `json:"issue"`
+	PR               int                `json:"pr,omitempty"`
+	Title            string             `json:"title"`
+	Objective        string             `json:"objective"`
+	Acceptance       []string           `json:"acceptance"`
+	Dependencies     []string           `json:"dependencies"`
+	Areas            []string           `json:"areas"`
+	Domains          []string           `json:"conflict_domains"`
+	Risk             string             `json:"risk"`
+	UI               bool               `json:"ui"`
+	Security         bool               `json:"security"`
+	Roles            []string           `json:"roles"`
+	State            State              `json:"state"`
+	Branch           string             `json:"branch"`
+	BaseSHA          string             `json:"base_sha,omitempty"`
+	HeadSHA          string             `json:"head_sha,omitempty"`
+	MergeSHA         string             `json:"merge_sha,omitempty"`
+	PostVerifySHA    string             `json:"post_verify_sha,omitempty"`
+	RecoveryRequired bool               `json:"recovery_required,omitempty"`
+	SyncBase         string             `json:"conflict_base,omitempty"`
+	Attempts         int                `json:"attempts"`
+	Rotations        int                `json:"checkpoint_rotations"`
+	FixCycles        map[string]int     `json:"fix_cycles"`
+	AdvisorUsed      bool               `json:"advisor_used"`
+	RunID            string             `json:"run_id,omitempty"`
+	Preflight        *Preflight         `json:"preflight,omitempty"`
+	Findings         []Finding          `json:"findings,omitempty"`
+	Summary          string             `json:"implementation_summary,omitempty"`
+	ReportedTests    []string           `json:"reported_tests,omitempty"`
+	Risks            []string           `json:"remaining_risks,omitempty"`
+	Decisions        []string           `json:"decisions,omitempty"`
+	Blocker          *Blocker           `json:"blocker,omitempty"`
+	Verification     *Verification      `json:"verification_retry_guard,omitempty"`
+	Evidence         *Evidence          `json:"evidence,omitempty"`
+	VisualRequired   *VisualRequirement `json:"visual_required,omitempty"`
+	Updated          time.Time          `json:"updated"`
+}
+
+// VisualRequirement is a durable exact-head gate created when a preflight
+// specialist could identify source repairs but could not inspect a rendered
+// frame. It is not visual approval: final review must attach capture evidence
+// and the named visual reviewer must complete before integration is allowed.
+type VisualRequirement struct {
+	Role   string `json:"role"`
+	Base   string `json:"base"`
+	Head   string `json:"head"`
+	Config string `json:"config"`
+	Rules  string `json:"rules"`
+	Reason string `json:"reason"`
 }
 
 // Preflight is portable so completed reader guidance survives a controller restart.
 // Ready means the same source and policy may proceed to writer admission.
 type Preflight struct {
-	Phase       string   `json:"phase"`
-	BaseSHA     string   `json:"base_sha"`
-	HeadSHA     string   `json:"head_sha,omitempty"`
-	Config      string   `json:"config"`
-	Rules       string   `json:"rules"`
-	Scope       string   `json:"scope_fingerprint,omitempty"`
-	ReuseCount  int      `json:"reuse_count,omitempty"`
-	ReuseReason string   `json:"reuse_reason,omitempty"`
-	Completed   []string `json:"completed,omitempty"`
+	Phase       string           `json:"phase"`
+	BaseSHA     string           `json:"base_sha"`
+	HeadSHA     string           `json:"head_sha,omitempty"`
+	Config      string           `json:"config"`
+	Rules       string           `json:"rules"`
+	Scope       string           `json:"scope_fingerprint,omitempty"`
+	ReuseCount  int              `json:"reuse_count,omitempty"`
+	ReuseReason string           `json:"reuse_reason,omitempty"`
+	Completed   []string         `json:"completed,omitempty"`
+	DirectFix   *DirectFixWaiver `json:"direct_fix_waiver,omitempty"`
+}
+
+// DirectFixWaiver is an exact-review, exact-head exception for one built-in
+// pre-implementation role. It is separate from Completed: the role did not
+// run for this head, and every other required role still must complete.
+type DirectFixWaiver struct {
+	Role        string `json:"role"`
+	Disposition string `json:"disposition"`
+	Reason      string `json:"reason"`
+	BaseSHA     string `json:"base_sha"`
+	HeadSHA     string `json:"head_sha"`
+	Config      string `json:"config"`
+	Rules       string `json:"rules"`
+	Scope       string `json:"scope_fingerprint"`
+	Findings    string `json:"findings_fingerprint"`
 }
 
 // Guidance is encoded in the existing durable Decisions field so a correction
@@ -495,6 +525,14 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 				return nil, false, errors.New("invalid verification retry revision")
 			}
 		}
+		if v := t.VisualRequired; v != nil {
+			if v.Role == "" || !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(v.Role) ||
+				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.Base) ||
+				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.Head) ||
+				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Config) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Rules) || strings.TrimSpace(v.Reason) == "" {
+				return nil, false, errors.New("invalid visual requirement")
+			}
+		}
 		if p := t.Preflight; p != nil {
 			if p.Phase != "queued" && p.Phase != "waiting" && p.Phase != "running" && p.Phase != "ready" && p.Phase != "writing" {
 				return nil, false, errors.New("invalid preflight phase")
@@ -506,6 +544,15 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			}
 			if (p.Scope != "" && !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(p.Scope)) || p.ReuseCount < 0 {
 				return nil, false, errors.New("invalid preflight reuse identity")
+			}
+			if w := p.DirectFix; w != nil {
+				if w.Role != "designer" || w.Disposition != "waived" || strings.TrimSpace(w.Reason) == "" ||
+					!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(w.BaseSHA) ||
+					!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(w.HeadSHA) ||
+					!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(w.Config) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(w.Rules) ||
+					!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(w.Scope) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(w.Findings) {
+					return nil, false, errors.New("invalid direct FIX preflight waiver")
+				}
 			}
 		}
 		if t.Evidence != nil && t.Evidence.Visual != nil {
