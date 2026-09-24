@@ -29,7 +29,9 @@ const releaseTestTimeout = "15m"
 
 const releasePermitWait = 2 * time.Minute
 
-var newReleaseTestCommand = exec.CommandContext
+var releaseTestCommand = func() (string, []string) {
+	return "go", []string{"test", "-json", "-p=1", "./...", "-count=1", "-timeout", releaseTestTimeout}
+}
 
 func main() {
 	if e := release(); e != nil {
@@ -121,22 +123,16 @@ func release() error {
 // failed. The JSON stream distinguishes package results from arbitrary test
 // output, so a log line containing the word "fail" cannot cancel the gate.
 func runReleaseTests() error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	args := []string{"test", "-json", "-p=1", "./...", "-count=1", "-timeout", releaseTestTimeout}
-	fmt.Println("go", strings.Join(args, " "))
-	cmd := newReleaseTestCommand(ctx, "go", args...)
-	cmd.Stderr = os.Stderr
-	stdout, err := cmd.StdoutPipe()
+	name, args := releaseTestCommand()
+	fmt.Println(name, strings.Join(args, " "))
+	process, err := platform.StartManaged(context.Background(), "", nil, name, args...)
 	if err != nil {
 		return err
 	}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
+	defer process.Close()
 
 	var failedPackage string
-	scanner := bufio.NewScanner(stdout)
+	scanner := bufio.NewScanner(process.Stdout)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -144,15 +140,19 @@ func runReleaseTests() error {
 		var event struct {
 			Action  string
 			Package string
+			Test    string
 		}
-		if json.Unmarshal([]byte(line), &event) == nil && event.Action == "fail" && event.Package != "" {
+		if json.Unmarshal([]byte(line), &event) == nil && event.Action == "fail" && event.Package != "" && event.Test == "" {
 			failedPackage = event.Package
-			cancel()
+			process.Close()
 			break
 		}
 	}
 	scanErr := scanner.Err()
-	waitErr := cmd.Wait()
+	waitErr := process.Wait()
+	if stderr := process.Stderr(); stderr != "" {
+		fmt.Fprint(os.Stderr, stderr)
+	}
 	if scanErr != nil {
 		return fmt.Errorf("read go test JSON output: %w", scanErr)
 	}
