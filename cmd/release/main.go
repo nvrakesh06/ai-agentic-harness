@@ -56,11 +56,7 @@ func release() error {
 			return fmt.Errorf("HEAD must be tagged v%s", model.Version)
 		}
 	}
-	interrupt, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	ctx, cancel := context.WithTimeout(interrupt, releasePermitWait)
-	defer cancel()
-	releaseMachine, e := releaseMachinePermit(ctx)
+	releaseMachine, e := acquireReleaseMachinePermit()
 	if e != nil {
 		return e
 	}
@@ -114,6 +110,18 @@ func release() error {
 		return run(nil, "gh", args...)
 	}
 	return nil
+}
+
+// acquireReleaseMachinePermit owns its interrupt handler only while waiting for
+// capacity. Once the release starts child commands retain normal Ctrl+C
+// behavior instead of having this process consume the signal while holding the
+// machine slot.
+func acquireReleaseMachinePermit() (func(), error) {
+	interrupt, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	ctx, cancel := context.WithTimeout(interrupt, releasePermitWait)
+	defer cancel()
+	return releaseMachinePermit(ctx)
 }
 
 // releaseMachinePermit shares the native heavy-check slots used by supervised

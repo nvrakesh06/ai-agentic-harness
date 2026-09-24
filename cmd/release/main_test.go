@@ -13,9 +13,9 @@ import (
 func TestReleaseMachinePermitUsesCleanHomeWithoutInstallation(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AIH_HOME", home)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	release, err := releaseMachinePermit(ctx)
+	// Exercise the production acquisition wrapper; it tears down its temporary
+	// interrupt handler before returning the held slot to the release workflow.
+	release, err := acquireReleaseMachinePermit()
 	if err != nil {
 		t.Fatal(err)
 	}
