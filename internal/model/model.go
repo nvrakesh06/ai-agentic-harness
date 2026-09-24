@@ -16,12 +16,15 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 5
+const StateSchema = 6
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
 const MaxTaskGuidance = 8
 const MaxGuidanceBytes = 1600
+
+// MaxVisualEvidenceArtifacts includes up to eight screenshots and one shared diagnostic log.
+const MaxVisualEvidenceArtifacts = 9
 const guidancePrefix = "AIH_GUIDANCE_V1:"
 
 type State string
@@ -52,44 +55,45 @@ var edges = map[State][]State{
 }
 
 type Task struct {
-	ID               string             `json:"id"`
-	ObjectiveID      string             `json:"objective_id"`
-	Issue            int                `json:"issue"`
-	PR               int                `json:"pr,omitempty"`
-	Title            string             `json:"title"`
-	Objective        string             `json:"objective"`
-	Acceptance       []string           `json:"acceptance"`
-	Dependencies     []string           `json:"dependencies"`
-	Areas            []string           `json:"areas"`
-	Domains          []string           `json:"conflict_domains"`
-	Risk             string             `json:"risk"`
-	UI               bool               `json:"ui"`
-	Security         bool               `json:"security"`
-	Roles            []string           `json:"roles"`
-	State            State              `json:"state"`
-	Branch           string             `json:"branch"`
-	BaseSHA          string             `json:"base_sha,omitempty"`
-	HeadSHA          string             `json:"head_sha,omitempty"`
-	MergeSHA         string             `json:"merge_sha,omitempty"`
-	PostVerifySHA    string             `json:"post_verify_sha,omitempty"`
-	RecoveryRequired bool               `json:"recovery_required,omitempty"`
-	SyncBase         string             `json:"conflict_base,omitempty"`
-	Attempts         int                `json:"attempts"`
-	Rotations        int                `json:"checkpoint_rotations"`
-	FixCycles        map[string]int     `json:"fix_cycles"`
-	AdvisorUsed      bool               `json:"advisor_used"`
-	RunID            string             `json:"run_id,omitempty"`
-	Preflight        *Preflight         `json:"preflight,omitempty"`
-	Findings         []Finding          `json:"findings,omitempty"`
-	Summary          string             `json:"implementation_summary,omitempty"`
-	ReportedTests    []string           `json:"reported_tests,omitempty"`
-	Risks            []string           `json:"remaining_risks,omitempty"`
-	Decisions        []string           `json:"decisions,omitempty"`
-	Blocker          *Blocker           `json:"blocker,omitempty"`
-	Verification     *Verification      `json:"verification_retry_guard,omitempty"`
-	Evidence         *Evidence          `json:"evidence,omitempty"`
-	VisualRequired   *VisualRequirement `json:"visual_required,omitempty"`
-	Updated          time.Time          `json:"updated"`
+	ID               string                      `json:"id"`
+	ObjectiveID      string                      `json:"objective_id"`
+	Issue            int                         `json:"issue"`
+	PR               int                         `json:"pr,omitempty"`
+	Title            string                      `json:"title"`
+	Objective        string                      `json:"objective"`
+	Acceptance       []string                    `json:"acceptance"`
+	Dependencies     []string                    `json:"dependencies"`
+	Areas            []string                    `json:"areas"`
+	Domains          []string                    `json:"conflict_domains"`
+	Risk             string                      `json:"risk"`
+	UI               bool                        `json:"ui"`
+	Security         bool                        `json:"security"`
+	Roles            []string                    `json:"roles"`
+	State            State                       `json:"state"`
+	Branch           string                      `json:"branch"`
+	BaseSHA          string                      `json:"base_sha,omitempty"`
+	HeadSHA          string                      `json:"head_sha,omitempty"`
+	MergeSHA         string                      `json:"merge_sha,omitempty"`
+	PostVerifySHA    string                      `json:"post_verify_sha,omitempty"`
+	RecoveryRequired bool                        `json:"recovery_required,omitempty"`
+	SyncBase         string                      `json:"conflict_base,omitempty"`
+	Attempts         int                         `json:"attempts"`
+	Rotations        int                         `json:"checkpoint_rotations"`
+	FixCycles        map[string]int              `json:"fix_cycles"`
+	AdvisorUsed      bool                        `json:"advisor_used"`
+	RunID            string                      `json:"run_id,omitempty"`
+	Preflight        *Preflight                  `json:"preflight,omitempty"`
+	Findings         []Finding                   `json:"findings,omitempty"`
+	Summary          string                      `json:"implementation_summary,omitempty"`
+	ReportedTests    []string                    `json:"reported_tests,omitempty"`
+	Risks            []string                    `json:"remaining_risks,omitempty"`
+	Decisions        []string                    `json:"decisions,omitempty"`
+	Blocker          *Blocker                    `json:"blocker,omitempty"`
+	Verification     *Verification               `json:"verification_retry_guard,omitempty"`
+	Evidence         *Evidence                   `json:"evidence,omitempty"`
+	ReviewProvenance map[string]ReviewProvenance `json:"review_provenance,omitempty"`
+	VisualRequired   *VisualRequirement          `json:"visual_required,omitempty"`
+	Updated          time.Time                   `json:"updated"`
 }
 
 // VisualRequirement is a durable exact-head gate created when a preflight
@@ -329,18 +333,47 @@ type Finding struct {
 	Role       string `json:"role,omitempty"`
 }
 type Evidence struct {
-	Base               string            `json:"base"`
-	Head               string            `json:"head"`
-	Config             string            `json:"config"`
-	Rules              string            `json:"rules"`
-	Checks             []string          `json:"checks"`
-	Visual             *VisualEvidence   `json:"visual,omitempty"`
-	Reviews            map[string]string `json:"reviews"`
-	ReviewRoster       []string          `json:"review_roster,omitempty"`
-	ReviewRosterReason string            `json:"review_roster_reason,omitempty"`
-	IntegrationSHA     string            `json:"integration_sha,omitempty"`
-	IntegrationOwner   string            `json:"integration_owner,omitempty"`
-	At                 time.Time         `json:"at"`
+	Base               string                       `json:"base"`
+	Head               string                       `json:"head"`
+	Config             string                       `json:"config"`
+	Rules              string                       `json:"rules"`
+	Checks             []string                     `json:"checks"`
+	Visual             *VisualEvidence              `json:"visual,omitempty"`
+	Reviews            map[string]string            `json:"reviews"`
+	ReviewRoster       []string                     `json:"review_roster,omitempty"`
+	ReviewRosterReason string                       `json:"review_roster_reason,omitempty"`
+	ReviewScope        string                       `json:"review_scope,omitempty"`
+	ReviewDispositions map[string]ReviewDisposition `json:"review_dispositions,omitempty"`
+	IntegrationSHA     string                       `json:"integration_sha,omitempty"`
+	IntegrationOwner   string                       `json:"integration_owner,omitempty"`
+	At                 time.Time                    `json:"at"`
+}
+
+// ReviewProvenance survives the normal evidence reset between bounded FIX
+// cycles. It records a completed, zero-finding review without treating that
+// older review as exact-head evidence for a later merge.
+type ReviewProvenance struct {
+	Role        string    `json:"role"`
+	Base        string    `json:"base"`
+	Head        string    `json:"head"`
+	Config      string    `json:"config"`
+	Rules       string    `json:"rules"`
+	Roster      []string  `json:"roster"`
+	Scope       string    `json:"scope"`
+	Provider    string    `json:"provider"`
+	Runtime     string    `json:"runtime"`
+	Summary     string    `json:"summary"`
+	CompletedAt time.Time `json:"completed_at"`
+}
+
+// ReviewDisposition proves how each required final review role was satisfied.
+// completed is exact-head; reused is an explicitly narrow policy exception
+// whose source remains visible to operators and final integration.
+type ReviewDisposition struct {
+	Disposition string `json:"disposition"`
+	Reason      string `json:"reason,omitempty"`
+	SourceHead  string `json:"source_head"`
+	Runtime     string `json:"runtime"`
 }
 
 // VisualEvidence references supervisor-owned local capture artifacts. Image
@@ -558,13 +591,31 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.Head) ||
 				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Config) ||
 				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.ManifestSHA256) ||
-				len(v.Summary) > 1000 || len(v.Artifacts) < 1 || len(v.Artifacts) > 8 ||
+				len(v.Summary) > 1000 || len(v.Artifacts) < 1 || len(v.Artifacts) > MaxVisualEvidenceArtifacts ||
 				v.Manifest != "visual-evidence/"+id+"/"+v.Head+"-"+v.Config[:16]+"/manifest.json" {
 				return nil, false, errors.New("invalid visual evidence reference")
 			}
 			for _, artifact := range v.Artifacts {
 				if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}\.(png|jpg|jpeg|txt|json)$`).MatchString(artifact.Path) || strings.Contains(artifact.Path, "..") || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(artifact.SHA256) {
 					return nil, false, errors.New("invalid visual artifact reference")
+				}
+			}
+		}
+		for role, provenance := range t.ReviewProvenance {
+			if err := validReviewProvenance(role, provenance); err != nil {
+				return nil, false, err
+			}
+		}
+		if t.Evidence != nil {
+			if t.Evidence.ReviewScope != "" && !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(t.Evidence.ReviewScope) {
+				return nil, false, errors.New("invalid review scope")
+			}
+			for role, disposition := range t.Evidence.ReviewDispositions {
+				if !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(role) ||
+					(disposition.Disposition != "completed" && disposition.Disposition != "reused") ||
+					!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(disposition.SourceHead) ||
+					strings.TrimSpace(disposition.Runtime) == "" || len(disposition.Runtime) > 160 || len(disposition.Reason) > 500 {
+					return nil, false, errors.New("invalid review disposition")
 				}
 			}
 		}
@@ -634,6 +685,27 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		}
 	}
 	return &s, migrated, nil
+}
+
+func validReviewProvenance(role string, provenance ReviewProvenance) error {
+	if !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(role) || provenance.Role != role ||
+		!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(provenance.Base) ||
+		!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(provenance.Head) ||
+		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(provenance.Config) ||
+		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(provenance.Rules) ||
+		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(provenance.Scope) ||
+		len(provenance.Roster) == 0 || strings.TrimSpace(provenance.Provider) == "" || len(provenance.Provider) > 80 ||
+		strings.TrimSpace(provenance.Runtime) == "" || len(provenance.Runtime) > 160 || len(provenance.Summary) > 4000 || provenance.CompletedAt.IsZero() {
+		return errors.New("invalid review provenance")
+	}
+	seen := map[string]bool{}
+	for _, name := range provenance.Roster {
+		if !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(name) || seen[name] {
+			return errors.New("invalid review provenance roster")
+		}
+		seen[name] = true
+	}
+	return nil
 }
 func Transition(t *Task, to State) error {
 	for _, s := range edges[t.State] {

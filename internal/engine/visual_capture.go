@@ -40,8 +40,23 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
 )
 
-const visualFileLimit = 8 << 20
+const (
+	visualFileLimit      = 8 << 20
+	visualArtifactLimit  = model.MaxVisualEvidenceArtifacts
+	visualAggregateLimit = 64 << 20
+)
 const visualReadyPrefix = "AIH_VISUAL_READY "
+
+const (
+	visualSealVersion     = 2
+	visualSealEnvironment = "detached-checkout-v1"
+)
+
+var errLegacyVisualSeal = errors.New("visual capture seal lacks detached checkout provenance")
+
+var runVisualBrowser = func(ctx context.Context, dir string, env []string, runner string) (string, error) {
+	return platform.Run(ctx, dir, env, "", "node", runner)
+}
 
 // The runner is deliberately AIH-owned. It creates a fresh browser context,
 // pins its viewport/channel, and aborts every request whose origin differs
@@ -63,7 +78,9 @@ const output = process.env.AIH_VISUAL_OUTPUT_DIR;
 const head = process.env.AIH_VISUAL_HEAD;
 const target = process.env.AIH_VISUAL_URL;
 const origin = new URL(target).origin;
+const targets = JSON.parse(process.env.AIH_VISUAL_TARGETS);
 const network = [];
+const record = line => { if (network.length < 512) network.push(line.slice(0, 512)); };
 let browser;
 try {
   browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -71,37 +88,46 @@ try {
   console.error('AIH_VISUAL_UNAVAILABLE:browser-launch');
   process.exit(78);
 }
-let context;
+const captured = [];
 try {
-  context = await browser.newContext({ viewport: { width: 1280, height: 720 }, serviceWorkers: 'block' });
-  if (typeof context.route !== 'function' || typeof context.routeWebSocket !== 'function') throw new Error('missing route API');
-} catch {
+  for (const item of targets) {
+    const targetURL = new URL(item.path, target);
+    if (targetURL.origin !== origin) throw new Error('target escaped AIH gateway');
+    let context;
+    try {
+      context = await browser.newContext({ viewport: { width: item.width, height: item.height }, serviceWorkers: 'block' });
+      if (typeof context.route !== 'function' || typeof context.routeWebSocket !== 'function') throw new Error('missing route API');
+    } catch {
+      console.error('AIH_VISUAL_UNAVAILABLE:playwright-api');
+      process.exit(78);
+    }
+    await context.route('**/*', async route => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.origin !== origin) { record(item.id + ' BLOCKED ' + request.method() + ' ' + url.origin); return route.abort('blockedbyclient'); }
+      const response = await route.fetch({ maxRedirects: 0 });
+      const location = response.headers()['location'];
+      if (location && new URL(location, url).origin !== origin) { record(item.id + ' BLOCKED REDIRECT ' + new URL(location, url).origin); return route.abort('blockedbyclient'); }
+      return route.fulfill({ response });
+    });
+    await context.routeWebSocket('**/*', async ws => {
+      const url = new URL(ws.url());
+      if (url.origin !== origin.replace(/^http/, 'ws')) { record(item.id + ' BLOCKED WEBSOCKET ' + url.origin); return ws.close(); }
+      await ws.connectToServer();
+    });
+    context.on('response', response => record(item.id + ' ' + response.request().method() + ' ' + response.status() + ' ' + new URL(response.url()).pathname));
+    const page = await context.newPage();
+    await page.goto(targetURL.href, { waitUntil: 'networkidle' });
+    const screenshot = item.id + '.png';
+    await page.screenshot({ path: join(output, screenshot) });
+    captured.push({ id: item.id, path: item.path, width: item.width, height: item.height, screenshot });
+    await context.close();
+  }
+  writeFileSync(join(output, 'network.txt'), network.join('\n'));
+  writeFileSync(join(output, 'manifest.json'), JSON.stringify({ head, summary: 'AIH-owned browser capture', artifacts: [...captured.map(item => item.screenshot), 'network.txt'], targets: captured }));
+} finally {
   await browser.close();
-  console.error('AIH_VISUAL_UNAVAILABLE:playwright-api');
-  process.exit(78);
 }
-await context.route('**/*', async route => {
-  const request = route.request();
-  const url = new URL(request.url());
-  if (url.origin !== origin) { network.push('BLOCKED ' + request.method() + ' ' + url.origin); return route.abort('blockedbyclient'); }
-  const response = await route.fetch({ maxRedirects: 0 });
-  const location = response.headers()['location'];
-  if (location && new URL(location, url).origin !== origin) { network.push('BLOCKED REDIRECT ' + new URL(location, url).origin); return route.abort('blockedbyclient'); }
-  return route.fulfill({ response });
-});
-await context.routeWebSocket('**/*', async ws => {
-  const url = new URL(ws.url());
-  if (url.origin !== origin.replace(/^http/, 'ws')) { network.push('BLOCKED WEBSOCKET ' + url.origin); return ws.close(); }
-  await ws.connectToServer();
-});
-context.on('response', response => network.push(response.request().method() + ' ' + response.status() + ' ' + new URL(response.url()).pathname));
-const page = await context.newPage();
-await page.goto(target, { waitUntil: 'networkidle' });
-await page.screenshot({ path: join(output, 'desktop.png') });
-writeFileSync(join(output, 'network.txt'), network.join('\n'));
-writeFileSync(join(output, 'manifest.json'), JSON.stringify({ head, summary: 'AIH-owned browser capture', artifacts: ['desktop.png', 'network.txt'] }));
-await context.close();
-await browser.close();
 `
 
 // visualCaptureUnavailableError denotes a supervisor capability problem. It
@@ -113,6 +139,104 @@ func (e *visualCaptureUnavailableError) Error() string {
 	return "visual capture unavailable: " + e.err.Error()
 }
 func (e *visualCaptureUnavailableError) Unwrap() error { return e.err }
+
+// visualCheckout is a one-capture, AIH-owned source tree. Its marker is kept
+// beside the checkout so source cleanliness remains meaningful.
+type visualCheckout struct {
+	path   string
+	root   string
+	marker string
+	head   string
+	git    gitx.Git
+}
+
+func (v *visualCheckout) Close(ctx context.Context) error {
+	if v == nil || v.path == "" {
+		return nil
+	}
+	marker, err := os.ReadFile(v.marker)
+	if err != nil || string(marker) != v.path+"\n"+v.head+"\n" {
+		return errors.New("visual checkout ownership marker is unavailable")
+	}
+	if err = mustResolveTo(v.root, v.root); err != nil {
+		return fmt.Errorf("unsafe visual checkout root: %w", err)
+	}
+	if err = mustResolveTo(v.path, v.path); err != nil || !pathWithin(v.root, v.path) {
+		return errors.New("visual checkout path escapes its AIH-owned root")
+	}
+	info, err := os.Lstat(v.path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("visual checkout is not a plain directory")
+	}
+	if _, err = v.git.Run(ctx, "", "worktree", "remove", "--force", v.path); err != nil {
+		return fmt.Errorf("remove AIH-owned visual checkout: %w", err)
+	}
+	v.path = ""
+	if err = os.Remove(v.marker); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// newVisualCheckout creates a non-reusable detached worktree from the control
+// repository. The control repository, unlike a writer worktree, contains only
+// tracked objects fetched by AIH. A new path is deliberately used for every
+// capture so a restart cannot inherit a prepared runtime for another head.
+func (c *Controller) newVisualCheckout(ctx context.Context, task *model.Task) (*visualCheckout, error) {
+	if c.P == nil || !visualTaskID.MatchString(task.ID) || !visualRevision.MatchString(task.HeadSHA) {
+		return nil, errors.New("visual checkout needs a safe task identity and exact head")
+	}
+	project, err := filepath.EvalSymlinks(c.P.Dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve AIH project directory: %w", err)
+	}
+	root := filepath.Join(project, "visual-checkouts")
+	if err = os.Mkdir(root, 0700); err != nil && !os.IsExist(err) {
+		return nil, err
+	}
+	if err = mustResolveTo(root, root); err != nil {
+		return nil, fmt.Errorf("unsafe visual checkout root: %w", err)
+	}
+	owned := filepath.Join(root, ".owned")
+	if err = os.Mkdir(owned, 0700); err != nil && !os.IsExist(err) {
+		return nil, err
+	}
+	if err = mustResolveTo(owned, owned); err != nil {
+		return nil, fmt.Errorf("unsafe visual checkout ownership root: %w", err)
+	}
+	path, err := os.MkdirTemp(root, ".capture-")
+	if err != nil {
+		return nil, err
+	}
+	checkout := &visualCheckout{path: path, root: root, marker: filepath.Join(owned, filepath.Base(path)), head: task.HeadSHA, git: c.P.Git}
+	if err = os.WriteFile(checkout.marker, []byte(path+"\n"+task.HeadSHA+"\n"), 0600); err != nil {
+		_ = os.Remove(path)
+		return nil, err
+	}
+	if err = c.P.Git.Detached(ctx, path, task.HeadSHA); err != nil {
+		_ = os.Remove(checkout.marker)
+		_ = os.Remove(path)
+		return nil, err
+	}
+	sha, err := (gitx.Git{Dir: path}).SHA(ctx, "HEAD")
+	if err != nil || sha != task.HeadSHA {
+		_ = checkout.Close(context.Background())
+		return nil, errors.New("detached visual checkout is not at the reviewed head")
+	}
+	return checkout, nil
+}
+
+func visualEnvironment(cache string, extra ...string) []string {
+	env := make([]string, 0, len(os.Environ())+len(extra)+3)
+	for _, item := range cleanEnvironment() {
+		key := strings.ToUpper(strings.SplitN(item, "=", 2)[0])
+		if key == "NODE_PATH" || key == "NODE_OPTIONS" || key == "PLAYWRIGHT_BROWSERS_PATH" || strings.HasSuffix(key, "_CACHE") || strings.HasPrefix(key, "NPM_CONFIG_") || strings.HasPrefix(key, "PNPM_") || strings.HasPrefix(key, "YARN_") || strings.HasPrefix(key, "BUN_") {
+			continue
+		}
+		env = append(env, item)
+	}
+	return append(env, append([]string{"AIH_VISUAL_CACHE_DIR=" + cache, "XDG_CACHE_HOME=" + cache, "PLAYWRIGHT_BROWSERS_PATH=" + filepath.Join(cache, "playwright-browsers")}, extra...)...)
+}
 
 func visualCaptureRunError(command string, err error, output string) error {
 	if errors.Is(err, exec.ErrNotFound) {
@@ -274,9 +398,18 @@ func startVisualGateway(ctx context.Context, target *url.URL, cert *x509.Certifi
 }
 
 type visualManifest struct {
-	Head      string   `json:"head"`
-	Summary   string   `json:"summary"`
-	Artifacts []string `json:"artifacts"`
+	Head      string                 `json:"head"`
+	Summary   string                 `json:"summary"`
+	Artifacts []string               `json:"artifacts"`
+	Targets   []visualManifestTarget `json:"targets,omitempty"`
+}
+
+type visualManifestTarget struct {
+	ID         string `json:"id"`
+	Path       string `json:"path"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
+	Screenshot string `json:"screenshot"`
 }
 
 var visualName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}\.(png|jpg|jpeg|txt|json)$`)
@@ -284,49 +417,55 @@ var visualTaskID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`)
 var visualRevision = regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)
 var visualHash = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
-func visualArtifact(root, name string) (model.VisualArtifact, error) {
+func visualArtifact(root, name string) (model.VisualArtifact, image.Config, error) {
 	if !visualName.MatchString(name) || strings.Contains(name, "..") {
-		return model.VisualArtifact{}, errors.New("visual artifact name must be a flat safe filename")
+		return model.VisualArtifact{}, image.Config{}, errors.New("visual artifact name must be a flat safe filename")
 	}
 	path := filepath.Join(root, name)
 	info, err := os.Lstat(path)
 	if err != nil {
-		return model.VisualArtifact{}, err
+		return model.VisualArtifact{}, image.Config{}, err
 	}
 	if !info.Mode().IsRegular() || info.Size() > visualFileLimit {
-		return model.VisualArtifact{}, errors.New("visual artifact must be a regular file <= 8 MiB")
+		return model.VisualArtifact{}, image.Config{}, errors.New("visual artifact must be a regular file <= 8 MiB")
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return model.VisualArtifact{}, err
+		return model.VisualArtifact{}, image.Config{}, err
 	}
 	defer f.Close()
 	h := sha256.New()
 	if _, err = io.Copy(h, io.LimitReader(f, visualFileLimit+1)); err != nil {
-		return model.VisualArtifact{}, err
+		return model.VisualArtifact{}, image.Config{}, err
 	}
+	var dimensions image.Config
 	if strings.HasSuffix(name, ".png") || strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".jpeg") {
 		if _, err = f.Seek(0, io.SeekStart); err != nil {
-			return model.VisualArtifact{}, err
+			return model.VisualArtifact{}, image.Config{}, err
 		}
-		imageConfig, _, decodeErr := image.DecodeConfig(f)
-		if decodeErr != nil || imageConfig.Width < 1 || imageConfig.Height < 1 || imageConfig.Width > 4096 || imageConfig.Height > 4096 {
-			return model.VisualArtifact{}, errors.New("visual screenshot must be a valid image <= 4096x4096")
+		var decodeErr error
+		dimensions, _, decodeErr = image.DecodeConfig(f)
+		if decodeErr != nil || dimensions.Width < 1 || dimensions.Height < 1 || dimensions.Width > 4096 || dimensions.Height > 4096 {
+			return model.VisualArtifact{}, image.Config{}, errors.New("visual screenshot must be a valid image <= 4096x4096")
 		}
 	}
 	if strings.HasSuffix(name, ".txt") || strings.HasSuffix(name, ".json") {
 		body, err := os.ReadFile(path)
 		if err != nil {
-			return model.VisualArtifact{}, err
+			return model.VisualArtifact{}, image.Config{}, err
 		}
 		if err = safety.Check(string(body)); err != nil {
-			return model.VisualArtifact{}, err
+			return model.VisualArtifact{}, image.Config{}, err
 		}
 	}
-	return model.VisualArtifact{Path: name, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
+	return model.VisualArtifact{Path: name, SHA256: hex.EncodeToString(h.Sum(nil))}, dimensions, nil
 }
 
 func loadVisualEvidence(dir, taskID, head, configHash string) (*model.VisualEvidence, error) {
+	return loadVisualEvidenceForTargets(dir, taskID, head, configHash, nil)
+}
+
+func loadVisualEvidenceForTargets(dir, taskID, head, configHash string, targets []config.VisualCaptureTarget) (*model.VisualEvidence, error) {
 	manifestPath := filepath.Join(dir, "manifest.json")
 	info, err := os.Lstat(manifestPath)
 	if err != nil {
@@ -349,47 +488,95 @@ func loadVisualEvidence(dir, taskID, head, configHash string) (*model.VisualEvid
 	if m.Head != head {
 		return nil, errors.New("visual manifest captured head differs from reviewed head")
 	}
-	if len(m.Summary) > 1000 || len(m.Artifacts) == 0 || len(m.Artifacts) > 8 {
-		return nil, errors.New("visual manifest needs a bounded summary and 1..8 artifacts")
+	if len(m.Summary) > 1000 || len(m.Artifacts) == 0 || len(m.Artifacts) > visualArtifactLimit {
+		return nil, errors.New("visual manifest needs a bounded summary and 1..9 artifacts")
 	}
 	seen := map[string]bool{}
 	artifacts := make([]model.VisualArtifact, 0, len(m.Artifacts))
+	images := map[string]image.Config{}
 	var total int64
-	image := false
+	hasImage := false
 	for _, name := range m.Artifacts {
 		if seen[name] {
 			return nil, errors.New("duplicate visual artifact")
 		}
 		seen[name] = true
-		artifact, err := visualArtifact(dir, name)
+		artifact, dimensions, err := visualArtifact(dir, name)
 		if err != nil {
 			return nil, err
 		}
 		info, _ := os.Stat(filepath.Join(dir, name))
 		total += info.Size()
-		if total > 16<<20 {
-			return nil, errors.New("visual artifacts exceed 16 MiB")
+		if total > visualAggregateLimit {
+			return nil, errors.New("visual artifacts exceed 64 MiB")
 		}
 		if strings.HasSuffix(name, ".png") || strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".jpeg") {
-			image = true
+			hasImage = true
+			images[name] = dimensions
 		}
 		artifacts = append(artifacts, artifact)
 	}
-	if !image {
+	if !hasImage {
 		return nil, errors.New("visual manifest contains no screenshot")
+	}
+	if err := validateVisualManifestTargets(m, targets, images); err != nil {
+		return nil, err
 	}
 	manifestHash := sha256.Sum256(body)
 	return &model.VisualEvidence{Head: head, Config: configHash, Manifest: filepath.ToSlash(filepath.Join("visual-evidence", taskID, head+"-"+configHash[:16], "manifest.json")), ManifestSHA256: hex.EncodeToString(manifestHash[:]), Artifacts: artifacts, Summary: m.Summary}, nil
 }
 
-// The supervisor writes this seal after validation. On reuse, compare the
-// manifest and every artifact hash with the original accepted capture.
+func validateVisualManifestTargets(m visualManifest, expected []config.VisualCaptureTarget, images map[string]image.Config) error {
+	if len(expected) == 0 {
+		return nil // legacy callers and pre-target captures remain readable.
+	}
+	if len(m.Targets) != len(expected) || len(m.Artifacts) != len(expected)+1 {
+		return errors.New("visual manifest target mapping does not match configured targets")
+	}
+	artifactNames := map[string]bool{}
+	for _, artifact := range m.Artifacts {
+		artifactNames[artifact] = true
+	}
+	if !artifactNames["network.txt"] {
+		return errors.New("visual manifest target mapping is missing network diagnostics")
+	}
+	seen := map[string]bool{}
+	for i, target := range expected {
+		got := m.Targets[i]
+		filename := target.ID + ".png"
+		if got.ID != target.ID || got.Path != target.Path || got.Width != target.Width || got.Height != target.Height || got.Screenshot != filename || seen[got.ID] {
+			return errors.New("visual manifest target mapping does not match configured targets")
+		}
+		if !artifactNames[filename] {
+			return errors.New("visual manifest target mapping is missing a screenshot artifact")
+		}
+		seen[got.ID] = true
+		dimensions, ok := images[filename]
+		if !ok || dimensions.Width != target.Width || dimensions.Height != target.Height {
+			return errors.New("visual screenshot dimensions do not match its configured viewport")
+		}
+	}
+	if len(images) != len(expected) {
+		return errors.New("visual manifest contains an unmapped screenshot")
+	}
+	return nil
+}
+
+// The supervisor writes this seal after validation. Version 2 binds reuse to
+// the detached-checkout capture environment. Older seals predate that boundary
+// and must be quarantined and recaptured rather than being treated as proof.
+type visualEvidenceSeal struct {
+	Version     int                  `json:"version"`
+	Environment string               `json:"environment"`
+	Evidence    model.VisualEvidence `json:"evidence"`
+}
+
 func sealVisualEvidence(dir string, evidence *model.VisualEvidence) error {
 	f, err := os.OpenFile(filepath.Join(dir, "capture-seal.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
-	err = json.NewEncoder(f).Encode(evidence)
+	err = json.NewEncoder(f).Encode(visualEvidenceSeal{Version: visualSealVersion, Environment: visualSealEnvironment, Evidence: *evidence})
 	closeErr := f.Close()
 	if err != nil {
 		return err
@@ -397,6 +584,10 @@ func sealVisualEvidence(dir string, evidence *model.VisualEvidence) error {
 	return closeErr
 }
 func loadSealedVisualEvidence(dir, taskID, head, configHash string) (*model.VisualEvidence, error) {
+	return loadSealedVisualEvidenceForTargets(dir, taskID, head, configHash, nil)
+}
+
+func loadSealedVisualEvidenceForTargets(dir, taskID, head, configHash string, targets []config.VisualCaptureTarget) (*model.VisualEvidence, error) {
 	info, err := os.Lstat(filepath.Join(dir, "capture-seal.json"))
 	if err != nil {
 		return nil, err
@@ -408,15 +599,18 @@ func loadSealedVisualEvidence(dir, taskID, head, configHash string) (*model.Visu
 	if err != nil {
 		return nil, err
 	}
-	var sealed model.VisualEvidence
-	if err = json.Unmarshal(body, &sealed); err != nil {
+	var seal visualEvidenceSeal
+	if err = json.Unmarshal(body, &seal); err != nil {
 		return nil, err
 	}
-	current, err := loadVisualEvidence(dir, taskID, head, configHash)
+	if seal.Version != visualSealVersion || seal.Environment != visualSealEnvironment {
+		return nil, errLegacyVisualSeal
+	}
+	current, err := loadVisualEvidenceForTargets(dir, taskID, head, configHash, targets)
 	if err != nil {
 		return nil, err
 	}
-	if !reflect.DeepEqual(sealed, *current) {
+	if !reflect.DeepEqual(seal.Evidence, *current) {
 		return nil, errors.New("cached visual capture differs from its accepted manifest or artifact hashes")
 	}
 	return current, nil
@@ -435,14 +629,16 @@ func quarantineVisualCapture(output string) error {
 	return os.Rename(output, quarantine)
 }
 
-// captureVisual executes only the canonical project's configured argv, at the
-// pinned task worktree. The command owns browser startup and loopback policy;
-// AIH bounds its process lifetime and accepts only validated local artifacts.
-func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task *model.Task, dir string) (*model.VisualEvidence, error) {
+// captureVisual executes only the canonical project's configured argv in a
+// fresh supervisor-owned detached checkout. The command owns browser startup
+// and loopback policy; AIH bounds its process lifetime and accepts only
+// validated local artifacts.
+func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task *model.Task, dir string) (visual *model.VisualEvidence, retErr error) {
 	capture := e.Project.VisualCapture
 	if capture == nil {
 		return nil, &visualCaptureUnavailableError{errors.New("visual capture is not configured for this project")}
 	}
+	targets := capture.CaptureTargets()
 	if !visualTaskID.MatchString(task.ID) || !visualRevision.MatchString(task.HeadSHA) || !visualHash.MatchString(e.Hash) {
 		return nil, &visualCaptureUnavailableError{errors.New("visual capture needs an exact task head and config hash")}
 	}
@@ -475,7 +671,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return nil, errors.New("visual evidence path is not a directory")
 		}
-		if cached, err := loadSealedVisualEvidence(output, task.ID, task.HeadSHA, e.Hash); err == nil {
+		if cached, err := loadSealedVisualEvidenceForTargets(output, task.ID, task.HeadSHA, e.Hash, targets); err == nil {
 			cached.Summary = safety.Portable(cached.Summary, c.P.Dir, dir)
 			if task.Evidence != nil && task.Evidence.Visual != nil && !reflect.DeepEqual(*task.Evidence.Visual, *cached) {
 				return nil, errors.New("cached visual capture differs from durable review evidence")
@@ -517,12 +713,38 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	defer release()
 	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(capture.Timeout)*time.Second)
 	defer cancel()
+	checkout, err := c.newVisualCheckout(checkCtx, task)
+	if err != nil {
+		return nil, &checkFailure{name: "visual capture", command: "git", err: err}
+	}
+	defer func() {
+		if closeErr := checkout.Close(context.Background()); closeErr != nil {
+			visual = nil
+			retErr = errors.Join(retErr, fmt.Errorf("visual capture cleanup: %w", closeErr))
+		}
+	}()
+	cache := filepath.Join(temporary, "cache")
+	if err = os.Mkdir(cache, 0700); err != nil {
+		return nil, err
+	}
+	if len(capture.Prepare) > 0 {
+		prepareTimeout := capture.PrepareTimeout
+		if prepareTimeout == 0 {
+			prepareTimeout = capture.Timeout
+		}
+		prepareCtx, prepareCancel := context.WithTimeout(checkCtx, time.Duration(prepareTimeout)*time.Second)
+		out, prepareErr := platform.Run(prepareCtx, checkout.path, visualEnvironment(cache), "", capture.Prepare[0], capture.Prepare[1:]...)
+		prepareCancel()
+		if prepareErr != nil {
+			return nil, visualCaptureRunError(capture.Prepare[0], prepareErr, out)
+		}
+	}
 	certPath, keyPath, cert, err := visualCertificate(temporary)
 	if err != nil {
 		return nil, err
 	}
-	adapterEnv := append(cleanEnvironment(), "AIH_VISUAL_TLS_CERT="+certPath, "AIH_VISUAL_TLS_KEY="+keyPath)
-	adapter, err := platform.StartManaged(checkCtx, dir, adapterEnv, capture.Server[0], capture.Server[1:]...)
+	adapterEnv := visualEnvironment(cache, "AIH_VISUAL_TLS_CERT="+certPath, "AIH_VISUAL_TLS_KEY="+keyPath)
+	adapter, err := platform.StartManaged(checkCtx, checkout.path, adapterEnv, capture.Server[0], capture.Server[1:]...)
 	if err != nil {
 		return nil, visualCaptureRunError(capture.Server[0], err, "")
 	}
@@ -536,22 +758,30 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		return nil, visualCaptureRunError(capture.Server[0], err, "")
 	}
 	defer gateway.Close()
-	env := append(cleanEnvironment(), "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA, "AIH_VISUAL_URL="+gateway.url, "AIH_VISUAL_PLAYWRIGHT_MODULE="+playwright)
-	out, err := platform.Run(checkCtx, dir, env, "", "node", runner)
+	targetJSON, err := json.Marshal(targets)
+	if err != nil {
+		return nil, err
+	}
+	env := visualEnvironment(cache, "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA, "AIH_VISUAL_URL="+gateway.url, "AIH_VISUAL_PLAYWRIGHT_MODULE="+playwright, "AIH_VISUAL_TARGETS="+string(targetJSON))
+	out, err := runVisualBrowser(checkCtx, checkout.path, env, runner)
 	if err != nil {
 		return nil, visualCaptureRunError("node", err, out)
 	}
 	gateway.Close()
 	adapter.Close()
-	sha, err = (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
+	// Browser binaries are capture runtime, not evidence. Remove them before
+	// promoting the temporary directory to the retained evidence cache.
+	if err = os.RemoveAll(cache); err != nil {
+		return nil, fmt.Errorf("remove visual browser cache: %w", err)
+	}
+	sha, err = (gitx.Git{Dir: checkout.path}).SHA(ctx, "HEAD")
 	if err != nil || sha != task.HeadSHA {
 		return nil, errors.New("visual capture changed the reviewed head")
 	}
-	dirty, err := (gitx.Git{Dir: dir}).Run(ctx, "", "status", "--porcelain")
-	if err != nil || dirty != "" {
-		return nil, errors.New("visual capture modified source or created unignored files")
+	if _, err = (gitx.Git{Dir: checkout.path}).Run(ctx, "", "diff", "--quiet", "HEAD", "--"); err != nil {
+		return nil, errors.New("visual capture modified tracked source")
 	}
-	visual, err := loadVisualEvidence(temporary, task.ID, task.HeadSHA, e.Hash)
+	visual, err = loadVisualEvidenceForTargets(temporary, task.ID, task.HeadSHA, e.Hash, targets)
 	if err != nil {
 		return nil, &checkFailure{name: "visual capture", command: "node", err: err}
 	}

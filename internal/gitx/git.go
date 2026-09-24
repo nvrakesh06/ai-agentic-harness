@@ -263,6 +263,7 @@ func (g Git) RemoveWorktree(ctx context.Context, path string) error {
 	_, e := g.Run(ctx, "", "worktree", "remove", path)
 	return e
 }
+
 func (g Git) Checkpoint(ctx context.Context, path, task string) (string, error) {
 	w := Git{path}
 	files, e := w.Run(ctx, "", "ls-files", "--others", "--exclude-standard", "-z")

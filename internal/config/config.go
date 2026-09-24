@@ -30,6 +30,7 @@ type Project struct {
 	ProviderModels map[string]string `yaml:"provider_models" json:"provider_models"`
 	Checks         []Check           `yaml:"checks" json:"checks"`
 	VisualCapture  *VisualCapture    `yaml:"visual_capture,omitempty" json:"visual_capture,omitempty"`
+	ReviewReuse    ReviewReuse       `yaml:"review_reuse,omitempty" json:"review_reuse,omitempty"`
 	WorkerSeconds  int               `yaml:"worker_timeout_seconds" json:"worker_timeout_seconds"`
 	LeaseSeconds   int               `yaml:"lease_seconds" json:"lease_seconds"`
 	ReleaseRepo    string            `yaml:"release_repo" json:"release_repo"`
@@ -55,8 +56,53 @@ type Check struct {
 // VisualCapture declares the project adapter command. AIH supplies ephemeral
 // TLS material, chooses no port itself, and owns the browser and gateway.
 type VisualCapture struct {
-	Server  []string `yaml:"server" json:"server"`
-	Timeout int      `yaml:"timeout_seconds" json:"timeout_seconds"`
+	// Prepare optionally creates or verifies the adapter runtime in the
+	// supervisor-owned detached checkout. It is run once per capture, before
+	// Server, and never in a writer worktree.
+	Prepare        []string              `yaml:"prepare,omitempty" json:"prepare,omitempty"`
+	PrepareTimeout int                   `yaml:"prepare_timeout_seconds,omitempty" json:"prepare_timeout_seconds,omitempty"`
+	Server         []string              `yaml:"server" json:"server"`
+	Timeout        int                   `yaml:"timeout_seconds" json:"timeout_seconds"`
+	Targets        []VisualCaptureTarget `yaml:"targets,omitempty" json:"targets,omitempty"`
+}
+
+// VisualCaptureTarget is a same-origin application route and the viewport at
+// which AIH captures it. It deliberately has no browser, profile, or URL host
+// controls: those remain supervisor-owned.
+type VisualCaptureTarget struct {
+	ID     string `yaml:"id" json:"id"`
+	Path   string `yaml:"path" json:"path"`
+	Width  int    `yaml:"width" json:"width"`
+	Height int    `yaml:"height" json:"height"`
+}
+
+const (
+	maxVisualCaptureTargets = 8
+	maxVisualTargetPixels   = 4 << 20
+	maxVisualCapturePixels  = 16 << 20
+)
+
+var visualTargetID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
+
+var windowsReservedVisualTargetID = map[string]bool{
+	"con": true, "prn": true, "aux": true, "nul": true,
+	"com1": true, "com2": true, "com3": true, "com4": true, "com5": true, "com6": true, "com7": true, "com8": true, "com9": true,
+	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true, "lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
+}
+
+// CaptureTargets returns the legacy browser capture when configuration omits targets.
+func (v *VisualCapture) CaptureTargets() []VisualCaptureTarget {
+	if len(v.Targets) == 0 {
+		return []VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 1280, Height: 720}}
+	}
+	return v.Targets
+}
+
+// ReviewReuse is opt-in policy for the exceptionally narrow review reuse
+// path. Entries name inert, project-specific text-data locations; ordinary
+// documentation, source, and agent instructions are never implicitly trusted.
+type ReviewReuse struct {
+	SecurityDataOnlyPaths []string `yaml:"security_data_only_paths,omitempty" json:"security_data_only_paths,omitempty"`
 }
 type Policy struct {
 	ImplementationRetries int `yaml:"implementation_retries"`
@@ -263,6 +309,14 @@ func (p Project) Validate() error {
 	if p.WorkerSeconds < 10 || p.LeaseSeconds < 60 {
 		return errors.New("worker timeout must be >=10s and lease >=60s")
 	}
+	if len(p.ReviewReuse.SecurityDataOnlyPaths) > 8 {
+		return errors.New("review_reuse may declare at most 8 data-only paths")
+	}
+	for _, pattern := range p.ReviewReuse.SecurityDataOnlyPaths {
+		if !regexp.MustCompile(`^[a-zA-Z0-9_./*?-]{1,160}$`).MatchString(pattern) || strings.HasPrefix(pattern, ".") || strings.Contains(pattern, "..") || !strings.HasSuffix(strings.ToLower(pattern), ".txt") {
+			return errors.New("review_reuse data-only paths must be safe relative .txt globs")
+		}
+	}
 	for _, c := range p.Checks {
 		if c.Name == "" || len(c.Command) == 0 || c.Timeout <= 0 {
 			return errors.New("each check needs name, command argv, and positive timeout_seconds")
@@ -285,6 +339,40 @@ func (p Project) Validate() error {
 		}
 		if p.VisualCapture.Timeout < 1 || p.VisualCapture.Timeout > 300 {
 			return errors.New("visual_capture timeout_seconds must be between 1 and 300")
+		}
+		if len(p.VisualCapture.Prepare) == 0 && p.VisualCapture.PrepareTimeout != 0 {
+			return errors.New("visual_capture prepare_timeout_seconds requires a prepare command argv")
+		}
+		if len(p.VisualCapture.Prepare) > 0 {
+			if strings.TrimSpace(p.VisualCapture.Prepare[0]) == "" {
+				return errors.New("visual_capture prepare needs a command argv")
+			}
+			if p.VisualCapture.PrepareTimeout != 0 && (p.VisualCapture.PrepareTimeout < 1 || p.VisualCapture.PrepareTimeout > 300) {
+				return errors.New("visual_capture prepare_timeout_seconds must be between 1 and 300")
+			}
+		}
+		if len(p.VisualCapture.Targets) > maxVisualCaptureTargets {
+			return fmt.Errorf("visual_capture targets must contain at most %d entries", maxVisualCaptureTargets)
+		}
+		seen := map[string]bool{}
+		pixels := 0
+		for _, target := range p.VisualCapture.Targets {
+			filenameID := strings.ToLower(target.ID)
+			if !visualTargetID.MatchString(target.ID) || seen[filenameID] || windowsReservedVisualTargetID[filenameID] {
+				return errors.New("visual_capture target IDs must be unique case-insensitive safe filenames")
+			}
+			seen[filenameID] = true
+			u, err := url.Parse(target.Path)
+			if err != nil || target.Path == "" || !strings.HasPrefix(target.Path, "/") || strings.HasPrefix(target.Path, "//") || u.IsAbs() || u.Host != "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+				return errors.New("visual_capture target path must be a same-origin absolute path without host, query, or fragment")
+			}
+			if target.Width < 1 || target.Height < 1 || target.Width > 4096 || target.Height > 4096 || target.Width*target.Height > maxVisualTargetPixels {
+				return errors.New("visual_capture target viewport exceeds the allowed dimensions")
+			}
+			pixels += target.Width * target.Height
+			if pixels > maxVisualCapturePixels {
+				return errors.New("visual_capture target viewports exceed the aggregate pixel limit")
+			}
 		}
 	}
 	for _, capability := range p.Models {

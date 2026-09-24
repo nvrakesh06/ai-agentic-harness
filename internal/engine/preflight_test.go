@@ -284,6 +284,78 @@ func TestCompletedPreflightReusesOnlyBoundedUnchangedFixScope(t *testing.T) {
 	}
 }
 
+func TestCompletedPreflightReusesUnchangedImplementerCheckpointOnly(t *testing.T) {
+	effective := config.Effective{BaseSHA: "base", Hash: "config", Policy: config.Policy{ImplementationRetries: 2}}
+	required := []roles.Role{{Name: "designer", Stage: "pre-implementation"}}
+	newTask := func() *model.Task {
+		return &model.Task{State: model.Ready, HeadSHA: "new-head", Objective: "repair the UI", Acceptance: []string{"works"}, Areas: []string{"ui"}, Domains: []string{"ui"}, UI: true}
+	}
+	newPreflight := func(task *model.Task) *model.Preflight {
+		return &model.Preflight{Phase: "writing", BaseSHA: "base", HeadSHA: "old-head", Config: "config", Rules: roles.Hash(), Scope: preflightScope(task, effective), Completed: []string{"designer"}}
+	}
+	task := newTask()
+	p := newPreflight(task)
+	if !reusePreflightForContinuation(p, task, effective, required) || p.Phase != "ready" || p.HeadSHA != task.HeadSHA || !strings.Contains(p.ReuseReason, "checkpoint") {
+		t.Fatalf("unchanged checkpoint did not retain writer-ready guidance: %+v", p)
+	}
+	for _, change := range []struct {
+		name   string
+		update func(*model.Preflight, *model.Task, *config.Effective)
+	}{
+		{"incomplete role", func(p *model.Preflight, _ *model.Task, _ *config.Effective) { p.Completed = nil }},
+		{"scope", func(_ *model.Preflight, task *model.Task, _ *config.Effective) { task.Objective = "redesign the UI" }},
+		{"policy", func(_ *model.Preflight, _ *model.Task, effective *config.Effective) { effective.Hash = "changed" }},
+		{"wrong phase", func(p *model.Preflight, _ *model.Task, _ *config.Effective) { p.Phase = "ready" }},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			task, effective := newTask(), effective
+			p := newPreflight(task)
+			change.update(p, task, &effective)
+			if reusePreflightForContinuation(p, task, effective, required) {
+				t.Fatal("stale checkpoint reused specialist guidance")
+			}
+		})
+	}
+}
+
+func TestHumanContinuationEvidenceRequiresExactCheckpointAndNoNewDecision(t *testing.T) {
+	task := &model.Task{HeadSHA: strings.Repeat("a", 40)}
+	if !humanContinuationEvidence(task, "AIH-CONTINUE CHECKPOINT "+task.HeadSHA) {
+		t.Fatal("exact checkpoint evidence was rejected")
+	}
+	for _, answer := range []string{
+		"The concrete browser fix is verified on the task branch.",
+		"AIH-CONTINUE CHECKPOINT aaaaaaa",
+		"At checkpoint aaaaaaa, use a different visual style.",
+		"AIH-CONTINUE CHECKPOINT " + task.HeadSHA + " and use a different visual style.",
+	} {
+		if humanContinuationEvidence(task, answer) {
+			t.Fatalf("unsafe human answer reused guidance: %q", answer)
+		}
+	}
+}
+
+func TestImplementerContinuationDecisionOrFindingsInvalidatePreflightReuse(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		result provider.Result
+		want   bool
+	}{
+		{"ordinary checkpoint", provider.Result{Status: "in_progress", Summary: "Continue the existing repair."}, true},
+		{"structured decision question", provider.Result{Status: "in_progress", Summary: "Checkpoint is ready.", Question: "Should we use a different visual style for this screen?"}, false},
+		{"unclassified decision question", provider.Result{Status: "in_progress", Summary: "Checkpoint is ready.", Question: "Can we move the caption above the chart?"}, false},
+		{"security finding", provider.Result{Status: "in_progress", Findings: []model.Finding{{Category: "security", Reason: "The credential boundary changed."}}}, false},
+		{"architecture finding", provider.Result{Status: "in_progress", Findings: []model.Finding{{Category: "architecture", Reason: "The queue ownership is ambiguous."}}}, false},
+		{"empty placeholder", provider.Result{Status: "in_progress", Findings: []model.Finding{{}}}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := continuationPreflightReusable(test.result); got != test.want {
+				t.Fatalf("continuation reusable=%t, want %t for %#v", got, test.want, test.result)
+			}
+		})
+	}
+}
+
 func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
 	effective := config.Effective{BaseSHA: strings.Repeat("a", 40), Hash: strings.Repeat("b", 64), Files: map[string]string{
 		".aih/roles/animation-architecture.yaml": "name: animation-architecture\nextends: reviewer\nstage: review\n",

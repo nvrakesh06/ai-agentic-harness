@@ -20,9 +20,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 )
 
@@ -59,12 +62,346 @@ func TestNativeVisualHelper(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(fmt.Sprintf(`{"head":%q,"summary":"blank page: frontend module 404","artifacts":["desktop.png","network.txt"]}`, head)), 0600)
 }
 
+func TestVisualPrepareHelper(t *testing.T) {
+	if os.Getenv("AIH_VISUAL_PREPARE_HELPER") != "1" {
+		return
+	}
+	appendVisualEnvironmentMarker("prepare")
+	if marker := os.Getenv("AIH_VISUAL_PREPARE_MARKER"); marker != "" {
+		if os.Getenv("AIH_VISUAL_PREPARE_COUNT") == "1" {
+			previous, _ := os.ReadFile(marker)
+			_ = os.WriteFile(marker, append(previous, '1'), 0600)
+		} else {
+			_ = os.WriteFile(marker, []byte(os.Getenv("AIH_VISUAL_PREPARE_VALUE")+"\n"), 0600)
+		}
+	}
+	if os.Getenv("AIH_VISUAL_PREPARE_WAIT") == "1" {
+		select {}
+	}
+}
+
+func appendVisualEnvironmentMarker(role string) {
+	appendVisualEnvironmentMarkerValue(role, os.Getenv("PLAYWRIGHT_BROWSERS_PATH"))
+}
+
+func appendVisualEnvironmentMarkerValue(role, value string) {
+	marker := os.Getenv("AIH_VISUAL_ENV_MARKER")
+	if marker == "" {
+		return
+	}
+	previous, _ := os.ReadFile(marker)
+	_ = os.WriteFile(marker, append(previous, []byte(role+"="+value+"\n")...), 0600)
+}
+
+func TestVisualEnvironmentBindsPrivatePlaywrightBrowserCache(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "visual-cache")
+	hostileBrowserCache := filepath.Join(t.TempDir(), "shared-playwright")
+	t.Setenv("PLAYWRIGHT_BROWSERS_PATH", hostileBrowserCache)
+	t.Setenv("LOCALAPPDATA", filepath.Join(t.TempDir(), "host-local-app-data"))
+	values := map[string]string{}
+	counts := map[string]int{}
+	for _, item := range visualEnvironment(cache) {
+		parts := strings.SplitN(item, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.ToUpper(parts[0])
+		values[key] = parts[1]
+		counts[key]++
+	}
+	want := filepath.Join(cache, "playwright-browsers")
+	if values["PLAYWRIGHT_BROWSERS_PATH"] != want || counts["PLAYWRIGHT_BROWSERS_PATH"] != 1 {
+		t.Fatalf("PLAYWRIGHT_BROWSERS_PATH = %q (%d entries), want one private cache path %q", values["PLAYWRIGHT_BROWSERS_PATH"], counts["PLAYWRIGHT_BROWSERS_PATH"], want)
+	}
+	if values["AIH_VISUAL_CACHE_DIR"] != cache || values["XDG_CACHE_HOME"] != cache {
+		t.Fatalf("visual cache bindings = %#v, want %q", values, cache)
+	}
+}
+
+func visualCheckoutFixture(t *testing.T) (*Controller, *model.Task, string, string, func(string, ...string) string) {
+	t.Helper()
+	state, source, control := t.TempDir(), t.TempDir(), filepath.Join(t.TempDir(), "control.git")
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run(source, "init")
+	run(source, "config", "user.email", "test@example.invalid")
+	run(source, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("tracked"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	run(source, "add", "tracked.txt")
+	run(source, "commit", "-m", "base")
+	head := run(source, "rev-parse", "HEAD")
+	cmd := exec.Command("git", "init", "--bare", control)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("init control: %v %s", err, out)
+	}
+	run(source, "remote", "add", "control", control)
+	run(source, "push", "control", "HEAD:refs/heads/aih/task")
+	writer := filepath.Join(t.TempDir(), "writer")
+	cmd = exec.Command("git", "clone", "-b", "aih/task", control, writer)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone writer: %v %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(writer, ".gitignore"), []byte("node_modules/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(writer, "node_modules"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(writer, "node_modules", "fake-renderer"), []byte("not invoked"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return &Controller{P: &Project{Dir: state, Git: gitx.Git{Dir: control}}}, &model.Task{ID: "task-visual", HeadSHA: head}, writer, source, func(dir string, args ...string) string { return run(dir, args...) }
+}
+
+func TestVisualPrepareUsesFreshDetachedCheckoutNotWriterRuntime(t *testing.T) {
+	c, task, writer, _, _ := visualCheckoutFixture(t)
+	checkout, err := c.newVisualCheckout(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "prepare-marker")
+	t.Setenv("AIH_VISUAL_PREPARE_HELPER", "1")
+	t.Setenv("AIH_VISUAL_PREPARE_MARKER", marker)
+	t.Setenv("AIH_VISUAL_PREPARE_VALUE", checkout.path)
+	cache := t.TempDir()
+	// Capture targets are all handled later by one browser invocation. Prepare
+	// remains one operation even when the capture declares multiple targets.
+	targets := (&config.VisualCapture{Targets: []config.VisualCaptureTarget{{ID: "one", Path: "/", Width: 2, Height: 2}, {ID: "two", Path: "/two", Width: 2, Height: 2}}}).CaptureTargets()
+	if len(targets) != 2 {
+		t.Fatal("fixture did not declare multiple visual targets")
+	}
+	if _, err = platform.Run(context.Background(), checkout.path, visualEnvironment(cache), "", os.Args[0], "-test.run=^TestVisualPrepareHelper$"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil || strings.TrimSpace(string(got)) != checkout.path {
+		t.Fatalf("prepare ran outside detached checkout: %q %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(writer, "node_modules", "fake-renderer")); err != nil || string(got) != "not invoked" {
+		t.Fatalf("ignored writer runtime was invoked or changed: %q %v", got, err)
+	}
+	checkoutPath := checkout.path
+	if err = checkout.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(checkoutPath); !os.IsNotExist(err) {
+		t.Fatalf("AIH-owned detached checkout survived cleanup: %v", err)
+	}
+}
+
+func TestVisualCheckoutCleansUpAfterCanceledPrepare(t *testing.T) {
+	c, task, _, _, _ := visualCheckoutFixture(t)
+	checkout, err := c.newVisualCheckout(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkoutPath := checkout.path
+	t.Setenv("AIH_VISUAL_PREPARE_HELPER", "1")
+	t.Setenv("AIH_VISUAL_PREPARE_WAIT", "1")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err = platform.Run(ctx, checkout.path, visualEnvironment(t.TempDir()), "", os.Args[0], "-test.run=^TestVisualPrepareHelper$"); err == nil {
+		t.Fatal("canceled prepare completed")
+	}
+	if err = checkout.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(checkoutPath); !os.IsNotExist(err) {
+		t.Fatalf("canceled prepare left its detached checkout behind: %v", err)
+	}
+}
+
+func TestVisualCheckoutDoesNotReusePreparedHeadAcrossRestart(t *testing.T) {
+	c, task, _, source, run := visualCheckoutFixture(t)
+	first, err := c.newVisualCheckout(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPath := first.path
+	if err = first.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("head-b"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	run(source, "add", "tracked.txt")
+	run(source, "commit", "-m", "head b")
+	run(source, "push", "control", "HEAD:refs/heads/aih/task")
+	task.HeadSHA = run(source, "rev-parse", "HEAD")
+	second, err := c.newVisualCheckout(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.path == firstPath {
+		t.Fatal("head B reused head A's prepared checkout path")
+	}
+	if sha, err := (gitx.Git{Dir: second.path}).SHA(context.Background(), "HEAD"); err != nil || sha != task.HeadSHA {
+		t.Fatalf("head B checkout has the wrong revision: %s %v", sha, err)
+	}
+	if err = second.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLegacyVisualSealIsQuarantinedForDetachedCheckoutRecapture(t *testing.T) {
+	dir := t.TempDir()
+	head, cfg := strings.Repeat("a", 40), strings.Repeat("b", 64)
+	if err := writeVisualPNG(filepath.Join(dir, "desktop.png")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "network.txt"), []byte("desktop GET 200 /"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(fmt.Sprintf(`{"head":%q,"summary":"legacy cache","artifacts":["desktop.png","network.txt"]}`, head)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := loadVisualEvidence(dir, "task-visual", head, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := json.Marshal(evidence) // schema used before detached checkout provenance
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "capture-seal.json"), legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = loadSealedVisualEvidence(dir, "task-visual", head, cfg); !errors.Is(err, errLegacyVisualSeal) {
+		t.Fatalf("legacy seal was reusable instead of requiring recapture: %v", err)
+	}
+	if err = quarantineVisualCapture(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(dir + ".corrupt"); err != nil {
+		t.Fatalf("legacy seal was not safely quarantined: %v", err)
+	}
+}
+
+func TestCaptureVisualDoesNotRunIgnoredWriterRenderer(t *testing.T) {
+	c, task, writer, _, _ := visualCheckoutFixture(t)
+	home := t.TempDir()
+	module := filepath.Join(home, "tools", "playwright")
+	if err := os.MkdirAll(module, 0700); err != nil {
+		t.Fatal(err)
+	}
+	c.P.Home = home
+	t.Setenv("AIH_PLAYWRIGHT_MODULE", module)
+	prepareMarker := filepath.Join(t.TempDir(), "prepare-count")
+	tripwire := filepath.Join(t.TempDir(), "writer-renderer-invoked")
+	t.Setenv("AIH_VISUAL_PREPARE_HELPER", "1")
+	t.Setenv("AIH_VISUAL_PREPARE_MARKER", prepareMarker)
+	t.Setenv("AIH_VISUAL_PREPARE_COUNT", "1")
+	t.Setenv("AIH_VISUAL_SERVER_HELPER", "1")
+	t.Setenv("AIH_VISUAL_WRITER_TRIPWIRE", tripwire)
+	envMarker := filepath.Join(t.TempDir(), "playwright-browser-paths")
+	t.Setenv("AIH_VISUAL_ENV_MARKER", envMarker)
+	t.Setenv("PLAYWRIGHT_BROWSERS_PATH", filepath.Join(t.TempDir(), "host-shared-playwright"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(t.TempDir(), "host-local-app-data"))
+	originalBrowserRun := runVisualBrowser
+	runVisualBrowser = func(_ context.Context, dir string, env []string, _ string) (string, error) {
+		values := map[string]string{}
+		for _, item := range env {
+			parts := strings.SplitN(item, "=", 2)
+			if len(parts) == 2 {
+				values[parts[0]] = parts[1]
+			}
+		}
+		if dir == writer {
+			return "", errors.New("browser runner used writer worktree")
+		}
+		if _, err := os.Stat(filepath.Join(dir, "node_modules", "fake-renderer")); err == nil {
+			return "", errors.New("browser runner observed writer fake renderer")
+		}
+		browserCache := values["PLAYWRIGHT_BROWSERS_PATH"]
+		if browserCache == "" {
+			return "", errors.New("browser runner missing Playwright browser cache")
+		}
+		if err := os.MkdirAll(browserCache, 0700); err != nil {
+			return "", err
+		}
+		appendVisualEnvironmentMarkerValue("browser", browserCache)
+		var targets []config.VisualCaptureTarget
+		if err := json.Unmarshal([]byte(values["AIH_VISUAL_TARGETS"]), &targets); err != nil {
+			return "", err
+		}
+		artifacts := []string{"network.txt"}
+		manifestTargets := make([]visualManifestTarget, 0, len(targets))
+		for _, target := range targets {
+			name := target.ID + ".png"
+			if err := writeVisualPNG(filepath.Join(values["AIH_VISUAL_OUTPUT_DIR"], name)); err != nil {
+				return "", err
+			}
+			artifacts = append([]string{name}, artifacts...)
+			manifestTargets = append(manifestTargets, visualManifestTarget{ID: target.ID, Path: target.Path, Width: target.Width, Height: target.Height, Screenshot: name})
+		}
+		if err := os.WriteFile(filepath.Join(values["AIH_VISUAL_OUTPUT_DIR"], "network.txt"), []byte("capture GET 200 /"), 0600); err != nil {
+			return "", err
+		}
+		manifest, err := json.Marshal(visualManifest{Head: values["AIH_VISUAL_HEAD"], Summary: "test capture", Artifacts: artifacts, Targets: manifestTargets})
+		if err != nil {
+			return "", err
+		}
+		return "", os.WriteFile(filepath.Join(values["AIH_VISUAL_OUTPUT_DIR"], "manifest.json"), manifest, 0600)
+	}
+	defer func() { runVisualBrowser = originalBrowserRun }()
+	targets := []config.VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 2, Height: 2}, {ID: "detail", Path: "/detail", Width: 2, Height: 2}}
+	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Prepare: []string{os.Args[0], "-test.run=^TestVisualPrepareHelper$"}, PrepareTimeout: 5, Server: []string{os.Args[0], "-test.run=^TestNativeVisualAdapter$"}, Timeout: 10, Targets: targets}}}
+	visual, err := c.captureVisual(context.Background(), effective, task, writer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if visual == nil || len(visual.Artifacts) != 3 {
+		t.Fatalf("full capture did not produce every target: %#v", visual)
+	}
+	if got, err := os.ReadFile(prepareMarker); err != nil || string(got) != "1" {
+		t.Fatalf("prepare did not run exactly once for multi-target capture: %q %v", got, err)
+	}
+	if _, err := os.Stat(tripwire); !os.IsNotExist(err) {
+		t.Fatalf("ignored writer renderer was invoked: %v", err)
+	}
+	paths, err := os.ReadFile(envMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(paths)), "\n") {
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			bound[parts[0]] = parts[1]
+		}
+	}
+	wantBrowserCache := bound["prepare"]
+	if wantBrowserCache == "" || bound["server"] != wantBrowserCache || bound["browser"] != wantBrowserCache || !strings.HasSuffix(wantBrowserCache, filepath.Join("cache", "playwright-browsers")) {
+		t.Fatalf("capture environment did not use one private Playwright cache: %q", paths)
+	}
+	if _, err := os.Stat(wantBrowserCache); !os.IsNotExist(err) {
+		t.Fatalf("browser cache survived capture cleanup: %v", err)
+	}
+}
+
 // TestNativeVisualAdapter is a disposable project-side adapter. It deliberately
 // binds port zero and publishes only the bounded readiness line required by
 // AIH; certificate paths are supplied by the supervisor.
 func TestNativeVisualAdapter(t *testing.T) {
 	if os.Getenv("AIH_VISUAL_SERVER_HELPER") != "1" {
 		return
+	}
+	appendVisualEnvironmentMarker("server")
+	if tripwire := os.Getenv("AIH_VISUAL_WRITER_TRIPWIRE"); tripwire != "" {
+		if _, err := os.Stat(filepath.Join("node_modules", "fake-renderer")); err == nil {
+			_ = os.WriteFile(tripwire, []byte("writer fake renderer was visible"), 0600)
+			os.Exit(3)
+		}
 	}
 	cert, err := tls.LoadX509KeyPair(os.Getenv("AIH_VISUAL_TLS_CERT"), os.Getenv("AIH_VISUAL_TLS_KEY"))
 	if err != nil {
@@ -85,6 +422,9 @@ func TestNativeVisualAdapter(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(`<!doctype html><div id="root"></div><img src="https://outside.invalid/pixel.png"><img src="/redirect-pixel"><script>new WebSocket('ws://outside.invalid/socket')</script><script src="/api-client.ts"></script>`))
+		case "/detail":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:rgb(17,34,51)}</style><main>detail state</main>`))
 		case "/api-client.ts":
 			http.NotFound(w, r)
 		case "/redirect-pixel":
@@ -141,17 +481,48 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	t.Setenv("AIH_VISUAL_TEST_FORBIDDEN", forbidden.URL)
 	adapter := []string{os.Args[0], "-test.run=^TestNativeVisualAdapter$"}
 	c := &Controller{P: &Project{Home: home, Dir: state}}
-	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: adapter, Timeout: 10}}}
+	targets := []config.VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 1280, Height: 720}, {ID: "detail", Path: "/detail", Width: 640, Height: 480}}
+	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: adapter, Timeout: 10, Targets: targets}}}
 	task := &model.Task{ID: "task-visual", HeadSHA: head}
 	if _, err := c.captureVisual(context.Background(), effective, &model.Task{ID: "../outside", HeadSHA: head}, worktree); err == nil {
 		t.Fatal("unsafe task ID escaped evidence root")
 	}
 	visual, err := c.captureVisual(context.Background(), effective, task, worktree)
-	if err != nil || visual.Head != head || len(visual.Artifacts) != 2 {
+	if err != nil || visual.Head != head || len(visual.Artifacts) != 3 {
 		t.Fatalf("capture failed: %#v %v", visual, err)
 	}
+	manifest, err := os.ReadFile(filepath.Join(state, filepath.FromSlash(visual.Manifest)))
+	if err != nil || !strings.Contains(string(manifest), `"id":"detail"`) || !strings.Contains(string(manifest), `"screenshot":"detail.png"`) {
+		t.Fatalf("multi-target manifest missing detail mapping: %q %v", manifest, err)
+	}
+	if _, err := os.Stat(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "detail.png")); err != nil {
+		t.Fatalf("multi-target screenshot missing: %v", err)
+	}
+	detailFile, err := os.Open(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "detail.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	detailImage, _, err := image.Decode(detailFile)
+	closeErr := detailFile.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("detail screenshot decode: %v %v", err, closeErr)
+	}
+	desktopFile, err := os.Open(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "desktop.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	desktopImage, _, err := image.Decode(desktopFile)
+	closeErr = desktopFile.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("desktop screenshot decode: %v %v", err, closeErr)
+	}
+	detailPixel := color.RGBAModel.Convert(detailImage.At(10, 10)).(color.RGBA)
+	desktopPixel := color.RGBAModel.Convert(desktopImage.At(10, 10)).(color.RGBA)
+	if desktopPixel == detailPixel || detailPixel.R > 64 || detailPixel.G > 64 || detailPixel.B > 64 {
+		t.Fatalf("detail screenshot did not render its distinct state: desktop=%#v detail=%#v", desktopPixel, detailPixel)
+	}
 	network, err := os.ReadFile(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "network.txt"))
-	if err != nil || !strings.Contains(string(network), "404 /api-client.ts") || !strings.Contains(string(network), "BLOCKED GET https://outside.invalid") || !strings.Contains(string(network), "BLOCKED WEBSOCKET ws://outside.invalid") || !strings.Contains(string(network), "BLOCKED REDIRECT "+forbidden.URL) {
+	if err != nil || !strings.Contains(string(network), "404 /api-client.ts") || !strings.Contains(string(network), "detail GET 200 /detail") || !strings.Contains(string(network), "BLOCKED GET https://outside.invalid") || !strings.Contains(string(network), "BLOCKED WEBSOCKET ws://outside.invalid") || !strings.Contains(string(network), "BLOCKED REDIRECT "+forbidden.URL) {
 		t.Fatalf("real blank-page capture omitted failed module evidence: %q %v", network, err)
 	}
 	if forbiddenRequests.Load() != 0 {
@@ -266,7 +637,7 @@ func TestPlaywrightModuleRequiresResolvedAIHToolsPath(t *testing.T) {
 }
 
 func TestVisualRunnerOwnsLoopbackAndProfilePolicy(t *testing.T) {
-	for _, want := range []string{"channel: 'chrome'", "viewport: { width: 1280, height: 720 }", "serviceWorkers: 'block'", "await context.route", "route.fetch({ maxRedirects: 0 })", "BLOCKED REDIRECT", "await context.routeWebSocket", "url.origin !== origin", "route.abort('blockedbyclient')", "ws.close()", "await ws.connectToServer()", "context.newPage", "browser.close"} {
+	for _, want := range []string{"channel: 'chrome'", "AIH_VISUAL_TARGETS", "for (const item of targets)", "viewport: { width: item.width, height: item.height }", "serviceWorkers: 'block'", "await context.route", "route.fetch({ maxRedirects: 0 })", "BLOCKED REDIRECT", "await context.routeWebSocket", "url.origin !== origin", "route.abort('blockedbyclient')", "ws.close()", "await ws.connectToServer()", "context.newPage", "browser.close", "network.length < 512"} {
 		if !strings.Contains(visualRunner, want) {
 			t.Fatalf("AIH runner omitted required policy %q", want)
 		}
@@ -370,5 +741,42 @@ func TestVisualManifestBoundsAndSecretRejection(t *testing.T) {
 	write("frame.png", "corrupt image")
 	if _, err := loadVisualEvidence(dir, "task-1", head, cfg); err == nil {
 		t.Fatal("corrupt screenshot accepted")
+	}
+}
+
+func TestVisualManifestRequiresEveryConfiguredTargetAndViewport(t *testing.T) {
+	dir := t.TempDir()
+	head, cfg := strings.Repeat("a", 40), strings.Repeat("b", 64)
+	if err := writeVisualPNG(filepath.Join(dir, "desktop.png")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVisualPNG(filepath.Join(dir, "detail.png")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "network.txt"), []byte("desktop GET 200 /\ndetail GET 200 /detail"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	targets := []config.VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 2, Height: 2}, {ID: "detail", Path: "/detail", Width: 2, Height: 2}}
+	writeManifest := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeManifest(fmt.Sprintf(`{"head":%q,"summary":"two states","artifacts":["desktop.png","detail.png","network.txt"],"targets":[{"id":"desktop","path":"/","width":2,"height":2,"screenshot":"desktop.png"},{"id":"detail","path":"/detail","width":2,"height":2,"screenshot":"detail.png"}]}`, head))
+	if _, err := loadVisualEvidenceForTargets(dir, "task-1", head, cfg, targets); err != nil {
+		t.Fatalf("valid mapped targets rejected: %v", err)
+	}
+	writeManifest(fmt.Sprintf(`{"head":%q,"summary":"bad mapping","artifacts":["desktop.png","detail.png","network.txt"],"targets":[{"id":"desktop","path":"/","width":2,"height":2,"screenshot":"desktop.png"}]}`, head))
+	if _, err := loadVisualEvidenceForTargets(dir, "task-1", head, cfg, targets); err == nil {
+		t.Fatal("partial target manifest accepted")
+	}
+	writeManifest(fmt.Sprintf(`{"head":%q,"summary":"missing diagnostics","artifacts":["desktop.png","detail.png"],"targets":[{"id":"desktop","path":"/","width":2,"height":2,"screenshot":"desktop.png"},{"id":"detail","path":"/detail","width":2,"height":2,"screenshot":"detail.png"}]}`, head))
+	if _, err := loadVisualEvidenceForTargets(dir, "task-1", head, cfg, targets); err == nil {
+		t.Fatal("target manifest without shared diagnostics accepted")
+	}
+	writeManifest(fmt.Sprintf(`{"head":%q,"summary":"bad viewport","artifacts":["desktop.png","detail.png","network.txt"],"targets":[{"id":"desktop","path":"/","width":3,"height":2,"screenshot":"desktop.png"},{"id":"detail","path":"/detail","width":2,"height":2,"screenshot":"detail.png"}]}`, head))
+	if _, err := loadVisualEvidenceForTargets(dir, "task-1", head, cfg, targets); err == nil {
+		t.Fatal("mismatched screenshot dimensions accepted")
 	}
 }

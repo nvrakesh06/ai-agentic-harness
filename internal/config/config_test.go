@@ -173,6 +173,56 @@ func TestVisualCaptureRequiresServerAdapterCommand(t *testing.T) {
 	}
 }
 
+func TestVisualCaptureTargetValidationAndLegacyDefault(t *testing.T) {
+	p := Defaults()
+	p.VisualCapture = &VisualCapture{Server: []string{"node", "scripts/visual-server.mjs"}, Timeout: 30}
+	if targets := p.VisualCapture.CaptureTargets(); len(targets) != 1 || targets[0] != (VisualCaptureTarget{ID: "desktop", Path: "/", Width: 1280, Height: 720}) {
+		t.Fatalf("legacy target = %#v", targets)
+	}
+	p.VisualCapture.Targets = []VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 1280, Height: 720}, {ID: "settings", Path: "/settings", Width: 640, Height: 480}}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("valid visual targets rejected: %v", err)
+	}
+	for _, targets := range [][]VisualCaptureTarget{
+		{{ID: "desktop", Path: "/", Width: 1280, Height: 720}, {ID: "desktop", Path: "/other", Width: 640, Height: 480}},
+		{{ID: "healthy", Path: "/", Width: 1280, Height: 720}, {ID: "Healthy", Path: "/other", Width: 640, Height: 480}},
+		{{ID: "../../escape", Path: "/", Width: 1280, Height: 720}},
+		{{ID: "CON", Path: "/", Width: 1280, Height: 720}},
+		{{ID: "lPt9", Path: "/", Width: 1280, Height: 720}},
+		{{ID: "external", Path: "https://outside.invalid/", Width: 1280, Height: 720}},
+		{{ID: "host", Path: "//outside.invalid/", Width: 1280, Height: 720}},
+		{{ID: "query", Path: "/settings?debug=1", Width: 1280, Height: 720}},
+		{{ID: "fragment", Path: "/settings#advanced", Width: 1280, Height: 720}},
+		{{ID: "large", Path: "/", Width: 4096, Height: 4096}},
+	} {
+		p.VisualCapture.Targets = targets
+		if err := p.Validate(); err == nil {
+			t.Fatalf("unsafe targets accepted: %#v", targets)
+		}
+	}
+	p.VisualCapture.Targets = make([]VisualCaptureTarget, maxVisualCaptureTargets+1)
+	for i := range p.VisualCapture.Targets {
+		p.VisualCapture.Targets[i] = VisualCaptureTarget{ID: "target" + string(rune('a'+i)), Path: "/", Width: 1280, Height: 720}
+	}
+	if err := p.Validate(); err == nil {
+		t.Fatal("too many visual targets accepted")
+	}
+}
+
+func TestReviewReuseDataOnlyPathsRequireSafeTextGlobs(t *testing.T) {
+	p := Defaults()
+	p.ReviewReuse = ReviewReuse{SecurityDataOnlyPaths: []string{"fixtures/review-data/*.txt"}}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("valid explicit inert text path rejected: %v", err)
+	}
+	for _, pattern := range []string{"docs/*.md", "fixtures/*.mdx", ".github/*.txt", "../outside/*.txt", "fixtures/*.json"} {
+		p.ReviewReuse = ReviewReuse{SecurityDataOnlyPaths: []string{pattern}}
+		if err := p.Validate(); err == nil {
+			t.Fatalf("unsafe review reuse path accepted: %q", pattern)
+		}
+	}
+}
+
 func TestParseLocalIncludesCustomRoles(t *testing.T) {
 	root := t.TempDir()
 	files := canonicalFiles()
