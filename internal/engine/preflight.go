@@ -69,6 +69,7 @@ func findingsFingerprint(findings []model.Finding) string {
 
 var directFixLocation = regexp.MustCompile(`^[A-Za-z0-9_./-]+\.(?:tsx|jsx|css|scss|html|vue|svelte):[1-9][0-9]*$`)
 var actionableSourceLocation = regexp.MustCompile(`^[A-Za-z0-9_./-]+\.[A-Za-z0-9_+-]+:[1-9][0-9]*$`)
+var renderedFrameEvidenceLocation = regexp.MustCompile(`^Rendered-frame evidence for head [a-f0-9]{40}$`)
 
 func directFixSensitive(text string) bool {
 	text = strings.ToLower(text)
@@ -88,6 +89,19 @@ func directFixSensitive(text string) bool {
 func preflightEvidenceFix(role roles.Role, result provider.Result) bool {
 	_, ok := preflightEvidenceSourceFindings(role, result)
 	return ok
+}
+
+func preflightVisualEvidenceDeferral(role roles.Role, result provider.Result) bool {
+	preflightSpecialist := role.Stage == "pre-implementation" || role.Name == "designer"
+	if !preflightSpecialist || result.Status != "in_progress" || preflightHumanDecision(result) || !supervisorEvidenceRequest(result) || !visualEvidenceRequest(result) || len(result.Findings) == 0 {
+		return false
+	}
+	for _, finding := range result.Findings {
+		if !preflightVisualEvidenceOnlyFinding(finding) {
+			return false
+		}
+	}
+	return true
 }
 
 // preflightEvidenceSourceFindings separates an evidence-only visual finding
@@ -149,7 +163,8 @@ func preflightVisualEvidenceOnlyFinding(finding model.Finding) bool {
 	// repeating the word "provide". It must still name visual evidence and avoid
 	// a source location or a consequential scope marker.
 	text := strings.ToLower(strings.Join([]string{finding.Reason, finding.Resolution}, " "))
-	return strings.TrimSpace(finding.Location) == "" &&
+	location := strings.TrimSpace(finding.Location)
+	return (location == "" || renderedFrameEvidenceLocation.MatchString(location)) &&
 		containsAny(text, "rendered", "frame", "browser", "capture", "screenshot", "playwright", "visual evidence") &&
 		!preflightEvidenceSensitive(text)
 }
@@ -494,10 +509,14 @@ func (c *Controller) preflight(id string) {
 			}
 			completed := result.Status == "completed" && !(r.Stage == "pre-implementation" && roles.Blocking(r, result.Findings))
 			evidenceFix := preflightEvidenceFix(r, result)
-			if !completed && !evidenceFix {
+			evidenceDeferral := preflightVisualEvidenceDeferral(r, result)
+			if !completed && !evidenceFix && !evidenceDeferral {
 				return nil
 			}
 			task.Decisions = append(task.Decisions, r.Name+": "+result.Summary)
+			if evidenceFix || evidenceDeferral {
+				task.VisualRequired = &model.VisualRequirement{Role: r.Name, Base: effective.BaseSHA, Head: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Reason: "pre-implementation specialist requested supervisor-owned exact-head rendered evidence; final visual review remains required"}
+			}
 			if evidenceFix {
 				findings, _ := preflightEvidenceSourceFindings(r, result)
 				findings = append([]model.Finding(nil), findings...)
@@ -522,7 +541,7 @@ func (c *Controller) preflight(id string) {
 			c.retry(id, "implementation", roleErr.Error())
 			return
 		}
-		if preflightEvidenceFix(r, result) {
+		if preflightEvidenceFix(r, result) || (preflightVisualEvidenceDeferral(r, result) && effective.Project.VisualCapture != nil) {
 			_ = c.P.DB.Event(id, current.RunID, r.Name, effective.Project.Provider, "preflight_visual_evidence_fix_admitted", "exact-head visual evidence remains required for final review; concrete source findings preserved for one bounded implementer pass")
 			continue
 		}

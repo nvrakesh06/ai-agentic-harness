@@ -16,7 +16,7 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 4
+const StateSchema = 5
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
@@ -52,43 +52,57 @@ var edges = map[State][]State{
 }
 
 type Task struct {
-	ID               string         `json:"id"`
-	ObjectiveID      string         `json:"objective_id"`
-	Issue            int            `json:"issue"`
-	PR               int            `json:"pr,omitempty"`
-	Title            string         `json:"title"`
-	Objective        string         `json:"objective"`
-	Acceptance       []string       `json:"acceptance"`
-	Dependencies     []string       `json:"dependencies"`
-	Areas            []string       `json:"areas"`
-	Domains          []string       `json:"conflict_domains"`
-	Risk             string         `json:"risk"`
-	UI               bool           `json:"ui"`
-	Security         bool           `json:"security"`
-	Roles            []string       `json:"roles"`
-	State            State          `json:"state"`
-	Branch           string         `json:"branch"`
-	BaseSHA          string         `json:"base_sha,omitempty"`
-	HeadSHA          string         `json:"head_sha,omitempty"`
-	MergeSHA         string         `json:"merge_sha,omitempty"`
-	PostVerifySHA    string         `json:"post_verify_sha,omitempty"`
-	RecoveryRequired bool           `json:"recovery_required,omitempty"`
-	SyncBase         string         `json:"conflict_base,omitempty"`
-	Attempts         int            `json:"attempts"`
-	Rotations        int            `json:"checkpoint_rotations"`
-	FixCycles        map[string]int `json:"fix_cycles"`
-	AdvisorUsed      bool           `json:"advisor_used"`
-	RunID            string         `json:"run_id,omitempty"`
-	Preflight        *Preflight     `json:"preflight,omitempty"`
-	Findings         []Finding      `json:"findings,omitempty"`
-	Summary          string         `json:"implementation_summary,omitempty"`
-	ReportedTests    []string       `json:"reported_tests,omitempty"`
-	Risks            []string       `json:"remaining_risks,omitempty"`
-	Decisions        []string       `json:"decisions,omitempty"`
-	Blocker          *Blocker       `json:"blocker,omitempty"`
-	Verification     *Verification  `json:"verification_retry_guard,omitempty"`
-	Evidence         *Evidence      `json:"evidence,omitempty"`
-	Updated          time.Time      `json:"updated"`
+	ID               string             `json:"id"`
+	ObjectiveID      string             `json:"objective_id"`
+	Issue            int                `json:"issue"`
+	PR               int                `json:"pr,omitempty"`
+	Title            string             `json:"title"`
+	Objective        string             `json:"objective"`
+	Acceptance       []string           `json:"acceptance"`
+	Dependencies     []string           `json:"dependencies"`
+	Areas            []string           `json:"areas"`
+	Domains          []string           `json:"conflict_domains"`
+	Risk             string             `json:"risk"`
+	UI               bool               `json:"ui"`
+	Security         bool               `json:"security"`
+	Roles            []string           `json:"roles"`
+	State            State              `json:"state"`
+	Branch           string             `json:"branch"`
+	BaseSHA          string             `json:"base_sha,omitempty"`
+	HeadSHA          string             `json:"head_sha,omitempty"`
+	MergeSHA         string             `json:"merge_sha,omitempty"`
+	PostVerifySHA    string             `json:"post_verify_sha,omitempty"`
+	RecoveryRequired bool               `json:"recovery_required,omitempty"`
+	SyncBase         string             `json:"conflict_base,omitempty"`
+	Attempts         int                `json:"attempts"`
+	Rotations        int                `json:"checkpoint_rotations"`
+	FixCycles        map[string]int     `json:"fix_cycles"`
+	AdvisorUsed      bool               `json:"advisor_used"`
+	RunID            string             `json:"run_id,omitempty"`
+	Preflight        *Preflight         `json:"preflight,omitempty"`
+	Findings         []Finding          `json:"findings,omitempty"`
+	Summary          string             `json:"implementation_summary,omitempty"`
+	ReportedTests    []string           `json:"reported_tests,omitempty"`
+	Risks            []string           `json:"remaining_risks,omitempty"`
+	Decisions        []string           `json:"decisions,omitempty"`
+	Blocker          *Blocker           `json:"blocker,omitempty"`
+	Verification     *Verification      `json:"verification_retry_guard,omitempty"`
+	Evidence         *Evidence          `json:"evidence,omitempty"`
+	VisualRequired   *VisualRequirement `json:"visual_required,omitempty"`
+	Updated          time.Time          `json:"updated"`
+}
+
+// VisualRequirement is a durable exact-head gate created when a preflight
+// specialist could identify source repairs but could not inspect a rendered
+// frame. It is not visual approval: final review must attach capture evidence
+// and the named visual reviewer must complete before integration is allowed.
+type VisualRequirement struct {
+	Role   string `json:"role"`
+	Base   string `json:"base"`
+	Head   string `json:"head"`
+	Config string `json:"config"`
+	Rules  string `json:"rules"`
+	Reason string `json:"reason"`
 }
 
 // Preflight is portable so completed reader guidance survives a controller restart.
@@ -506,6 +520,14 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			}
 			if v.HeadSHA != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.HeadSHA) {
 				return nil, false, errors.New("invalid verification retry revision")
+			}
+		}
+		if v := t.VisualRequired; v != nil {
+			if v.Role == "" || !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(v.Role) ||
+				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.Base) ||
+				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.Head) ||
+				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Config) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Rules) || strings.TrimSpace(v.Reason) == "" {
+				return nil, false, errors.New("invalid visual requirement")
 			}
 		}
 		if p := t.Preflight; p != nil {

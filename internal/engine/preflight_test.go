@@ -48,7 +48,7 @@ func TestPreflightVisualEvidenceFixRequiresConcreteSourceFinding(t *testing.T) {
 	result := provider.Result{Status: "in_progress", Question: "Please provide an exact-head rendered frame or Playwright screenshot for this visual review.", Summary: "The restricted reviewer cannot launch Playwright, but found two source defects.", Findings: []model.Finding{
 		{Severity: "medium", Category: "layout validation", Location: "src/engine/layout.ts:462", Reason: "The measured label path does not reject a narrow overflow.", Resolution: "Add the existing narrow-width validation before rendering the label."},
 		{Severity: "medium", Category: "schema compatibility", Location: "src/project-model/schemas.ts:26", Reason: "The scene schema omits the compatible text-fit field used by the renderer.", Resolution: "Add the compatible optional field and validate it with the existing schema test."},
-		{Severity: "high", Category: "visual verification", Reason: "No exact-head rendered frames or browser capture were available.", Resolution: "Have the supervisor supply native captures of healthy, timeout, failure, and rebalance frames for final visual review."},
+		{Severity: "high", Category: "visual verification", Location: "Rendered-frame evidence for head dae939776385f468aaf0818940925f384927782e", Reason: "No exact-head rendered frames or browser capture were available.", Resolution: "Have the supervisor supply native captures of healthy, timeout, failure, and rebalance frames for final visual review."},
 	}}
 	if !preflightEvidenceFix(designer, result) {
 		t.Fatalf("concrete source defects plus supervisor-owned visual evidence request were not admitted: supervisor=%t visual=%t actionable=%t role=%+v", supervisorEvidenceRequest(result), visualEvidenceRequest(result), actionablePreflightSourceFinding(result.Findings[0]), designer)
@@ -56,6 +56,11 @@ func TestPreflightVisualEvidenceFixRequiresConcreteSourceFinding(t *testing.T) {
 	if sources, ok := preflightEvidenceSourceFindings(designer, result); !ok || len(sources) != 2 || sources[1].Category != "schema compatibility" {
 		t.Fatalf("evidence-only visual finding was not partitioned from source repairs: %#v %t", sources, ok)
 	}
+	result.Findings[2].Location = "src/renderer.tsx:1"
+	if preflightEvidenceFix(designer, result) {
+		t.Fatal("an arbitrary source path was accepted as rendered-frame evidence")
+	}
+	result.Findings[2].Location = "Rendered-frame evidence for head dae939776385f468aaf0818940925f384927782e"
 
 	result.Findings[0].Reason = "The label looks wrong."
 	if preflightEvidenceFix(designer, result) {
@@ -65,6 +70,18 @@ func TestPreflightVisualEvidenceFixRequiresConcreteSourceFinding(t *testing.T) {
 	result.Question = "Provide an exact-head screenshot, then choose whether the product should permit clipping this caption."
 	if preflightEvidenceFix(designer, result) || !preflightHumanDecision(result) {
 		t.Fatal("product decision was admitted as a supervisor-owned evidence repair")
+	}
+}
+
+func TestVisualRequirementMatchesOnlyItsExactHeadAndPolicy(t *testing.T) {
+	effective := config.Effective{BaseSHA: strings.Repeat("a", 40), Hash: strings.Repeat("b", 64)}
+	task := &model.Task{HeadSHA: strings.Repeat("c", 40), VisualRequired: &model.VisualRequirement{Role: "designer", Base: effective.BaseSHA, Head: strings.Repeat("c", 40), Config: effective.Hash, Rules: roles.Hash(), Reason: "final rendered evidence required"}}
+	if !visualRequirementMatches(task, effective) {
+		t.Fatal("exact-head visual requirement was not recognized")
+	}
+	task.VisualRequired.Head = strings.Repeat("d", 40)
+	if visualRequirementMatches(task, effective) {
+		t.Fatal("stale visual requirement was accepted")
 	}
 }
 
