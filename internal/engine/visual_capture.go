@@ -227,15 +227,15 @@ func (c *Controller) newVisualCheckout(ctx context.Context, task *model.Task) (*
 }
 
 func visualEnvironment(cache string, extra ...string) []string {
-	env := make([]string, 0, len(os.Environ())+len(extra)+2)
+	env := make([]string, 0, len(os.Environ())+len(extra)+3)
 	for _, item := range cleanEnvironment() {
 		key := strings.ToUpper(strings.SplitN(item, "=", 2)[0])
-		if key == "NODE_PATH" || key == "NODE_OPTIONS" || strings.HasSuffix(key, "_CACHE") || strings.HasPrefix(key, "NPM_CONFIG_") || strings.HasPrefix(key, "PNPM_") || strings.HasPrefix(key, "YARN_") || strings.HasPrefix(key, "BUN_") {
+		if key == "NODE_PATH" || key == "NODE_OPTIONS" || key == "PLAYWRIGHT_BROWSERS_PATH" || strings.HasSuffix(key, "_CACHE") || strings.HasPrefix(key, "NPM_CONFIG_") || strings.HasPrefix(key, "PNPM_") || strings.HasPrefix(key, "YARN_") || strings.HasPrefix(key, "BUN_") {
 			continue
 		}
 		env = append(env, item)
 	}
-	return append(env, append([]string{"AIH_VISUAL_CACHE_DIR=" + cache, "XDG_CACHE_HOME=" + cache}, extra...)...)
+	return append(env, append([]string{"AIH_VISUAL_CACHE_DIR=" + cache, "XDG_CACHE_HOME=" + cache, "PLAYWRIGHT_BROWSERS_PATH=" + filepath.Join(cache, "playwright-browsers")}, extra...)...)
 }
 
 func visualCaptureRunError(command string, err error, output string) error {
@@ -769,6 +769,11 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	}
 	gateway.Close()
 	adapter.Close()
+	// Browser binaries are capture runtime, not evidence. Remove them before
+	// promoting the temporary directory to the retained evidence cache.
+	if err = os.RemoveAll(cache); err != nil {
+		return nil, fmt.Errorf("remove visual browser cache: %w", err)
+	}
 	sha, err = (gitx.Git{Dir: checkout.path}).SHA(ctx, "HEAD")
 	if err != nil || sha != task.HeadSHA {
 		return nil, errors.New("visual capture changed the reviewed head")

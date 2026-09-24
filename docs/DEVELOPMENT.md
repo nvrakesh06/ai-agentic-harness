@@ -133,7 +133,10 @@ Playwright below `AIH_HOME/tools` outside every target worktree and set
 before starting the supervisor. `AIH_HOME/tools` itself must be a real child of
 the resolved AIH home, not a symlink or junction. AIH resolves both paths and
 rejects a missing, relative, project-owned, or symlink-escaping module path; it
-never resolves browser code from the reviewed project.
+never resolves browser code from the reviewed project. For each capture, AIH
+binds `PLAYWRIGHT_BROWSERS_PATH` for prepare, adapter, and browser processes to
+a private child of that capture's visual cache. It overrides any inherited host
+value and removes the browser runtime before retaining the capture evidence.
 
 AIH redacts textual manifest and network diagnostics before saving local visual
 evidence. Screenshot pixels are opaque image data: AIH does not perform OCR or
