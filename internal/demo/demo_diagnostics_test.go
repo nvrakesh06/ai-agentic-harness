@@ -46,3 +46,14 @@ func TestDemoTimeoutReturnsWhenStoreConnectionIsHeld(t *testing.T) {
 		t.Fatalf("timeout diagnostics did not report bounded store read failure:\n%s", err)
 	}
 }
+
+func TestDiagnosticTextRedactsBeforeTruncating(t *testing.T) {
+	secret := "token=" + strings.Repeat("a", 24)
+	got := diagnosticText(strings.Repeat("x", 500) + secret)
+	if strings.Contains(got, secret) {
+		t.Fatalf("diagnostic text leaked a secret across its truncation boundary: %q", got)
+	}
+	if !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("diagnostic text did not redact secret: %q", got)
+	}
+}

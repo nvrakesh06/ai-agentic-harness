@@ -636,13 +636,19 @@ func summarizeTimeoutSnapshot(snapshot *model.Snapshot) timeoutSnapshot {
 		check.Phase = diagnosticText(check.Phase)
 		summary.Capacity.Verification = append(summary.Capacity.Verification, check)
 	}
+	tasks := make([]*model.Task, 0, len(snapshot.Tasks))
 	for _, task := range snapshot.Tasks {
+		if task != nil {
+			tasks = append(tasks, task)
+		}
+	}
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
+	for _, task := range tasks {
 		if len(summary.Tasks) == timeoutDiagnosticTasksMax {
 			break
 		}
 		summary.Tasks = append(summary.Tasks, timeoutTask{ID: diagnosticText(task.ID), State: task.State, RunID: diagnosticText(task.RunID), Updated: task.Updated})
 	}
-	sort.Slice(summary.Tasks, func(i, j int) bool { return summary.Tasks[i].ID < summary.Tasks[j].ID })
 	start := len(snapshot.Runs) - timeoutDiagnosticRunsMax
 	if start < 0 {
 		start = 0
@@ -654,8 +660,9 @@ func summarizeTimeoutSnapshot(snapshot *model.Snapshot) timeoutSnapshot {
 }
 
 func diagnosticText(value string) string {
+	value = safety.Redact(value)
 	if len(value) > timeoutDiagnosticTextMax {
 		value = value[:timeoutDiagnosticTextMax] + "[truncated]"
 	}
-	return safety.Redact(value)
+	return value
 }
