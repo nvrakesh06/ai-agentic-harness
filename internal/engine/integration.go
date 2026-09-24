@@ -169,7 +169,7 @@ func (c *Controller) postVerify(id string) {
 		}
 	}
 	if recovering && target != t.MergeSHA {
-		result, err := c.role(c.ctx, effective, roles.Builtins()["qa"], t, dir, "Verify acceptance criteria after the human-directed repair/revert on main.", "", "Native checks passed on "+target)
+		result, err := c.roleAtRef(c.ctx, effective, roles.Builtins()["qa"], t, dir, "Verify acceptance criteria after the human-directed repair/revert on main.", "", "Native checks passed on "+target, target)
 		if err != nil {
 			c.block(id, "Recovery QA could not run; restore access and retry.", err.Error(), model.PostVerify)
 			return
