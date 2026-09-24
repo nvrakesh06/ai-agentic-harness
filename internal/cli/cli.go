@@ -469,6 +469,13 @@ func checkUpdate(cmd *cobra.Command, p *engine.Project) {
 		fmt.Fprintf(cmd.ErrOrStderr(), "AIH %s is available; run aih self-update for a verified staged update.\n", latest)
 	}
 }
+func localCount(active bool, durable int) int {
+	if active {
+		return durable
+	}
+	return 0
+}
+
 func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) error {
 	s, h, e := p.DB.Load()
 	if e != nil {
@@ -512,10 +519,14 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		return enc.Encode(struct {
 			*model.Snapshot
 			MachineMaxHeavyChecks int                 `json:"machine_max_heavy_checks"`
+			LocalSupervisorActive bool                `json:"local_supervisor_active"`
+			LocalActiveWriters    int                 `json:"local_active_writers"`
+			LocalActiveReaders    int                 `json:"local_active_readers"`
+			LocalActivePreflights int                 `json:"local_active_preflights"`
 			ActiveSupervisorBuild *buildinfo.Identity `json:"active_supervisor_build,omitempty"`
 			InvokedBinaryBuild    buildinfo.Identity  `json:"invoked_binary_build"`
 			BuildsDiffer          bool                `json:"builds_differ"`
-		}{s, machineHeavy, supervisorBuild, invokedBuild, buildsDiffer})
+		}{s, machineHeavy, localActive, localCount(localActive, s.Capacity.ActiveWriters), localCount(localActive, s.Capacity.ActiveReaders), localCount(localActive, s.Capacity.ActivePreflights), supervisorBuild, invokedBuild, buildsDiffer})
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Project %s · durable revision %d (%s)\n", s.Project, s.Revision, shortSHA(h))
 	fmt.Fprintf(cmd.OutOrStdout(), "Controller: %s · durable heartbeat %s · lease expires %s\n", s.Controller.Machine, s.Controller.Heartbeat.Format(time.RFC3339), s.Controller.Expires.Format(time.RFC3339))
@@ -528,6 +539,7 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		}
 	} else {
 		fmt.Fprintln(cmd.OutOrStdout(), "Local supervisor: stopped")
+		fmt.Fprintln(cmd.OutOrStdout(), "Local work is stopped. Durable task states below are checkpoints, not proof of running workers. Recover with aih attach, then aih resume.")
 	}
 	if supervisorBuild != nil {
 		fmt.Fprintln(cmd.OutOrStdout(), "Active supervisor build:", supervisorBuild.Label())
@@ -542,18 +554,21 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		fmt.Fprintln(cmd.OutOrStdout(), "Last supervisor error:", message)
 	}
 	capacity := s.Capacity
-	fmt.Fprintf(cmd.OutOrStdout(), "Writers: %d active / %d target / %d max\n", capacity.ActiveWriters, capacity.TargetWriters, capacity.MaxWriters)
-	fmt.Fprintf(cmd.OutOrStdout(), "Readers: %d active / %d max\n", capacity.ActiveReaders, capacity.MaxReaders)
+	fmt.Fprintf(cmd.OutOrStdout(), "Writers: %d active / %d target / %d max\n", localCount(localActive, capacity.ActiveWriters), capacity.TargetWriters, capacity.MaxWriters)
+	fmt.Fprintf(cmd.OutOrStdout(), "Readers: %d active / %d max\n", localCount(localActive, capacity.ActiveReaders), capacity.MaxReaders)
+	if !localActive && (capacity.ActiveWriters != 0 || capacity.ActiveReaders != 0 || capacity.ActivePreflights != 0) {
+		fmt.Fprintf(cmd.OutOrStdout(), "Durable in-flight snapshot: %d writer(s), %d reader(s), %d preflight(s); liveness unverified\n", capacity.ActiveWriters, capacity.ActiveReaders, capacity.ActivePreflights)
+	}
 	heavy, light := 0, 0
 	queued := map[string]bool{}
 	for _, check := range capacity.Verification {
 		if check.Phase == "queued" {
 			queued[check.Task] = true
 		}
-		if check.Phase == "running" && check.Class == "heavy" {
+		if localActive && check.Phase == "running" && check.Class == "heavy" {
 			heavy++
 		}
-		if check.Phase == "running" && check.Class == "light" {
+		if localActive && check.Phase == "running" && check.Class == "light" {
 			light++
 		}
 	}
@@ -569,7 +584,7 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s check %q for %s (%s; %s)\n", check.Phase, check.Class, check.Check, check.Task, time.Since(at).Round(time.Second), map[string]string{"queued": "waiting for a verification slot", "running": "slot owned"}[check.Phase])
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Preflights: %d active\n", capacity.ActivePreflights)
+	fmt.Fprintf(cmd.OutOrStdout(), "Preflights: %d active\n", localCount(localActive, capacity.ActivePreflights))
 	if capacity.ReasonCode != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Backfill: %s — %s (%s)\n", capacity.State, capacity.Reason, capacity.ReasonCode)
 	} else {
