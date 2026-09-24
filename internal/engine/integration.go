@@ -23,7 +23,12 @@ func (c *Controller) integrate(id string) {
 		return
 	}
 	base := effective.BaseSHA
-	if t.Evidence == nil || t.Evidence.Base != base || t.Evidence.Head != t.HeadSHA || t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() {
+	rosterAccepted, rosterErr := c.reviewEvidenceAccepted(c.ctx, effective, t)
+	if rosterErr != nil {
+		c.block(id, "Restore canonical review state before integration.", rosterErr.Error(), model.SyncRequired)
+		return
+	}
+	if t.Evidence == nil || t.Evidence.Base != base || t.Evidence.Head != t.HeadSHA || t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || !rosterAccepted {
 		if e = c.verifyReview(id); e != nil {
 			c.handleVerificationError(id, e)
 			return
@@ -38,7 +43,8 @@ func (c *Controller) integrate(id string) {
 			return
 		}
 		base = t.BaseSHA
-		if effective.BaseSHA != base || effective.Hash != t.Evidence.Config {
+		rosterAccepted, rosterErr = c.reviewEvidenceAccepted(c.ctx, effective, t)
+		if rosterErr != nil || effective.BaseSHA != base || effective.Hash != t.Evidence.Config || !rosterAccepted {
 			if c.mutate(func(s *model.Snapshot) error { s.Tasks[id].State = model.SyncRequired; return nil }) == nil {
 				_ = c.updatePR(id, true)
 				c.mirror(id)

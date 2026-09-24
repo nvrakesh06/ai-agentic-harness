@@ -209,6 +209,20 @@ func TestVisualCaptureTargetValidationAndLegacyDefault(t *testing.T) {
 	}
 }
 
+func TestReviewReuseDataOnlyPathsRequireSafeTextGlobs(t *testing.T) {
+	p := Defaults()
+	p.ReviewReuse = ReviewReuse{SecurityDataOnlyPaths: []string{"fixtures/review-data/*.txt"}}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("valid explicit inert text path rejected: %v", err)
+	}
+	for _, pattern := range []string{"docs/*.md", "fixtures/*.mdx", ".github/*.txt", "../outside/*.txt", "fixtures/*.json"} {
+		p.ReviewReuse = ReviewReuse{SecurityDataOnlyPaths: []string{pattern}}
+		if err := p.Validate(); err == nil {
+			t.Fatalf("unsafe review reuse path accepted: %q", pattern)
+		}
+	}
+}
+
 func TestParseLocalIncludesCustomRoles(t *testing.T) {
 	root := t.TempDir()
 	files := canonicalFiles()

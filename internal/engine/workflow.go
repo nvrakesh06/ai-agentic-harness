@@ -1265,7 +1265,18 @@ func (c *Controller) verifyReview(id string) error {
 		}
 	}
 	roster, rosterReason := roles.ReviewRoster(required)
-	evidence := &model.Evidence{Base: t.BaseSHA, Head: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: checks, Reviews: map[string]string{}, ReviewRoster: roster, ReviewRosterReason: rosterReason, At: time.Now().UTC()}
+	scope := reviewScope(t, paths, roster)
+	dispositions := c.reusableReviewDispositions(c.ctx, effective, t, roster, scope)
+	if dispositions == nil {
+		dispositions = map[string]model.ReviewDisposition{}
+	}
+	activeRequired := make([]roles.Role, 0, len(required))
+	for _, role := range required {
+		if _, reused := dispositions[role.Name]; !reused {
+			activeRequired = append(activeRequired, role)
+		}
+	}
+	evidence := &model.Evidence{Base: t.BaseSHA, Head: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: checks, Reviews: map[string]string{}, ReviewRoster: roster, ReviewRosterReason: rosterReason, ReviewScope: scope, ReviewDispositions: dispositions, At: time.Now().UTC()}
 	if e = c.mutate(func(s *model.Snapshot) error {
 		task := s.Tasks[id]
 		task.State = model.Review
@@ -1292,15 +1303,19 @@ func (c *Controller) verifyReview(id string) error {
 		return e
 	}
 	c.mirror(id)
-	outcomes := c.runReviewAttempt(effective, t, dir, diff, evidence, 1, required)
-	assessment := assessReviews(required, outcomes)
+	outcomes := c.runReviewAttempt(effective, t, dir, diff, evidence, 1, activeRequired)
+	assessment := assessReviews(activeRequired, outcomes)
 	if e = c.preserveReviewFindings(id, assessment.findings); e != nil {
 		return e
 	}
-	for i, role := range required {
+	for i, role := range activeRequired {
 		if outcomes[i].result.Status == "completed" {
 			evidence.Reviews[role.Name] = outcomes[i].result.Summary
+			evidence.ReviewDispositions[role.Name] = completedDisposition(t, role, roleRuntime(effective, role))
 		}
+	}
+	if e = c.persistReviewProvenance(id, effective, t, roster, scope, activeRequired, outcomes); e != nil {
+		return e
 	}
 	if e = c.publishReviewProgress(id, evidence); e != nil {
 		return e
@@ -1309,13 +1324,13 @@ func (c *Controller) verifyReview(id string) error {
 		return e
 	}
 	if assessment.blocking >= 0 {
-		role := required[assessment.blocking]
+		role := activeRequired[assessment.blocking]
 		_ = c.P.DB.Event(id, t.RunID, role.Name, effective.Project.Provider, "review_finding_fix", outcomes[assessment.blocking].result.Summary)
 		c.retry(id, role.Name, outcomes[assessment.blocking].result.Summary)
 		return c.refreshDraftPR(id)
 	}
 	if assessment.human >= 0 {
-		role := required[assessment.human]
+		role := activeRequired[assessment.human]
 		result := outcomes[assessment.human].result
 		_ = c.P.DB.Event(id, t.RunID, role.Name, effective.Project.Provider, "human_decision_required", result.Question)
 		c.block(id, result.Question, result.Summary, model.SyncRequired)
@@ -1330,8 +1345,8 @@ func (c *Controller) verifyReview(id string) error {
 		visualRequested := false
 		sourceRequested := false
 		for _, index := range assessment.evidence {
-			refreshRoles = append(refreshRoles, required[index])
-			names = append(names, required[index].Name)
+			refreshRoles = append(refreshRoles, activeRequired[index])
+			names = append(names, activeRequired[index].Name)
 			visualRequested = visualRequested || visualEvidenceRequest(outcomes[index].result)
 			sourceRequested = sourceRequested || sourceEvidenceRequest(outcomes[index].result)
 		}
@@ -1373,7 +1388,11 @@ func (c *Controller) verifyReview(id string) error {
 		for i, role := range refreshRoles {
 			if refreshed[i].result.Status == "completed" {
 				evidence.Reviews[role.Name] = refreshed[i].result.Summary
+				evidence.ReviewDispositions[role.Name] = completedDisposition(t, role, roleRuntime(effective, role))
 			}
+		}
+		if e = c.persistReviewProvenance(id, effective, t, roster, scope, refreshRoles, refreshed); e != nil {
+			return e
 		}
 		if e = c.publishReviewProgress(id, evidence); e != nil {
 			return e
@@ -1404,6 +1423,9 @@ func (c *Controller) verifyReview(id string) error {
 			return c.refreshDraftPR(id)
 		}
 		_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_completed", "roles="+strings.Join(names, ",")+" head="+t.HeadSHA)
+	}
+	if !validReviewDispositions(required, evidence) {
+		return errors.New("final review roster has no valid disposition for every required role")
 	}
 	if visualRequired && (evidence.Visual == nil || strings.TrimSpace(evidence.Reviews[t.VisualRequired.Role]) == "") {
 		c.block(id, "Exact-head visual evidence and the designated visual review are required before merge.", "The durable preflight visual requirement was not satisfied; capture or reviewer completion is missing.", model.SyncRequired)
@@ -1532,6 +1554,22 @@ func (c *Controller) prBody(t *model.Task) string {
 		b.WriteString("\nIndependent reviews:\n")
 		for _, n := range names {
 			b.WriteString("- " + n + ": " + e.Reviews[n] + "\n")
+		}
+		dispositionNames := make([]string, 0, len(e.ReviewDispositions))
+		for name := range e.ReviewDispositions {
+			dispositionNames = append(dispositionNames, name)
+		}
+		sort.Strings(dispositionNames)
+		if len(dispositionNames) > 0 {
+			b.WriteString("\nReview dispositions:\n")
+			for _, name := range dispositionNames {
+				d := e.ReviewDispositions[name]
+				fmt.Fprintf(&b, "- %s: %s from `%s` via %s", name, d.Disposition, d.SourceHead, d.Runtime)
+				if d.Reason != "" {
+					fmt.Fprintf(&b, " (%s)", d.Reason)
+				}
+				b.WriteString("\n")
+			}
 		}
 		fmt.Fprintf(&b, "\nPolicy hash: `%s`\nRules hash: `%s`\n", e.Config, e.Rules)
 	}

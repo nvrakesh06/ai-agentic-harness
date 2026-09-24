@@ -635,6 +635,19 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "  Review: "+review)
 		}
+		if t.Evidence != nil {
+			names := make([]string, 0, len(t.Evidence.ReviewDispositions))
+			for role := range t.Evidence.ReviewDispositions {
+				names = append(names, role)
+			}
+			sort.Strings(names)
+			for _, role := range names {
+				disposition := t.Evidence.ReviewDispositions[role]
+				if disposition.Disposition == "reused" {
+					fmt.Fprintf(cmd.OutOrStdout(), "  Review reuse: %s from %s (%s): %s\n", role, shortSHA(disposition.SourceHead), disposition.Runtime, disposition.Reason)
+				}
+			}
+		}
 	}
 	if len(s.Runs) > 0 {
 		const recentRunLimit = 10

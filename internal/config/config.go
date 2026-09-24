@@ -30,6 +30,7 @@ type Project struct {
 	ProviderModels map[string]string `yaml:"provider_models" json:"provider_models"`
 	Checks         []Check           `yaml:"checks" json:"checks"`
 	VisualCapture  *VisualCapture    `yaml:"visual_capture,omitempty" json:"visual_capture,omitempty"`
+	ReviewReuse    ReviewReuse       `yaml:"review_reuse,omitempty" json:"review_reuse,omitempty"`
 	WorkerSeconds  int               `yaml:"worker_timeout_seconds" json:"worker_timeout_seconds"`
 	LeaseSeconds   int               `yaml:"lease_seconds" json:"lease_seconds"`
 	ReleaseRepo    string            `yaml:"release_repo" json:"release_repo"`
@@ -97,6 +98,12 @@ func (v *VisualCapture) CaptureTargets() []VisualCaptureTarget {
 	return v.Targets
 }
 
+// ReviewReuse is opt-in policy for the exceptionally narrow review reuse
+// path. Entries name inert, project-specific text-data locations; ordinary
+// documentation, source, and agent instructions are never implicitly trusted.
+type ReviewReuse struct {
+	SecurityDataOnlyPaths []string `yaml:"security_data_only_paths,omitempty" json:"security_data_only_paths,omitempty"`
+}
 type Policy struct {
 	ImplementationRetries int `yaml:"implementation_retries"`
 	ReviewCycles          int `yaml:"review_fix_cycles"`
@@ -301,6 +308,14 @@ func (p Project) Validate() error {
 	}
 	if p.WorkerSeconds < 10 || p.LeaseSeconds < 60 {
 		return errors.New("worker timeout must be >=10s and lease >=60s")
+	}
+	if len(p.ReviewReuse.SecurityDataOnlyPaths) > 8 {
+		return errors.New("review_reuse may declare at most 8 data-only paths")
+	}
+	for _, pattern := range p.ReviewReuse.SecurityDataOnlyPaths {
+		if !regexp.MustCompile(`^[a-zA-Z0-9_./*?-]{1,160}$`).MatchString(pattern) || strings.HasPrefix(pattern, ".") || strings.Contains(pattern, "..") || !strings.HasSuffix(strings.ToLower(pattern), ".txt") {
+			return errors.New("review_reuse data-only paths must be safe relative .txt globs")
+		}
 	}
 	for _, c := range p.Checks {
 		if c.Name == "" || len(c.Command) == 0 || c.Timeout <= 0 {
