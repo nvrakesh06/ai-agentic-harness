@@ -320,16 +320,38 @@ func TestCompletedPreflightReusesUnchangedImplementerCheckpointOnly(t *testing.T
 
 func TestHumanContinuationEvidenceRequiresExactCheckpointAndNoNewDecision(t *testing.T) {
 	task := &model.Task{HeadSHA: strings.Repeat("a", 40)}
-	if !humanContinuationEvidence(task, "The concrete browser fix is verified at checkpoint aaaaaaa on the task branch.") {
+	if !humanContinuationEvidence(task, "AIH-CONTINUE CHECKPOINT "+task.HeadSHA) {
 		t.Fatal("exact checkpoint evidence was rejected")
 	}
 	for _, answer := range []string{
 		"The concrete browser fix is verified on the task branch.",
-		"Checkpoint aaaaaaa needs architecture advice before continuing.",
+		"AIH-CONTINUE CHECKPOINT aaaaaaa",
+		"At checkpoint aaaaaaa, use a different visual style.",
+		"AIH-CONTINUE CHECKPOINT " + task.HeadSHA + " and use a different visual style.",
 	} {
 		if humanContinuationEvidence(task, answer) {
 			t.Fatalf("unsafe human answer reused guidance: %q", answer)
 		}
+	}
+}
+
+func TestImplementerContinuationDecisionOrFindingsInvalidatePreflightReuse(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		result provider.Result
+		want   bool
+	}{
+		{"ordinary checkpoint", provider.Result{Status: "in_progress", Summary: "Continue the existing repair."}, true},
+		{"structured decision question", provider.Result{Status: "in_progress", Summary: "Checkpoint is ready.", Question: "Should we use a different visual style for this screen?"}, false},
+		{"security finding", provider.Result{Status: "in_progress", Findings: []model.Finding{{Category: "security", Reason: "The credential boundary changed."}}}, false},
+		{"architecture finding", provider.Result{Status: "in_progress", Findings: []model.Finding{{Category: "architecture", Reason: "The queue ownership is ambiguous."}}}, false},
+		{"empty placeholder", provider.Result{Status: "in_progress", Findings: []model.Finding{{}}}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := continuationPreflightReusable(test.result); got != test.want {
+				t.Fatalf("continuation reusable=%t, want %t for %#v", got, test.want, test.result)
+			}
+		})
 	}
 }
 

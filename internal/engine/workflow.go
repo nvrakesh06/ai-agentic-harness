@@ -583,6 +583,8 @@ func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result 
 		return errors.New("invalid recovered deadline handoff")
 	}
 	t := c.Snapshot().Tasks[id]
+	effective, effectiveErr := c.effective(ctx)
+	preflightRoles, preflightErr := requiredPreflightRoles(effective, t)
 	sha, err := c.P.Git.Checkpoint(ctx, c.P.TaskPath(t), id)
 	if err != nil {
 		return err
@@ -591,7 +593,8 @@ func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result 
 	if sha != t.HeadSHA {
 		updates = append(updates, gitx.Update{Branch: t.Branch, Old: t.HeadSHA, New: sha})
 	}
-	return c.save(ctx, func(s *model.Snapshot) error {
+	resumed := false
+	err = c.save(ctx, func(s *model.Snapshot) error {
 		task := s.Tasks[id]
 		task.HeadSHA = sha
 		if task.VisualRequired != nil {
@@ -606,8 +609,22 @@ func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result 
 			model.Block(task, "Task reached 24 checkpoint slices. Refine or authorize further work.", task.Summary, model.Ready)
 			return nil
 		}
-		return model.Transition(task, model.Ready)
+		if err := model.Transition(task, model.Ready); err != nil {
+			return err
+		}
+		if effectiveErr == nil && preflightErr == nil && continuationPreflightReusable(result) {
+			resumed = reusePreflightForContinuation(task.Preflight, task, effective, preflightRoles)
+		}
+		if resumed {
+			task.Decisions = append(task.Decisions, "Recovered checkpoint continuation: reused completed pre-implementation guidance at "+task.HeadSHA+".")
+		}
+		return nil
 	}, updates...)
+	if err == nil && resumed {
+		current := c.Snapshot().Tasks[id]
+		_ = c.P.DB.Event(id, current.RunID, "implementer", effective.Project.Provider, "checkpoint_continuation_admitted", "recovered checkpoint="+current.HeadSHA+"; prior guidance reused without another preflight")
+	}
+	return err
 }
 
 func portableStrings(c *Controller, values []string) []string {
@@ -762,7 +779,7 @@ func (c *Controller) implement(id string) bool {
 			if err := model.Transition(t, model.Ready); err != nil {
 				return err
 			}
-			if preflightErr == nil && !preflightHumanDecision(r) {
+			if preflightErr == nil && continuationPreflightReusable(r) {
 				resumed = reusePreflightForContinuation(t.Preflight, t, effective, preflightRoles)
 			}
 			if resumed {

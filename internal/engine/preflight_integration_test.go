@@ -26,6 +26,7 @@ type heldPreflightProvider struct {
 type checkpointContinuationProvider struct {
 	designers atomic.Int32
 	writers   atomic.Int32
+	recovered bool
 }
 
 func (*checkpointContinuationProvider) Name() string                   { return "codex" }
@@ -40,7 +41,7 @@ func (p *checkpointContinuationProvider) Run(ctx context.Context, request provid
 			if err := os.WriteFile(filepath.Join(request.Directory, "checkpoint-continuation.txt"), []byte("durable checkpoint\n"), 0o644); err != nil {
 				return provider.Result{}, err
 			}
-			return provider.Result{Schema: 1, Status: "in_progress", Summary: "A coherent source checkpoint is ready; continue the same repair."}, nil
+			return provider.Result{Schema: 1, Status: "in_progress", Summary: "A coherent source checkpoint is ready; continue the same repair.", RecoveredDeadlineHandoff: p.recovered}, nil
 		}
 		<-ctx.Done()
 		return provider.Result{}, ctx.Err()
@@ -315,6 +316,59 @@ func TestImplementerCheckpointContinuesWithoutRepeatingPreflight(t *testing.T) {
 	current := c.Snapshot().Tasks[task.ID]
 	if workers.designers.Load() != 1 || current.Preflight == nil || current.Preflight.Phase != "writing" || !strings.Contains(current.Preflight.ReuseReason, "checkpoint") || !containsDecision(current.Decisions, "Checkpoint continuation") {
 		t.Fatalf("checkpoint continuation lost durable guidance provenance: designers=%d task=%#v", workers.designers.Load(), current)
+	}
+	cancel()
+	<-done
+}
+
+func TestRecoveredDeadlineCheckpointContinuesWithoutRepeatingPreflight(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	s, old, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective, err := engine.Canonical(ctx, f.P.Git)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: effective.BaseSHA}
+	s.Tasks[task.ID] = task
+	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, effective.BaseSHA); err != nil {
+		t.Fatal(err)
+	}
+	next, err := f.P.Git.StateCommit(ctx, old, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: old, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	workers := &checkpointContinuationProvider{recovered: true}
+	f.P.Provider = workers
+	c := engine.New(f.P)
+	done := make(chan error, 1)
+	go func() { done <- c.Serve(ctx) }()
+	deadline := time.NewTimer(60 * time.Second)
+	defer deadline.Stop()
+	for workers.writers.Load() < 2 {
+		select {
+		case err := <-done:
+			t.Fatalf("supervisor exited before recovered checkpoint continuation: %v", err)
+		case <-deadline.C:
+			current := c.Snapshot().Tasks[task.ID]
+			t.Fatalf("recovered checkpoint did not resume writer directly: designers=%d writers=%d task=%#v", workers.designers.Load(), workers.writers.Load(), current)
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	current := c.Snapshot().Tasks[task.ID]
+	if workers.designers.Load() != 1 || current.Preflight == nil || current.Preflight.Phase != "writing" || !containsDecision(current.Decisions, "Recovered checkpoint continuation") {
+		t.Fatalf("recovered checkpoint lost durable guidance provenance: designers=%d task=%#v", workers.designers.Load(), current)
 	}
 	cancel()
 	<-done

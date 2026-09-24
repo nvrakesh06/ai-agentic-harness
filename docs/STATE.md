@@ -91,9 +91,9 @@ canonical base, task contract/scope, accepted cross-task corrections, configurat
 or role rules invalidates the record. A changed task head alone can reuse fully
 completed guidance for a bounded `FIX` retry or an implementer's durable
 `in_progress` checkpoint continuation, with its durable scope fingerprint and
-reuse reason recorded. A human unblock keeps that guidance only when the answer
-identifies the exact checkpoint and introduces no new decision or specialist
-direction.
+reuse reason recorded. A human unblock keeps that guidance only for the exact
+structured acknowledgement `AIH-CONTINUE CHECKPOINT <full-head-sha>`; any other
+answer can introduce a decision and receives fresh specialist guidance.
 Exact-head native checks and final independent reviews are never reused.
 Shutdown and takeover clear interrupted reader ownership while preserving completed
 guidance eligibility and its reuse counter across verification recovery.

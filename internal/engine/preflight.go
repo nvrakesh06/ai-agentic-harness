@@ -93,12 +93,28 @@ func humanContinuationEvidence(t *model.Task, answer string) bool {
 	if t == nil || len(t.HeadSHA) < 7 {
 		return false
 	}
-	text := strings.ToLower(strings.TrimSpace(answer))
-	head := strings.ToLower(t.HeadSHA)
-	if !strings.Contains(text, head) && !strings.Contains(text, head[:7]) {
-		return false
+	// This is intentionally an acknowledgement, not a natural-language
+	// classifier. Any prose can carry an untracked task decision. The full
+	// source identity prevents a short SHA embedded in unrelated text from
+	// silently suppressing a required specialist pass.
+	return strings.EqualFold(strings.TrimSpace(answer), "AIH-CONTINUE CHECKPOINT "+t.HeadSHA)
+}
+
+// continuationFindingsInvalidate treats any reported finding as a new input.
+// Implementer checkpoints normally describe remaining work in their summary;
+// findings instead carry a review-like concern whose impact cannot safely be
+// inferred from the old preflight. Empty placeholders do not count.
+func continuationFindingsInvalidate(result provider.Result) bool {
+	for _, finding := range result.Findings {
+		if strings.TrimSpace(strings.Join([]string{finding.Severity, finding.Category, finding.Location, finding.Reason, finding.Resolution, finding.Role}, "")) != "" {
+			return true
+		}
 	}
-	return !containsAny(text, "architecture", "security", "ambigu", "product decision", "new requirement", "change the objective", "design advice", "specialist advice", "threat model", "authorize")
+	return false
+}
+
+func continuationPreflightReusable(result provider.Result) bool {
+	return !preflightHumanDecision(result) && !continuationFindingsInvalidate(result)
 }
 
 func findingsFingerprint(findings []model.Finding) string {
@@ -246,7 +262,11 @@ func preflightHumanDecision(result provider.Result) bool {
 	if result.Status != "blocked" && result.Status != "in_progress" {
 		return false
 	}
-	text := strings.ToLower(strings.Join([]string{result.Question, result.Summary, strings.Join(result.Risks, " ")}, " "))
+	question := strings.ToLower(strings.TrimSpace(result.Question))
+	if question != "" && containsAny(question, "should we", "do you want", "which ", "what visual style", "what style", "choose ") {
+		return true
+	}
+	text := strings.ToLower(strings.Join([]string{question, result.Summary, strings.Join(result.Risks, " ")}, " "))
 	return containsAny(text, "product decision", "choose whether", "accept risk", "authorize an exception", "approve an exception", "provide credentials", "threat model", "security boundary")
 }
 
