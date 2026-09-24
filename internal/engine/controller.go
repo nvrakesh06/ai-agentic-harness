@@ -37,6 +37,7 @@ const (
 type Controller struct {
 	P           *Project
 	mu          sync.Mutex
+	persistMu   sync.Mutex
 	gitMu       sync.Mutex
 	s           *model.Snapshot
 	head, owner string
@@ -123,25 +124,36 @@ func (c *Controller) save(ctx context.Context, fn func(*model.Snapshot) error, u
 // publishes when the durable lease has reached half-life, so frequent local
 // pulses and duplicate mutations do not create remote history.
 func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error, updates ...gitx.Update) (bool, error) {
+	// A publication needs a stable expected state head, but it can run several
+	// Git subprocesses and a SQLite write. Keep those publications serialized
+	// without holding the snapshot lock while those external operations wait.
+	// In particular, workers and the scheduler must still be able to observe
+	// state and finish while a Windows Git process is contending for the host.
+	c.persistMu.Lock()
+	defer c.persistMu.Unlock()
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.s == nil {
+		c.mu.Unlock()
 		return false, ErrLease
 	}
 	now := c.nowUTC()
 	if c.s.Controller.Owner != c.owner || !c.s.Controller.Expires.After(now) {
+		c.mu.Unlock()
 		return false, ErrLease
 	}
-	next := model.Clone(c.s)
+	current := model.Clone(c.s)
+	head := c.head
+	c.mu.Unlock()
+	next := model.Clone(current)
 	if e := fn(next); e != nil {
 		return false, e
 	}
-	due := leaseRenewalDue(c.s.Controller, now, c.leaseDuration())
-	if len(updates) == 0 && reflect.DeepEqual(c.s, next) {
+	due := leaseRenewalDue(current.Controller, now, c.leaseDuration())
+	if len(updates) == 0 && reflect.DeepEqual(current, next) {
 		if !due {
 			return false, nil
 		}
-		return c.renewLeaseLocked(ctx, now)
+		return c.renewLease(ctx, now, current, head)
 	}
 	// Keep runtime paths out of portable diagnostic/result text.
 	portable, e := json.Marshal(next)
@@ -151,27 +163,34 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 	if e = json.Unmarshal([]byte(c.portable(string(portable))), next); e != nil {
 		return false, e
 	}
-	if len(updates) == 0 && reflect.DeepEqual(c.s, next) {
+	if len(updates) == 0 && reflect.DeepEqual(current, next) {
 		if !due {
 			return false, nil
 		}
-		return c.renewLeaseLocked(ctx, now)
+		return c.renewLease(ctx, now, current, head)
 	}
 	if next.Controller.Owner == c.owner {
 		next.Controller.Heartbeat = now
 		next.Controller.Expires = now.Add(c.leaseDuration())
 	}
-	next.Revision = c.s.Revision + 1
-	newHead, e := c.P.Git.StateCommit(ctx, c.head, next)
+	next.Revision = current.Revision + 1
+	newHead, e := c.P.Git.StateCommit(ctx, head, next)
 	if e != nil {
 		return false, e
 	}
-	all := append([]gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}, updates...)
+	all := append([]gitx.Update{{Branch: "aih-state", Old: head, New: newHead}}, updates...)
 	if e = c.P.Git.Publish(ctx, all); e != nil {
 		return false, e
 	}
+	// Publish is now authoritative. Make it visible before optional local event
+	// recording so the scheduler cannot dispatch from a stale cache while SQLite
+	// is busy.
+	c.mu.Lock()
+	c.s = next
+	c.head = newHead
+	c.mu.Unlock()
 	for id, task := range next.Tasks {
-		if old := c.s.Tasks[id]; old == nil || old.State != task.State {
+		if old := current.Tasks[id]; old == nil || old.State != task.State {
 			from := ""
 			if old != nil {
 				from = string(old.State)
@@ -179,8 +198,6 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 			_ = c.P.DB.Event(id, task.RunID, "", "", "state_transition", from+" -> "+string(task.State))
 		}
 	}
-	c.s = next
-	c.head = newHead
 	if e = c.P.DB.Save(newHead, next); e != nil {
 		return true, e
 	}
@@ -188,22 +205,24 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 	return true, nil
 }
 
-// renewLeaseLocked publishes a dedicated lease commit while c.mu is held. The
-// cached snapshot adopts the authoritative renewed lease without changing its
-// user-significant state revision.
-func (c *Controller) renewLeaseLocked(ctx context.Context, now time.Time) (bool, error) {
-	next := model.Clone(c.s)
+// renewLease publishes a dedicated lease commit while persistMu preserves the
+// expected state head. The cached snapshot adopts the authoritative renewed
+// lease without changing its user-significant state revision.
+func (c *Controller) renewLease(ctx context.Context, now time.Time, current *model.Snapshot, head string) (bool, error) {
+	next := model.Clone(current)
 	next.Controller.Heartbeat = now
 	next.Controller.Expires = now.Add(c.leaseDuration())
-	newHead, e := c.P.Git.LeaseCommit(ctx, c.head, next)
+	newHead, e := c.P.Git.LeaseCommit(ctx, head, next)
 	if e != nil {
 		return false, e
 	}
-	if e = c.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}); e != nil {
+	if e = c.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: head, New: newHead}}); e != nil {
 		return false, e
 	}
+	c.mu.Lock()
 	c.s = next
 	c.head = newHead
+	c.mu.Unlock()
 	if e = c.P.DB.Save(newHead, next); e != nil {
 		return true, e
 	}
