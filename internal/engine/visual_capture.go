@@ -126,19 +126,32 @@ func visualCaptureRunError(command string, err error, output string) error {
 	return &checkFailure{name: "visual capture", command: filepath.Base(command), err: err, output: short(safety.Redact(output), 2000)}
 }
 
-// playwrightModule is an explicit machine capability. AIH never resolves a
-// browser library from the target project, whose dependencies are untrusted
-// evidence inputs rather than supervisor tooling.
-func playwrightModule() (string, error) {
+// playwrightModule is an explicit machine capability. The resolved module must
+// live below AIH_HOME/tools, never in a target worktree or behind a link that
+// escapes that supervisor-owned directory.
+func playwrightModule(home string) (string, error) {
 	module := os.Getenv("AIH_PLAYWRIGHT_MODULE")
-	if module == "" || !filepath.IsAbs(module) {
-		return "", &visualCaptureUnavailableError{errors.New("AIH_PLAYWRIGHT_MODULE must name an absolute supervisor-owned Playwright module")}
+	if module == "" || !filepath.IsAbs(module) || home == "" {
+		return "", &visualCaptureUnavailableError{errors.New("AIH_PLAYWRIGHT_MODULE must name an absolute module below AIH_HOME/tools")}
 	}
-	info, err := os.Stat(module)
-	if err != nil || !info.IsDir() || filepath.Base(module) != "playwright" {
+	tools, err := filepath.EvalSymlinks(filepath.Join(home, "tools"))
+	if err != nil {
+		return "", &visualCaptureUnavailableError{errors.New("AIH tools directory is unavailable")}
+	}
+	module, err = filepath.EvalSymlinks(module)
+	if err != nil {
 		return "", &visualCaptureUnavailableError{errors.New("AIH_PLAYWRIGHT_MODULE is not an available Playwright module")}
 	}
+	info, err := os.Stat(module)
+	if err != nil || !info.IsDir() || filepath.Base(module) != "playwright" || !pathWithin(tools, module) {
+		return "", &visualCaptureUnavailableError{errors.New("AIH_PLAYWRIGHT_MODULE must resolve below AIH_HOME/tools/playwright")}
+	}
 	return module, nil
+}
+
+func pathWithin(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 // visualCertificate creates capture-only credentials. They live in the AIH
@@ -474,7 +487,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		return nil, err
 	}
 	defer os.RemoveAll(temporary)
-	playwright, err := playwrightModule()
+	playwright, err := playwrightModule(c.P.Home)
 	if err != nil {
 		return nil, err
 	}

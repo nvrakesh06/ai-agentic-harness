@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -104,7 +105,8 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	if runtime.GOOS != "windows" || os.Getenv("AIH_REAL_PLAYWRIGHT") != "1" {
 		t.Skip("real Playwright fixture runs on an explicitly provisioned Windows browser host")
 	}
-	if module, err := fixturePlaywrightModule(); err != nil {
+	home := os.Getenv("AIH_HOME")
+	if module, err := fixturePlaywrightModule(home); err != nil {
 		t.Skipf("supervisor Playwright capability unavailable: %v", err)
 	} else {
 		t.Setenv("AIH_PLAYWRIGHT_MODULE", module)
@@ -138,7 +140,7 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	t.Setenv("AIH_VISUAL_SERVER_HELPER", "1")
 	t.Setenv("AIH_VISUAL_TEST_FORBIDDEN", forbidden.URL)
 	adapter := []string{os.Args[0], "-test.run=^TestNativeVisualAdapter$"}
-	c := &Controller{P: &Project{Dir: state}}
+	c := &Controller{P: &Project{Home: home, Dir: state}}
 	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: adapter, Timeout: 10}}}
 	task := &model.Task{ID: "task-visual", HeadSHA: head}
 	if _, err := c.captureVisual(context.Background(), effective, &model.Task{ID: "../outside", HeadSHA: head}, worktree); err == nil {
@@ -163,6 +165,9 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	if forbiddenRequests.Load() != 0 {
 		t.Fatalf("forbidden navigation redirect reached destination %d times", forbiddenRequests.Load())
 	}
+	// The redirect is a one-capture scenario. Clear it before exercising the
+	// normal exact-head cache and recapture path.
+	t.Setenv("AIH_VISUAL_TEST_NAVIGATION", "")
 	if !strings.HasPrefix(filepath.Join(state, filepath.FromSlash(visual.Manifest)), state) {
 		t.Fatal("manifest escaped AIH state")
 	}
@@ -216,19 +221,37 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	}
 }
 
-func fixturePlaywrightModule() (string, error) {
-	if module := os.Getenv("AIH_PLAYWRIGHT_MODULE"); module != "" {
-		return module, nil
+func fixturePlaywrightModule(home string) (string, error) {
+	return playwrightModule(home)
+}
+
+func TestPlaywrightModuleRequiresResolvedAIHToolsPath(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	toolsModule := filepath.Join(home, "tools", "node_modules", "playwright")
+	if err := os.MkdirAll(toolsModule, 0700); err != nil {
+		t.Fatal(err)
 	}
-	cache, err := os.UserCacheDir()
-	if err != nil {
-		return "", err
+	t.Setenv("AIH_PLAYWRIGHT_MODULE", toolsModule)
+	resolved, err := playwrightModule(home)
+	if err != nil || resolved == "" {
+		t.Fatalf("AIH-owned tools module rejected: %q %v", resolved, err)
 	}
-	matches, err := filepath.Glob(filepath.Join(cache, "npm-cache", "_npx", "*", "node_modules", "playwright"))
-	if err != nil || len(matches) == 0 {
-		return "", errors.New("set AIH_PLAYWRIGHT_MODULE to a provisioned module")
+	projectModule := filepath.Join(project, "node_modules", "playwright")
+	if err = os.MkdirAll(projectModule, 0700); err != nil {
+		t.Fatal(err)
 	}
-	return matches[len(matches)-1], nil
+	t.Setenv("AIH_PLAYWRIGHT_MODULE", projectModule)
+	if _, err = playwrightModule(home); err == nil {
+		t.Fatal("project-controlled Playwright module accepted")
+	}
+	symlink := filepath.Join(home, "tools", "linked-playwright")
+	if err = os.Symlink(projectModule, symlink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	t.Setenv("AIH_PLAYWRIGHT_MODULE", symlink)
+	if _, err = playwrightModule(home); err == nil {
+		t.Fatal("Playwright symlink escaping AIH tools accepted")
+	}
 }
 
 func TestVisualRunnerOwnsLoopbackAndProfilePolicy(t *testing.T) {
@@ -318,6 +341,10 @@ func TestVisualManifestBoundsAndSecretRejection(t *testing.T) {
 	visual, err := loadVisualEvidence(dir, "task-1", head, cfg)
 	if err != nil || len(visual.Artifacts) != 2 || visual.Head != head || !strings.HasPrefix(visual.Manifest, "visual-evidence/task-1/") {
 		t.Fatalf("valid visual capture rejected: %#v %v", visual, err)
+	}
+	portable, err := json.Marshal(visual)
+	if err != nil || strings.Contains(string(portable), "GET /api-client.ts 404") {
+		t.Fatalf("portable visual evidence included local artifact bytes: %q %v", portable, err)
 	}
 	write("manifest.json", fmt.Sprintf(`{"head":%q,"summary":"bad","artifacts":["../secret.png"]}`, head))
 	if _, err := loadVisualEvidence(dir, "task-1", head, cfg); err == nil {

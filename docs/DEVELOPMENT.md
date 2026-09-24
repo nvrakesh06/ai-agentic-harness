@@ -103,10 +103,18 @@ sealing hashes, and gives the requesting reviewer one exact-head retry. Capture 
 evidence, never a visual pass.
 
 The browser package is a supervisor capability, not a project dependency. Install
-Playwright in an AIH-managed tools directory outside every target worktree and set
-`AIH_PLAYWRIGHT_MODULE` to that absolute `.../node_modules/playwright` directory
-before starting the supervisor. AIH rejects a missing, relative, or non-Playwright
-path and never resolves browser code from the reviewed project.
+Playwright below `AIH_HOME/tools` outside every target worktree and set
+`AIH_PLAYWRIGHT_MODULE` to its absolute `.../node_modules/playwright` directory
+before starting the supervisor. AIH resolves both paths and rejects a missing,
+relative, project-owned, or symlink-escaping module path; it never resolves browser
+code from the reviewed project.
+
+AIH redacts textual manifest and network diagnostics before saving local visual
+evidence. Screenshot pixels are opaque image data: AIH does not perform OCR or
+claim to detect secrets rendered in a frame. Visual capture is therefore supported
+only for applications whose capture route cannot display sensitive data. Image bytes
+remain local to the supervising machine and are never written into portable state;
+only artifact names and hashes are checkpointed.
 
 This feature adds portable state schema 4. Before activating a schema-4
 supervisor, hand off the schema-3 supervisor, retain the local SQLite database
