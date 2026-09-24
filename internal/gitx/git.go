@@ -263,6 +263,14 @@ func (g Git) RemoveWorktree(ctx context.Context, path string) error {
 	_, e := g.Run(ctx, "", "worktree", "remove", path)
 	return e
 }
+
+// RemoveDisposableWorktree discards an AIH-created detached checkout. Unlike a
+// task worktree, it contains no authoring state: it exists solely to contain
+// side effects from a non-writer role such as a compiler or visual inspector.
+func (g Git) RemoveDisposableWorktree(ctx context.Context, path string) error {
+	_, e := g.Run(ctx, "", "worktree", "remove", "--force", path)
+	return e
+}
 func (g Git) Checkpoint(ctx context.Context, path, task string) (string, error) {
 	w := Git{path}
 	files, e := w.Run(ctx, "", "ls-files", "--others", "--exclude-standard", "-z")

@@ -295,12 +295,22 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 	}
 	runtimeDir := filepath.Join(c.P.Dir, "sessions", id)
 	runDir := dir
-	if r.Name != "implementer" && t != nil && t.HeadSHA != "" {
+	if r.Name != "implementer" && t != nil {
+		// Preflight runs before an implementer has made a task head. Use the
+		// immutable planning base in that case so an advisory command can never
+		// write into the writer worktree merely because it is early in the task.
+		readRef, readErr := readOnlyCheckoutRef(t, e)
+		if readErr != nil {
+			return provider.Result{}, readErr
+		}
 		runDir = filepath.Join(c.P.Dir, "review-worktrees", id)
-		if err := c.P.Git.Detached(ctx, runDir, t.HeadSHA); err != nil {
+		if err := c.P.Git.Detached(ctx, runDir, readRef); err != nil {
 			return provider.Result{}, fmt.Errorf("create disposable read-only review worktree: %w", err)
 		}
-		defer c.P.Git.RemoveWorktree(context.Background(), runDir)
+		// Non-writer roles run in an AIH-created detached checkout. Force removal
+		// is safe here and prevents a diagnostic's generated files from leaving a
+		// stranded worktree after either success or provider failure.
+		defer c.P.Git.RemoveDisposableWorktree(context.Background(), runDir)
 	}
 	prompt := roles.Compile(e, r, runtime.GOOS, t, objective, diff, evidence)
 	var operatorGuidance []model.Guidance
@@ -376,6 +386,22 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 	}
 	_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "worker_exit", fmt.Sprintf("outcome=%s capability=%s effective_model=%s", outcome, resolved.Capability, resolved.EffectiveModel))
 	return result, err
+}
+
+func readOnlyCheckoutRef(t *model.Task, e config.Effective) (string, error) {
+	if t == nil {
+		return "", errors.New("read-only role has no task for disposable checkout")
+	}
+	if t.HeadSHA != "" {
+		return t.HeadSHA, nil
+	}
+	if t.BaseSHA != "" {
+		return t.BaseSHA, nil
+	}
+	if e.BaseSHA != "" {
+		return e.BaseSHA, nil
+	}
+	return "", errors.New("read-only role has no immutable source revision for disposable checkout")
 }
 
 func needsProvision(s *model.Snapshot, id string) bool {
