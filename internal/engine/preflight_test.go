@@ -61,6 +61,13 @@ func TestPreflightVisualEvidenceFixRequiresConcreteSourceFinding(t *testing.T) {
 		t.Fatal("an arbitrary source path was accepted as rendered-frame evidence")
 	}
 	result.Findings[2].Location = "Rendered-frame evidence for head dae939776385f468aaf0818940925f384927782e"
+	noSource := provider.Result{Status: "in_progress", Question: "Please provide an exact-head rendered frame or Playwright screenshot for this visual review.", Summary: "The restricted designer cannot inspect the rendered frame."}
+	if !preflightVisualEvidenceDeferral(designer, noSource) {
+		t.Fatal("pure supervisor-owned visual evidence request was not eligible for configured final-review deferral")
+	}
+	if eligibleVisualPreflight(&model.Task{UI: true}, roles.Role{Name: "animation-preflight", Stage: "pre-implementation"}) || eligibleVisualPreflight(&model.Task{UI: false}, designer) {
+		t.Fatal("custom or non-UI preflight could create a final designer visual gate")
+	}
 
 	result.Findings[0].Reason = "The label looks wrong."
 	if preflightEvidenceFix(designer, result) {

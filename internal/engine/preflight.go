@@ -93,7 +93,7 @@ func preflightEvidenceFix(role roles.Role, result provider.Result) bool {
 
 func preflightVisualEvidenceDeferral(role roles.Role, result provider.Result) bool {
 	preflightSpecialist := role.Stage == "pre-implementation" || role.Name == "designer"
-	if !preflightSpecialist || result.Status != "in_progress" || preflightHumanDecision(result) || !supervisorEvidenceRequest(result) || !visualEvidenceRequest(result) || len(result.Findings) == 0 {
+	if !preflightSpecialist || result.Status != "in_progress" || preflightHumanDecision(result) || !supervisorEvidenceRequest(result) || !visualEvidenceRequest(result) {
 		return false
 	}
 	for _, finding := range result.Findings {
@@ -102,6 +102,10 @@ func preflightVisualEvidenceDeferral(role roles.Role, result provider.Result) bo
 		}
 	}
 	return true
+}
+
+func eligibleVisualPreflight(task *model.Task, role roles.Role) bool {
+	return task != nil && task.UI && role.Name == "designer"
 }
 
 // preflightEvidenceSourceFindings separates an evidence-only visual finding
@@ -508,14 +512,14 @@ func (c *Controller) preflight(id string) {
 				return nil
 			}
 			completed := result.Status == "completed" && !(r.Stage == "pre-implementation" && roles.Blocking(r, result.Findings))
-			evidenceFix := preflightEvidenceFix(r, result)
-			evidenceDeferral := preflightVisualEvidenceDeferral(r, result)
+			evidenceFix := eligibleVisualPreflight(task, r) && preflightEvidenceFix(r, result)
+			evidenceDeferral := eligibleVisualPreflight(task, r) && preflightVisualEvidenceDeferral(r, result)
 			if !completed && !evidenceFix && !evidenceDeferral {
 				return nil
 			}
 			task.Decisions = append(task.Decisions, r.Name+": "+result.Summary)
 			if evidenceFix || evidenceDeferral {
-				task.VisualRequired = &model.VisualRequirement{Role: r.Name, Base: effective.BaseSHA, Head: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Reason: "pre-implementation specialist requested supervisor-owned exact-head rendered evidence; final visual review remains required"}
+				task.VisualRequired = &model.VisualRequirement{Role: "designer", Base: effective.BaseSHA, Head: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Reason: "UI designer preflight requested supervisor-owned exact-head rendered evidence; final visual review remains required"}
 			}
 			if evidenceFix {
 				findings, _ := preflightEvidenceSourceFindings(r, result)
@@ -541,7 +545,7 @@ func (c *Controller) preflight(id string) {
 			c.retry(id, "implementation", roleErr.Error())
 			return
 		}
-		if preflightEvidenceFix(r, result) || (preflightVisualEvidenceDeferral(r, result) && effective.Project.VisualCapture != nil) {
+		if eligibleVisualPreflight(current, r) && (preflightEvidenceFix(r, result) || (preflightVisualEvidenceDeferral(r, result) && effective.Project.VisualCapture != nil)) {
 			_ = c.P.DB.Event(id, current.RunID, r.Name, effective.Project.Provider, "preflight_visual_evidence_fix_admitted", "exact-head visual evidence remains required for final review; concrete source findings preserved for one bounded implementer pass")
 			continue
 		}
