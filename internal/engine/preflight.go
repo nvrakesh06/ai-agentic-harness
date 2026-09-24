@@ -133,7 +133,11 @@ func directFixFindings(t *model.Task) ([]model.Finding, bool) {
 	for _, item := range model.TaskGuidance(t) {
 		guidance = append(guidance, item.Text)
 	}
-	if directFixSensitive(strings.Join(append(append(append(append(append(append([]string{t.Objective}, t.Acceptance...), t.Areas...), t.Domains...), t.Roles...), t.Dependencies...), guidance...), " ")) {
+	// Acceptance criteria and assigned role names can require an architecture
+	// review without making this narrowly located UI repair architecture-sensitive.
+	// Those specialists remain required below; source-scope sensitivity comes from
+	// the objective, affected areas/domains, dependencies, guidance, and findings.
+	if directFixSensitive(strings.Join(append(append(append(append([]string{t.Objective}, t.Areas...), t.Domains...), t.Dependencies...), guidance...), " ")) {
 		return nil, false
 	}
 	seenLocations := map[string]bool{}

@@ -236,10 +236,10 @@ func TestCompletedPreflightReusesOnlyBoundedUnchangedFixScope(t *testing.T) {
 
 func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
 	effective := config.Effective{BaseSHA: strings.Repeat("a", 40), Hash: strings.Repeat("b", 64)}
-	required := []roles.Role{{Name: "designer", Stage: "review"}, {Name: "custom-ui", Stage: "pre-implementation"}}
+	required := []roles.Role{{Name: "designer", Stage: "review"}, {Name: "animation-architecture", Stage: "pre-implementation"}}
 	task := &model.Task{
-		ID: "ui", State: model.Review, HeadSHA: strings.Repeat("c", 40), Objective: "Repair the caption layout", Acceptance: []string{"caption fits"},
-		Areas: []string{"ui"}, Domains: []string{"ui"}, Risk: "high", Dependencies: []string{"semantic-engine"}, UI: true,
+		ID: "ui", State: model.Review, HeadSHA: strings.Repeat("c", 40), Objective: "Repair the caption layout", Acceptance: []string{"caption fits", "animation-architecture review completes"},
+		Areas: []string{"ui"}, Domains: []string{"ui"}, Risk: "high", Dependencies: []string{"semantic-engine"}, Roles: []string{"animation-architecture"}, UI: true,
 		Findings: []model.Finding{
 			{Role: "designer", Severity: "high", Category: "text-layout", Location: "src/caption.tsx:42", Reason: "Caption overlaps the coordinator label at narrow widths.", Resolution: "Wrap the caption in the existing text-fit component."},
 			{Role: "designer", Severity: "high", Category: "text-layout", Location: "src/labels.tsx:58", Reason: "Non-breaking-space labels bypass text-fit measurement and overflow.", Resolution: "Replace NBSP labels before the text-fit validation test."},
