@@ -185,7 +185,7 @@ func directFixWaiver(t *model.Task, effective config.Effective, required []roles
 	if !ok {
 		return nil
 	}
-	scope := preflightScope(t)
+	scope := preflightScope(t, effective)
 	return &model.Preflight{Phase: "queued", BaseSHA: effective.BaseSHA, HeadSHA: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Scope: scope,
 		ReuseReason: "direct FIX route: waived built-in designer preflight after exact-head native checks and up to two located text-layout review findings",
 		DirectFix:   &model.DirectFixWaiver{Role: "designer", Disposition: "waived", Reason: "completed exact-head designer review identified a bounded set of specific visual/text-layout repairs", BaseSHA: effective.BaseSHA, HeadSHA: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Scope: scope, Findings: findingsFingerprint(findings)}}
@@ -199,7 +199,7 @@ func directFixWaiverMatches(p *model.Preflight, t *model.Task, effective config.
 	findings, ok := directFixFindings(t, visualReviewRoles(effective, t.Evidence))
 	w := p.DirectFix
 	return ok && w.Role == "designer" && w.Disposition == "waived" && w.BaseSHA == effective.BaseSHA && w.HeadSHA == t.HeadSHA &&
-		w.Config == effective.Hash && w.Rules == roles.Hash() && w.Scope == preflightScope(t) && w.Findings == findingsFingerprint(findings)
+		w.Config == effective.Hash && w.Rules == roles.Hash() && w.Scope == preflightScope(t, effective) && w.Findings == findingsFingerprint(findings)
 }
 
 func preflightRoleSatisfied(p *model.Preflight, t *model.Task, effective config.Effective, role roles.Role) bool {

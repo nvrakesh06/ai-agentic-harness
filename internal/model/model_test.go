@@ -196,7 +196,7 @@ func TestSchemaThreeSnapshotMigratesVisualEvidenceAndRequiresMatchingConfig(t *t
 	b, _ = json.Marshal(migrated)
 	if _, _, err := Decode(b); err == nil {
 		t.Fatal("visual config different from evidence config accepted")
- 	}
+	}
 }
 
 func TestDirectFixWaiverRoundTripsAndRejectsIncompleteIdentity(t *testing.T) {
