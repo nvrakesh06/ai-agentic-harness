@@ -253,6 +253,14 @@ func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
 	if p == nil || p.DirectFix == nil || p.DirectFix.Role != "designer" || p.Phase != "queued" {
 		t.Fatalf("eligible exact-head review did not produce a structured designer waiver: %+v", p)
 	}
+	if directFixRoute(effective, "visual-quality", task, required) == nil {
+		t.Fatal("visual-quality retry did not take the direct designer route")
+	}
+	for _, role := range []string{"security", "animation-architecture"} {
+		if directFixRoute(effective, role, task, required) != nil {
+			t.Fatalf("%s retry took the direct designer route", role)
+		}
+	}
 	task.State = model.Fix
 	if !directFixWaiverMatches(p, task, effective) || !preflightRoleSatisfied(p, task, effective, required[0]) {
 		t.Fatal("valid direct FIX waiver was not accepted for the built-in designer")

@@ -912,8 +912,8 @@ func (c *Controller) retry(id, kind, reason string) {
 		} else {
 			task.FixCycles[kind] = count
 		}
-		if kind == "designer" && preflightErr == nil {
-			if direct := directFixWaiver(task, effective, preflightRoles); direct != nil {
+		if preflightErr == nil {
+			if direct := directFixRoute(effective, kind, task, preflightRoles); direct != nil {
 				task.Preflight = direct
 				allSatisfied := true
 				for _, role := range preflightRoles {

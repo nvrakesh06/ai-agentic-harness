@@ -139,11 +139,30 @@ func visualReviewRoles(effective config.Effective, evidence *model.Evidence) map
 		if !ok {
 			return nil
 		}
-		if role.Stage == "review" && role.Mode == "validator" && (role.Name == "designer" || role.Extends == "designer") {
+		if designerReviewRole(role) {
 			visual[name] = true
 		}
 	}
 	return visual
+}
+
+func designerReviewRole(role roles.Role) bool {
+	return role.Stage == "review" && role.Mode == "validator" && (role.Name == "designer" || role.Extends == "designer")
+}
+
+func isDesignerReviewRole(effective config.Effective, name string) bool {
+	all, err := roles.Load(effective.Files)
+	return err == nil && designerReviewRole(all[name])
+}
+
+// directFixRoute is the retry admission decision. The retry counter remains
+// keyed to the reporting role; this only decides whether that role belongs to
+// the completed designer review family.
+func directFixRoute(effective config.Effective, retryRole string, task *model.Task, required []roles.Role) *model.Preflight {
+	if !isDesignerReviewRole(effective, retryRole) {
+		return nil
+	}
+	return directFixWaiver(task, effective, required)
 }
 
 func directFixSensitivePath(value string) bool {
