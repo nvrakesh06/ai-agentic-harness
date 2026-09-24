@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	pathpkg "path"
 	"sort"
 	"strings"
 	"time"
@@ -42,7 +43,10 @@ func reviewReusePaths(paths []string) bool {
 	}
 	for _, path := range paths {
 		lower := strings.ToLower(strings.TrimSpace(path))
-		if strings.HasPrefix(lower, ".aih/") || strings.Contains(lower, "auth") || strings.Contains(lower, "secret") || strings.Contains(lower, "permission") || strings.Contains(lower, "crypto") || strings.Contains(lower, "network") || strings.Contains(lower, "deserial") || strings.Contains(lower, "subprocess") {
+		base := pathpkg.Base(lower)
+		if strings.HasPrefix(lower, ".aih/") || strings.HasPrefix(lower, ".github/") || strings.HasPrefix(lower, ".codex/") || strings.HasPrefix(lower, ".claude/") || strings.HasPrefix(lower, ".cursor/") ||
+			base == "agents.md" || base == "claude.md" || base == "copilot-instructions.md" || strings.Contains(base, "instruction") || strings.Contains(base, "policy") ||
+			strings.Contains(lower, "auth") || strings.Contains(lower, "secret") || strings.Contains(lower, "permission") || strings.Contains(lower, "crypto") || strings.Contains(lower, "network") || strings.Contains(lower, "deserial") || strings.Contains(lower, "subprocess") {
 			return false
 		}
 		// The first policy intentionally accepts plain Markdown only. CSS/SCSS can

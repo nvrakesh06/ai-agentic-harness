@@ -27,6 +27,11 @@ func TestReviewReuseThreeHeadPolicyFailsClosed(t *testing.T) {
 	if reviewReuseDiffSafe("diff --git a/ui/dashboard.css b/ui/dashboard.css\n+ @namespace svg url(http://example.invalid/svg);", []string{"ui/dashboard.css"}) {
 		t.Fatal("CSS resource-loading delta was incorrectly eligible")
 	}
+	for _, policyPath := range []string{"AGENTS.md", "docs/CLAUDE.md", ".github/copilot-instructions.md", ".codex/policy.md", "docs/build-instructions.md"} {
+		if reviewReuseDiffSafe("diff --git a/"+policyPath+" b/"+policyPath+"\n+ change execution guidance", []string{policyPath}) {
+			t.Fatalf("agent/build policy markdown %q was incorrectly eligible", policyPath)
+		}
+	}
 	if reviewReuseDiffSafe("diff --git a/internal/auth/session.go b/internal/auth/session.go", []string{"docs/dashboard.md", "internal/auth/session.go"}) {
 		t.Fatal("third security-sensitive head was incorrectly eligible")
 	}
