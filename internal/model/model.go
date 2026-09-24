@@ -22,6 +22,9 @@ const RoleSchema = 1
 const CapacityTransitionLimit = 20
 const MaxTaskGuidance = 8
 const MaxGuidanceBytes = 1600
+
+// MaxVisualEvidenceArtifacts includes up to eight screenshots and one shared diagnostic log.
+const MaxVisualEvidenceArtifacts = 9
 const guidancePrefix = "AIH_GUIDANCE_V1:"
 
 type State string
@@ -511,7 +514,7 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.Head) ||
 				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Config) ||
 				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.ManifestSHA256) ||
-				len(v.Summary) > 1000 || len(v.Artifacts) < 1 || len(v.Artifacts) > 8 ||
+				len(v.Summary) > 1000 || len(v.Artifacts) < 1 || len(v.Artifacts) > MaxVisualEvidenceArtifacts ||
 				v.Manifest != "visual-evidence/"+id+"/"+v.Head+"-"+v.Config[:16]+"/manifest.json" {
 				return nil, false, errors.New("invalid visual evidence reference")
 			}

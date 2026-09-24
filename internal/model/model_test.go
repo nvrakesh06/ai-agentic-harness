@@ -199,6 +199,36 @@ func TestSchemaThreeSnapshotMigratesVisualEvidenceAndRequiresMatchingConfig(t *t
 	}
 }
 
+func TestEightVisualTargetsAndDiagnosticsRoundTrip(t *testing.T) {
+	s := NewSnapshot("project123")
+	head := strings.Repeat("a", 40)
+	configHash := strings.Repeat("b", 64)
+	artifacts := make([]VisualArtifact, 0, MaxVisualEvidenceArtifacts)
+	for i := 0; i < 8; i++ {
+		artifacts = append(artifacts, VisualArtifact{Path: fmt.Sprintf("target-%d.png", i), SHA256: strings.Repeat("c", 64)})
+	}
+	artifacts = append(artifacts, VisualArtifact{Path: "network.txt", SHA256: strings.Repeat("d", 64)})
+	visual := &VisualEvidence{
+		Head: head, Config: configHash,
+		Manifest:       "visual-evidence/task-a/" + head + "-" + configHash[:16] + "/manifest.json",
+		ManifestSHA256: strings.Repeat("e", 64), Artifacts: artifacts, Summary: "eight exact-head states",
+	}
+	s.Tasks["task-a"] = &Task{ID: "task-a", State: Review, Evidence: &Evidence{
+		Base: head, Head: head, Config: configHash, Rules: strings.Repeat("f", 64),
+		Checks: []string{"check=tests exit=0"}, Reviews: map[string]string{}, Visual: visual,
+	}}
+	b, _ := json.Marshal(s)
+	decoded, changed, err := Decode(b)
+	if err != nil || changed || len(decoded.Tasks["task-a"].Evidence.Visual.Artifacts) != MaxVisualEvidenceArtifacts {
+		t.Fatalf("nine bounded visual artifacts did not round trip: changed=%t err=%v", changed, err)
+	}
+	visual.Artifacts = append(visual.Artifacts, VisualArtifact{Path: "extra.png", SHA256: strings.Repeat("c", 64)})
+	b, _ = json.Marshal(s)
+	if _, _, err := Decode(b); err == nil {
+		t.Fatal("unbounded visual artifact list accepted")
+	}
+}
+
 func TestVerificationRetryGuardRoundTripsAndValidates(t *testing.T) {
 	s := NewSnapshot("project123")
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte("native verification")))

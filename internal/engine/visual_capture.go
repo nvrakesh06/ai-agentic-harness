@@ -42,7 +42,7 @@ import (
 
 const (
 	visualFileLimit      = 8 << 20
-	visualArtifactLimit  = 9 // eight screenshots plus one shared diagnostic log
+	visualArtifactLimit  = model.MaxVisualEvidenceArtifacts
 	visualAggregateLimit = 64 << 20
 )
 const visualReadyPrefix = "AIH_VISUAL_READY "
