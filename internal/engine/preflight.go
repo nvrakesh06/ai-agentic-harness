@@ -79,37 +79,63 @@ func directFixSensitive(text string) bool {
 	return false
 }
 
-func directFixFinding(t *model.Task) (model.Finding, bool) {
-	if t == nil || !t.UI || t.Security || len(t.Findings) != 1 {
-		return model.Finding{}, false
-	}
-	finding := t.Findings[0]
+func directFixFinding(finding model.Finding) bool {
 	category := strings.ToLower(strings.TrimSpace(finding.Category))
 	if finding.Role != "designer" || (category != "visual" && category != "layout" && category != "text-layout" && category != "text layout") ||
-		!directFixLocation.MatchString(strings.TrimSpace(finding.Location)) || len(strings.TrimSpace(finding.Resolution)) < 12 {
-		return model.Finding{}, false
+		!directFixLocation.MatchString(strings.TrimSpace(finding.Location)) {
+		return false
 	}
 	detail := strings.ToLower(strings.Join([]string{finding.Category, finding.Location, finding.Reason, finding.Resolution}, " "))
 	if directFixSensitive(detail) || (!strings.Contains(detail, "text") && !strings.Contains(detail, "layout") && !strings.Contains(detail, "caption") && !strings.Contains(detail, "label") && !strings.Contains(detail, "overlap") && !strings.Contains(detail, "typograph")) {
-		return model.Finding{}, false
+		return false
 	}
 	for _, ambiguous := range []string{"?", "maybe", "might", "consider", "investigate", "unclear", "unknown"} {
 		if strings.Contains(detail, ambiguous) {
-			return model.Finding{}, false
+			return false
 		}
+	}
+	reason := strings.ToLower(finding.Reason)
+	resolution := strings.ToLower(finding.Resolution)
+	if !containsAny(reason, "overlap", "overflow", "clip", "truncat", "non-breaking", "nbsp", "text-fit", "wrap", "line break", "spacing", "typograph") ||
+		!containsAny(resolution, "use ", "wrap", "replace", "apply", "add", "remove", "set ", "adjust", "ensure", "render", "measure", "validate", "test") ||
+		!containsAny(resolution, "text-fit", "wrap", "white-space", "nbsp", "non-breaking", "line-break", "overflow", "width", "caption", "layout", "typograph", "validation", "test") {
+		return false
+	}
+	return true
+}
+
+func containsAny(text string, values ...string) bool {
+	for _, value := range values {
+		if strings.Contains(text, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func directFixFindings(t *model.Task) ([]model.Finding, bool) {
+	if t == nil || !t.UI || t.Security || len(t.Findings) == 0 || len(t.Findings) > 2 {
+		return nil, false
 	}
 	guidance := make([]string, 0, len(model.TaskGuidance(t)))
 	for _, item := range model.TaskGuidance(t) {
 		guidance = append(guidance, item.Text)
 	}
 	if directFixSensitive(strings.Join(append(append(append(append(append(append([]string{t.Objective}, t.Acceptance...), t.Areas...), t.Domains...), t.Roles...), t.Dependencies...), guidance...), " ")) {
-		return model.Finding{}, false
+		return nil, false
 	}
-	return finding, true
+	seenLocations := map[string]bool{}
+	for _, finding := range t.Findings {
+		if !directFixFinding(finding) || seenLocations[finding.Location] {
+			return nil, false
+		}
+		seenLocations[finding.Location] = true
+	}
+	return append([]model.Finding(nil), t.Findings...), true
 }
 
 // directFixWaiver is deliberately narrower than normal FIX guidance reuse. It
-// records only a completed built-in designer review of one exact visual repair.
+// records only a completed built-in designer review of at most two exact visual repairs.
 func directFixWaiver(t *model.Task, effective config.Effective, required []roles.Role) *model.Preflight {
 	if t == nil || t.State != model.Review || t.Evidence == nil || t.Evidence.Base != effective.BaseSHA || t.Evidence.Head != t.HeadSHA ||
 		t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || len(t.Evidence.Checks) == 0 || t.Evidence.Reviews["designer"] == "" {
@@ -118,14 +144,14 @@ func directFixWaiver(t *model.Task, effective config.Effective, required []roles
 	if !slices.Contains(t.Evidence.ReviewRoster, "designer") || !slices.ContainsFunc(required, func(role roles.Role) bool { return role.Name == "designer" && role.Stage == "review" }) {
 		return nil
 	}
-	finding, ok := directFixFinding(t)
+	findings, ok := directFixFindings(t)
 	if !ok {
 		return nil
 	}
 	scope := preflightScope(t)
 	return &model.Preflight{Phase: "queued", BaseSHA: effective.BaseSHA, HeadSHA: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Scope: scope,
-		ReuseReason: "direct FIX route: waived built-in designer preflight after exact-head native checks and one located text-layout review finding",
-		DirectFix:   &model.DirectFixWaiver{Role: "designer", Disposition: "waived", Reason: "completed exact-head designer review identified one specific visual/text-layout repair", BaseSHA: effective.BaseSHA, HeadSHA: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Scope: scope, Findings: findingsFingerprint([]model.Finding{finding})}}
+		ReuseReason: "direct FIX route: waived built-in designer preflight after exact-head native checks and up to two located text-layout review findings",
+		DirectFix:   &model.DirectFixWaiver{Role: "designer", Disposition: "waived", Reason: "completed exact-head designer review identified a bounded set of specific visual/text-layout repairs", BaseSHA: effective.BaseSHA, HeadSHA: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Scope: scope, Findings: findingsFingerprint(findings)}}
 }
 
 func directFixWaiverMatches(p *model.Preflight, t *model.Task, effective config.Effective) bool {
@@ -133,10 +159,10 @@ func directFixWaiverMatches(p *model.Preflight, t *model.Task, effective config.
 		t.Evidence.Head != t.HeadSHA || t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || len(t.Evidence.Checks) == 0 || t.Evidence.Reviews["designer"] == "" {
 		return false
 	}
-	finding, ok := directFixFinding(t)
+	findings, ok := directFixFindings(t)
 	w := p.DirectFix
 	return ok && w.Role == "designer" && w.Disposition == "waived" && w.BaseSHA == effective.BaseSHA && w.HeadSHA == t.HeadSHA &&
-		w.Config == effective.Hash && w.Rules == roles.Hash() && w.Scope == preflightScope(t) && w.Findings == findingsFingerprint([]model.Finding{finding})
+		w.Config == effective.Hash && w.Rules == roles.Hash() && w.Scope == preflightScope(t) && w.Findings == findingsFingerprint(findings)
 }
 
 func preflightRoleSatisfied(p *model.Preflight, t *model.Task, effective config.Effective, role roles.Role) bool {

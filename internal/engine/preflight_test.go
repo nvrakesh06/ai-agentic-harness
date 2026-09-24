@@ -240,7 +240,10 @@ func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
 	task := &model.Task{
 		ID: "ui", State: model.Review, HeadSHA: strings.Repeat("c", 40), Objective: "Repair the caption layout", Acceptance: []string{"caption fits"},
 		Areas: []string{"ui"}, Domains: []string{"ui"}, Risk: "high", Dependencies: []string{"semantic-engine"}, UI: true,
-		Findings: []model.Finding{{Role: "designer", Severity: "high", Category: "text-layout", Location: "src/caption.tsx:42", Reason: "Caption overlaps the coordinator label at narrow widths.", Resolution: "Wrap the caption in the existing text-fit component."}},
+		Findings: []model.Finding{
+			{Role: "designer", Severity: "high", Category: "text-layout", Location: "src/caption.tsx:42", Reason: "Caption overlaps the coordinator label at narrow widths.", Resolution: "Wrap the caption in the existing text-fit component."},
+			{Role: "designer", Severity: "high", Category: "text-layout", Location: "src/labels.tsx:58", Reason: "Non-breaking-space labels bypass text-fit measurement and overflow.", Resolution: "Replace NBSP labels before the text-fit validation test."},
+		},
 	}
 	task.Evidence = &model.Evidence{Base: effective.BaseSHA, Head: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: []string{"native check passed"}, Reviews: map[string]string{"designer": "one bounded layout defect"}, ReviewRoster: []string{"designer"}}
 	p := directFixWaiver(task, effective, required)
@@ -253,6 +256,12 @@ func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
 	}
 	if preflightRoleSatisfied(p, task, effective, required[1]) {
 		t.Fatal("direct FIX waiver completed a custom pre-implementation role")
+	}
+	vague := model.Clone(&model.Snapshot{Tasks: map[string]*model.Task{"ui": task}}).Tasks["ui"]
+	vague.State = model.Review
+	vague.Findings = []model.Finding{{Role: "designer", Severity: "high", Category: "text-layout", Location: "src/labels.tsx:58", Reason: "Label looks wrong", Resolution: "Make label better."}}
+	if directFixWaiver(vague, effective, required) != nil {
+		t.Fatal("vague visual finding bypassed the designer preflight")
 	}
 	for _, changed := range []struct {
 		name      string
