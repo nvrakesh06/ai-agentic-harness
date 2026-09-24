@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
@@ -106,6 +107,20 @@ func preflightVisualEvidenceDeferral(role roles.Role, result provider.Result) bo
 
 func eligibleVisualPreflight(task *model.Task, role roles.Role) bool {
 	return task != nil && task.UI && role.Name == "designer"
+}
+
+// visualRequirementHead never serializes an empty revision. READY tasks can
+// legitimately be planned before their first checkpoint has populated
+// HeadSHA, but the preflight worktree is already prepared and provides the
+// trusted exact source revision for the durable final-review gate.
+func (c *Controller) visualRequirementHead(task *model.Task) (string, error) {
+	if task == nil {
+		return "", errors.New("visual requirement has no task")
+	}
+	if task.HeadSHA != "" {
+		return task.HeadSHA, nil
+	}
+	return (gitx.Git{Dir: c.P.TaskPath(task)}).SHA(c.ctx, "HEAD")
 }
 
 // preflightEvidenceSourceFindings separates an evidence-only visual finding
@@ -506,6 +521,14 @@ func (c *Controller) preflight(id string) {
 		if t == nil || t.Preflight == nil || t.Preflight.Phase != "waiting" {
 			return
 		}
+		visualHead := ""
+		if eligibleVisualPreflight(t, r) {
+			visualHead, err = c.visualRequirementHead(t)
+			if err != nil {
+				c.block(id, "Restore the task worktree before recording final visual evidence requirements.", err.Error(), model.Ready)
+				return
+			}
+		}
 		result, roleErr := c.roleWithCompletion(c.ctx, effective, r, t, c.P.TaskPath(t), "Provide pre-implementation guidance for the assigned task.", "", "", func(s *model.Snapshot, result provider.Result, runErr error) error {
 			task := s.Tasks[id]
 			if task == nil || !preflightMatches(task.Preflight, task, effective) || runErr != nil {
@@ -519,7 +542,7 @@ func (c *Controller) preflight(id string) {
 			}
 			task.Decisions = append(task.Decisions, r.Name+": "+result.Summary)
 			if evidenceFix || evidenceDeferral {
-				task.VisualRequired = &model.VisualRequirement{Role: "designer", Base: effective.BaseSHA, Head: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Reason: "UI designer preflight requested supervisor-owned exact-head rendered evidence; final visual review remains required"}
+				task.VisualRequired = &model.VisualRequirement{Role: "designer", Base: effective.BaseSHA, Head: visualHead, Config: effective.Hash, Rules: roles.Hash(), Reason: "UI designer preflight requested supervisor-owned exact-head rendered evidence; final visual review remains required"}
 			}
 			if evidenceFix {
 				findings, _ := preflightEvidenceSourceFindings(r, result)

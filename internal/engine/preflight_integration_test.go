@@ -71,7 +71,7 @@ func TestPreflightEvidenceLoopAdmitsOneFixWithoutRepeatingDesigner(t *testing.T)
 		t.Fatal(err)
 	}
 	base := effective.BaseSHA
-	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Fix, Branch: "aih/ui", BaseSHA: base, HeadSHA: base, Attempts: 1}
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: base}
 	s.Tasks[task.ID] = task
 	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, base); err != nil {
 		t.Fatal(err)
@@ -101,11 +101,15 @@ func TestPreflightEvidenceLoopAdmitsOneFixWithoutRepeatingDesigner(t *testing.T)
 		}
 	}
 	current := c.Snapshot().Tasks[task.ID]
-	if workers.designers.Load() != 1 || current.Preflight == nil || current.Preflight.HeadSHA != base || current.Preflight.Config != effective.Hash || !containsDecision(current.Decisions, "Final visual review must still use rendered evidence") || len(current.Findings) != 2 || current.Findings[1].Category != "schema compatibility" {
+	if workers.designers.Load() != 1 || current.Preflight == nil || current.Preflight.Config != effective.Hash || current.VisualRequired == nil || current.VisualRequired.Head != base || !containsDecision(current.Decisions, "Final visual review must still use rendered evidence") || len(current.Findings) != 2 || current.Findings[1].Category != "schema compatibility" {
 		t.Fatalf("evidence-guided fix did not preserve exact-head guidance or bounded admission: designers=%d task=%#v", workers.designers.Load(), current)
 	}
 	cancel()
 	<-done
+	persisted, _, err := f.P.Git.Load(context.Background())
+	if err != nil || persisted.Tasks[task.ID].VisualRequired == nil || persisted.Tasks[task.ID].VisualRequired.Head == "" {
+		t.Fatalf("headless task lost a durable exact-head visual requirement after recovery: %#v %v", persisted.Tasks[task.ID], err)
+	}
 }
 
 func TestPreflightEvidenceLoopBlocksProductDecisionWithoutImplementer(t *testing.T) {
