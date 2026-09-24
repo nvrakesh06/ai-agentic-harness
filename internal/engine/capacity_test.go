@@ -31,6 +31,25 @@ func TestCapacityBackfillsWriterWhenPeerEntersReview(t *testing.T) {
 	}
 }
 
+func TestCapacityPrefersWriterReadyDraftPRContinuation(t *testing.T) {
+	snapshot, project, now := capacityFixture()
+	project.MaxWriters = 1
+	project.Scheduling.TargetWriters = 1
+	snapshot.Tasks["a-new"] = &model.Task{ID: "a-new", State: model.Ready, Domains: []string{"new"}, Preflight: &model.Preflight{Phase: "ready"}}
+	snapshot.Tasks["z-fix"] = &model.Task{ID: "z-fix", State: model.Fix, PR: 42, Domains: []string{"fix"}, Preflight: &model.Preflight{Phase: "ready"}}
+
+	decision := decideCapacity(snapshot, nil, project, false, 0, now)
+	if len(decision.writers) != 1 || decision.writers[0].ID != "z-fix" {
+		t.Fatalf("writer-ready draft PR continuation did not win the available slot: %#v", decision)
+	}
+
+	snapshot.Tasks["z-fix"].Preflight.Phase = "waiting"
+	decision = decideCapacity(snapshot, nil, project, false, 0, now)
+	if len(decision.writers) != 1 || decision.writers[0].ID != "a-new" {
+		t.Fatalf("draft PR continuation without ready preflight displaced fresh writer work: %#v", decision)
+	}
+}
+
 func TestQueuedDesignerDoesNotConsumeWriterCapacity(t *testing.T) {
 	snapshot, project, now := capacityFixture()
 	project.MaxWriters = 2
