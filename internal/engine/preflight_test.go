@@ -343,6 +343,7 @@ func TestImplementerContinuationDecisionOrFindingsInvalidatePreflightReuse(t *te
 	}{
 		{"ordinary checkpoint", provider.Result{Status: "in_progress", Summary: "Continue the existing repair."}, true},
 		{"structured decision question", provider.Result{Status: "in_progress", Summary: "Checkpoint is ready.", Question: "Should we use a different visual style for this screen?"}, false},
+		{"unclassified decision question", provider.Result{Status: "in_progress", Summary: "Checkpoint is ready.", Question: "Can we move the caption above the chart?"}, false},
 		{"security finding", provider.Result{Status: "in_progress", Findings: []model.Finding{{Category: "security", Reason: "The credential boundary changed."}}}, false},
 		{"architecture finding", provider.Result{Status: "in_progress", Findings: []model.Finding{{Category: "architecture", Reason: "The queue ownership is ambiguous."}}}, false},
 		{"empty placeholder", provider.Result{Status: "in_progress", Findings: []model.Finding{{}}}, true},

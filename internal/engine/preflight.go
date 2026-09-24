@@ -114,7 +114,10 @@ func continuationFindingsInvalidate(result provider.Result) bool {
 }
 
 func continuationPreflightReusable(result provider.Result) bool {
-	return !preflightHumanDecision(result) && !continuationFindingsInvalidate(result)
+	// An in-progress Question is a request for information or a decision. Its
+	// semantics cannot be recovered safely from keywords, so it always makes
+	// prior specialist guidance stale.
+	return strings.TrimSpace(result.Question) == "" && !preflightHumanDecision(result) && !continuationFindingsInvalidate(result)
 }
 
 func findingsFingerprint(findings []model.Finding) string {
