@@ -185,7 +185,10 @@ func TestVisualCaptureTargetValidationAndLegacyDefault(t *testing.T) {
 	}
 	for _, targets := range [][]VisualCaptureTarget{
 		{{ID: "desktop", Path: "/", Width: 1280, Height: 720}, {ID: "desktop", Path: "/other", Width: 640, Height: 480}},
+		{{ID: "healthy", Path: "/", Width: 1280, Height: 720}, {ID: "Healthy", Path: "/other", Width: 640, Height: 480}},
 		{{ID: "../../escape", Path: "/", Width: 1280, Height: 720}},
+		{{ID: "CON", Path: "/", Width: 1280, Height: 720}},
+		{{ID: "lPt9", Path: "/", Width: 1280, Height: 720}},
 		{{ID: "external", Path: "https://outside.invalid/", Width: 1280, Height: 720}},
 		{{ID: "host", Path: "//outside.invalid/", Width: 1280, Height: 720}},
 		{{ID: "query", Path: "/settings?debug=1", Width: 1280, Height: 720}},

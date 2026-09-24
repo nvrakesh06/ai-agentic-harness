@@ -78,6 +78,12 @@ const (
 
 var visualTargetID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
 
+var windowsReservedVisualTargetID = map[string]bool{
+	"con": true, "prn": true, "aux": true, "nul": true,
+	"com1": true, "com2": true, "com3": true, "com4": true, "com5": true, "com6": true, "com7": true, "com8": true, "com9": true,
+	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true, "lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
+}
+
 // CaptureTargets returns the legacy browser capture when configuration omits targets.
 func (v *VisualCapture) CaptureTargets() []VisualCaptureTarget {
 	if len(v.Targets) == 0 {
@@ -320,10 +326,11 @@ func (p Project) Validate() error {
 		seen := map[string]bool{}
 		pixels := 0
 		for _, target := range p.VisualCapture.Targets {
-			if !visualTargetID.MatchString(target.ID) || seen[target.ID] {
-				return errors.New("visual_capture target IDs must be unique safe identifiers")
+			filenameID := strings.ToLower(target.ID)
+			if !visualTargetID.MatchString(target.ID) || seen[filenameID] || windowsReservedVisualTargetID[filenameID] {
+				return errors.New("visual_capture target IDs must be unique case-insensitive safe filenames")
 			}
-			seen[target.ID] = true
+			seen[filenameID] = true
 			u, err := url.Parse(target.Path)
 			if err != nil || target.Path == "" || !strings.HasPrefix(target.Path, "/") || strings.HasPrefix(target.Path, "//") || u.IsAbs() || u.Host != "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 				return errors.New("visual_capture target path must be a same-origin absolute path without host, query, or fragment")
