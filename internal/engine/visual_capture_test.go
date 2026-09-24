@@ -20,9 +20,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 )
 
@@ -57,6 +60,150 @@ func TestNativeVisualHelper(t *testing.T) {
 		head = strings.Repeat("0", 40)
 	}
 	_ = os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(fmt.Sprintf(`{"head":%q,"summary":"blank page: frontend module 404","artifacts":["desktop.png","network.txt"]}`, head)), 0600)
+}
+
+func TestVisualPrepareHelper(t *testing.T) {
+	if os.Getenv("AIH_VISUAL_PREPARE_HELPER") != "1" {
+		return
+	}
+	if marker := os.Getenv("AIH_VISUAL_PREPARE_MARKER"); marker != "" {
+		_ = os.WriteFile(marker, []byte(os.Getenv("AIH_VISUAL_PREPARE_VALUE")+"\n"), 0600)
+	}
+	if os.Getenv("AIH_VISUAL_PREPARE_WAIT") == "1" {
+		select {}
+	}
+}
+
+func visualCheckoutFixture(t *testing.T) (*Controller, *model.Task, string, string, func(string, ...string) string) {
+	t.Helper()
+	state, source, control := t.TempDir(), t.TempDir(), filepath.Join(t.TempDir(), "control.git")
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run(source, "init")
+	run(source, "config", "user.email", "test@example.invalid")
+	run(source, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("tracked"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	run(source, "add", "tracked.txt")
+	run(source, "commit", "-m", "base")
+	head := run(source, "rev-parse", "HEAD")
+	cmd := exec.Command("git", "init", "--bare", control)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("init control: %v %s", err, out)
+	}
+	run(source, "remote", "add", "control", control)
+	run(source, "push", "control", "HEAD:refs/heads/aih/task")
+	writer := filepath.Join(t.TempDir(), "writer")
+	cmd = exec.Command("git", "clone", control, writer)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone writer: %v %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(writer, ".gitignore"), []byte("fake-renderer\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(writer, "fake-renderer"), []byte("not invoked"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return &Controller{P: &Project{Dir: state, Git: gitx.Git{Dir: control}}}, &model.Task{ID: "task-visual", HeadSHA: head}, writer, source, func(dir string, args ...string) string { return run(dir, args...) }
+}
+
+func TestVisualPrepareUsesFreshDetachedCheckoutNotWriterRuntime(t *testing.T) {
+	c, task, writer, _, _ := visualCheckoutFixture(t)
+	checkout, err := c.newVisualCheckout(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "prepare-marker")
+	t.Setenv("AIH_VISUAL_PREPARE_HELPER", "1")
+	t.Setenv("AIH_VISUAL_PREPARE_MARKER", marker)
+	t.Setenv("AIH_VISUAL_PREPARE_VALUE", checkout.path)
+	cache := t.TempDir()
+	// Capture targets are all handled later by one browser invocation. Prepare
+	// remains one operation even when the capture declares multiple targets.
+	targets := (&config.VisualCapture{Targets: []config.VisualCaptureTarget{{ID: "one", Path: "/", Width: 2, Height: 2}, {ID: "two", Path: "/two", Width: 2, Height: 2}}}).CaptureTargets()
+	if len(targets) != 2 {
+		t.Fatal("fixture did not declare multiple visual targets")
+	}
+	if _, err = platform.Run(context.Background(), checkout.path, visualEnvironment(cache), "", os.Args[0], "-test.run=^TestVisualPrepareHelper$"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil || strings.TrimSpace(string(got)) != checkout.path {
+		t.Fatalf("prepare ran outside detached checkout: %q %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(writer, "fake-renderer")); err != nil || string(got) != "not invoked" {
+		t.Fatalf("ignored writer runtime was invoked or changed: %q %v", got, err)
+	}
+	checkoutPath := checkout.path
+	if err = checkout.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(checkoutPath); !os.IsNotExist(err) {
+		t.Fatalf("AIH-owned detached checkout survived cleanup: %v", err)
+	}
+}
+
+func TestVisualCheckoutCleansUpAfterCanceledPrepare(t *testing.T) {
+	c, task, _, _, _ := visualCheckoutFixture(t)
+	checkout, err := c.newVisualCheckout(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkoutPath := checkout.path
+	t.Setenv("AIH_VISUAL_PREPARE_HELPER", "1")
+	t.Setenv("AIH_VISUAL_PREPARE_WAIT", "1")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err = platform.Run(ctx, checkout.path, visualEnvironment(t.TempDir()), "", os.Args[0], "-test.run=^TestVisualPrepareHelper$"); err == nil {
+		t.Fatal("canceled prepare completed")
+	}
+	if err = checkout.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(checkoutPath); !os.IsNotExist(err) {
+		t.Fatalf("canceled prepare left its detached checkout behind: %v", err)
+	}
+}
+
+func TestVisualCheckoutDoesNotReusePreparedHeadAcrossRestart(t *testing.T) {
+	c, task, _, source, run := visualCheckoutFixture(t)
+	first, err := c.newVisualCheckout(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPath := first.path
+	if err = first.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("head-b"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	run(source, "add", "tracked.txt")
+	run(source, "commit", "-m", "head b")
+	run(source, "push", "control", "HEAD:refs/heads/aih/task")
+	task.HeadSHA = run(source, "rev-parse", "HEAD")
+	second, err := c.newVisualCheckout(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.path == firstPath {
+		t.Fatal("head B reused head A's prepared checkout path")
+	}
+	if sha, err := (gitx.Git{Dir: second.path}).SHA(context.Background(), "HEAD"); err != nil || sha != task.HeadSHA {
+		t.Fatalf("head B checkout has the wrong revision: %s %v", sha, err)
+	}
+	if err = second.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestNativeVisualAdapter is a disposable project-side adapter. It deliberately

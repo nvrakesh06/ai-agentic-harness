@@ -129,6 +129,104 @@ func (e *visualCaptureUnavailableError) Error() string {
 }
 func (e *visualCaptureUnavailableError) Unwrap() error { return e.err }
 
+// visualCheckout is a one-capture, AIH-owned source tree. Its marker is kept
+// beside the checkout so source cleanliness remains meaningful.
+type visualCheckout struct {
+	path   string
+	root   string
+	marker string
+	head   string
+	git    gitx.Git
+}
+
+func (v *visualCheckout) Close(ctx context.Context) error {
+	if v == nil || v.path == "" {
+		return nil
+	}
+	defer func() { v.path = "" }()
+	marker, err := os.ReadFile(v.marker)
+	if err != nil || string(marker) != v.path+"\n"+v.head+"\n" {
+		return errors.New("visual checkout ownership marker is unavailable")
+	}
+	if err = mustResolveTo(v.root, v.root); err != nil {
+		return fmt.Errorf("unsafe visual checkout root: %w", err)
+	}
+	if err = mustResolveTo(v.path, v.path); err != nil || !pathWithin(v.root, v.path) {
+		return errors.New("visual checkout path escapes its AIH-owned root")
+	}
+	info, err := os.Lstat(v.path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("visual checkout is not a plain directory")
+	}
+	if _, err = v.git.Run(ctx, "", "worktree", "remove", "--force", v.path); err != nil {
+		return fmt.Errorf("remove AIH-owned visual checkout: %w", err)
+	}
+	if err = os.Remove(v.marker); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// newVisualCheckout creates a non-reusable detached worktree from the control
+// repository. The control repository, unlike a writer worktree, contains only
+// tracked objects fetched by AIH. A new path is deliberately used for every
+// capture so a restart cannot inherit a prepared runtime for another head.
+func (c *Controller) newVisualCheckout(ctx context.Context, task *model.Task) (*visualCheckout, error) {
+	if c.P == nil || !visualTaskID.MatchString(task.ID) || !visualRevision.MatchString(task.HeadSHA) {
+		return nil, errors.New("visual checkout needs a safe task identity and exact head")
+	}
+	project, err := filepath.EvalSymlinks(c.P.Dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve AIH project directory: %w", err)
+	}
+	root := filepath.Join(project, "visual-checkouts")
+	if err = os.Mkdir(root, 0700); err != nil && !os.IsExist(err) {
+		return nil, err
+	}
+	if err = mustResolveTo(root, root); err != nil {
+		return nil, fmt.Errorf("unsafe visual checkout root: %w", err)
+	}
+	owned := filepath.Join(root, ".owned")
+	if err = os.Mkdir(owned, 0700); err != nil && !os.IsExist(err) {
+		return nil, err
+	}
+	if err = mustResolveTo(owned, owned); err != nil {
+		return nil, fmt.Errorf("unsafe visual checkout ownership root: %w", err)
+	}
+	path, err := os.MkdirTemp(root, ".capture-")
+	if err != nil {
+		return nil, err
+	}
+	checkout := &visualCheckout{path: path, root: root, marker: filepath.Join(owned, filepath.Base(path)), head: task.HeadSHA, git: c.P.Git}
+	if err = os.WriteFile(checkout.marker, []byte(path+"\n"+task.HeadSHA+"\n"), 0600); err != nil {
+		_ = os.Remove(path)
+		return nil, err
+	}
+	if err = c.P.Git.Detached(ctx, path, task.HeadSHA); err != nil {
+		_ = os.Remove(checkout.marker)
+		_ = os.Remove(path)
+		return nil, err
+	}
+	sha, err := (gitx.Git{Dir: path}).SHA(ctx, "HEAD")
+	if err != nil || sha != task.HeadSHA {
+		_ = checkout.Close(context.Background())
+		return nil, errors.New("detached visual checkout is not at the reviewed head")
+	}
+	return checkout, nil
+}
+
+func visualEnvironment(cache string, extra ...string) []string {
+	env := make([]string, 0, len(os.Environ())+len(extra)+2)
+	for _, item := range cleanEnvironment() {
+		key := strings.ToUpper(strings.SplitN(item, "=", 2)[0])
+		if key == "NODE_PATH" || key == "NODE_OPTIONS" || strings.HasSuffix(key, "_CACHE") || strings.HasPrefix(key, "NPM_CONFIG_") || strings.HasPrefix(key, "PNPM_") || strings.HasPrefix(key, "YARN_") || strings.HasPrefix(key, "BUN_") {
+			continue
+		}
+		env = append(env, item)
+	}
+	return append(env, append([]string{"AIH_VISUAL_CACHE_DIR=" + cache, "XDG_CACHE_HOME=" + cache}, extra...)...)
+}
+
 func visualCaptureRunError(command string, err error, output string) error {
 	if errors.Is(err, exec.ErrNotFound) {
 		return &visualCaptureUnavailableError{fmt.Errorf("%w: %s", err, filepath.Base(command))}
@@ -510,9 +608,10 @@ func quarantineVisualCapture(output string) error {
 	return os.Rename(output, quarantine)
 }
 
-// captureVisual executes only the canonical project's configured argv, at the
-// pinned task worktree. The command owns browser startup and loopback policy;
-// AIH bounds its process lifetime and accepts only validated local artifacts.
+// captureVisual executes only the canonical project's configured argv in a
+// fresh supervisor-owned detached checkout. The command owns browser startup
+// and loopback policy; AIH bounds its process lifetime and accepts only
+// validated local artifacts.
 func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task *model.Task, dir string) (*model.VisualEvidence, error) {
 	capture := e.Project.VisualCapture
 	if capture == nil {
@@ -593,12 +692,33 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	defer release()
 	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(capture.Timeout)*time.Second)
 	defer cancel()
+	checkout, err := c.newVisualCheckout(checkCtx, task)
+	if err != nil {
+		return nil, &checkFailure{name: "visual capture", command: "git", err: err}
+	}
+	defer checkout.Close(context.Background())
+	cache := filepath.Join(temporary, "cache")
+	if err = os.Mkdir(cache, 0700); err != nil {
+		return nil, err
+	}
+	if len(capture.Prepare) > 0 {
+		prepareTimeout := capture.PrepareTimeout
+		if prepareTimeout == 0 {
+			prepareTimeout = capture.Timeout
+		}
+		prepareCtx, prepareCancel := context.WithTimeout(checkCtx, time.Duration(prepareTimeout)*time.Second)
+		out, prepareErr := platform.Run(prepareCtx, checkout.path, visualEnvironment(cache), "", capture.Prepare[0], capture.Prepare[1:]...)
+		prepareCancel()
+		if prepareErr != nil {
+			return nil, visualCaptureRunError(capture.Prepare[0], prepareErr, out)
+		}
+	}
 	certPath, keyPath, cert, err := visualCertificate(temporary)
 	if err != nil {
 		return nil, err
 	}
-	adapterEnv := append(cleanEnvironment(), "AIH_VISUAL_TLS_CERT="+certPath, "AIH_VISUAL_TLS_KEY="+keyPath)
-	adapter, err := platform.StartManaged(checkCtx, dir, adapterEnv, capture.Server[0], capture.Server[1:]...)
+	adapterEnv := visualEnvironment(cache, "AIH_VISUAL_TLS_CERT="+certPath, "AIH_VISUAL_TLS_KEY="+keyPath)
+	adapter, err := platform.StartManaged(checkCtx, checkout.path, adapterEnv, capture.Server[0], capture.Server[1:]...)
 	if err != nil {
 		return nil, visualCaptureRunError(capture.Server[0], err, "")
 	}
@@ -616,20 +736,19 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	if err != nil {
 		return nil, err
 	}
-	env := append(cleanEnvironment(), "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA, "AIH_VISUAL_URL="+gateway.url, "AIH_VISUAL_PLAYWRIGHT_MODULE="+playwright, "AIH_VISUAL_TARGETS="+string(targetJSON))
-	out, err := platform.Run(checkCtx, dir, env, "", "node", runner)
+	env := visualEnvironment(cache, "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA, "AIH_VISUAL_URL="+gateway.url, "AIH_VISUAL_PLAYWRIGHT_MODULE="+playwright, "AIH_VISUAL_TARGETS="+string(targetJSON))
+	out, err := platform.Run(checkCtx, checkout.path, env, "", "node", runner)
 	if err != nil {
 		return nil, visualCaptureRunError("node", err, out)
 	}
 	gateway.Close()
 	adapter.Close()
-	sha, err = (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
+	sha, err = (gitx.Git{Dir: checkout.path}).SHA(ctx, "HEAD")
 	if err != nil || sha != task.HeadSHA {
 		return nil, errors.New("visual capture changed the reviewed head")
 	}
-	dirty, err := (gitx.Git{Dir: dir}).Run(ctx, "", "status", "--porcelain")
-	if err != nil || dirty != "" {
-		return nil, errors.New("visual capture modified source or created unignored files")
+	if _, err = (gitx.Git{Dir: checkout.path}).Run(ctx, "", "diff", "--quiet", "HEAD", "--"); err != nil {
+		return nil, errors.New("visual capture modified tracked source")
 	}
 	visual, err := loadVisualEvidenceForTargets(temporary, task.ID, task.HeadSHA, e.Hash, targets)
 	if err != nil {
