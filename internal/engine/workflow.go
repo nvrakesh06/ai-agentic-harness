@@ -303,20 +303,29 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 		if readErr != nil {
 			return provider.Result{}, readErr
 		}
+		// Git worktree metadata is shared by all reader roles. Serialize only
+		// creation/removal, never the provider invocation, so independent reviews
+		// retain bounded parallelism without racing worktree add/remove locks.
+		c.gitMu.Lock()
 		runDir, readErr = c.P.ValidDisposableReviewWorktreePath(id)
 		if readErr != nil {
+			c.gitMu.Unlock()
 			return provider.Result{}, readErr
 		}
 		if err := c.P.Git.Detached(ctx, runDir, readRef); err != nil {
+			c.gitMu.Unlock()
 			return provider.Result{}, fmt.Errorf("create disposable read-only review worktree: %w", err)
 		}
+		c.gitMu.Unlock()
 		// Non-writer roles run in an AIH-created detached checkout. Force removal
 		// is safe here and prevents a diagnostic's generated files from leaving a
 		// stranded worktree after either success or provider failure.
 		defer func() {
+			c.gitMu.Lock()
 			if cleanupErr := c.P.RemoveDisposableReviewWorktree(context.Background(), id); cleanupErr != nil {
 				_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "read_only_worktree_cleanup_failed", safety.Redact(cleanupErr.Error()))
 			}
+			c.gitMu.Unlock()
 		}()
 	}
 	prompt := roles.Compile(e, r, runtime.GOOS, t, objective, diff, evidence)
