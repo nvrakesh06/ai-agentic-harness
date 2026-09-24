@@ -226,6 +226,9 @@ var transientGitTransportErrors = []string{
 	"could not resolve host", "could not resolve hostname", "temporary failure in name resolution",
 	"couldn't resolve host", "failed to connect", "could not connect to server",
 	"connection timed out", "connection reset by peer", "network is unreachable",
+	"internal server error", "the requested url returned error: 500",
+	"the requested url returned error: 502", "the requested url returned error: 503",
+	"the requested url returned error: 504", "bad gateway", "service unavailable", "gateway timeout",
 }
 
 func transientGitTransport(err error) bool {
