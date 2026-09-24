@@ -13,6 +13,7 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
 	"gopkg.in/yaml.v3"
 	"io"
@@ -23,6 +24,8 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+const maxTimeoutDiagnosticBytes = 16 * 1024
 
 type Fixture struct {
 	Root, Remote, Source, Home string
@@ -424,6 +427,12 @@ func Run(ctx context.Context, out io.Writer, checks []string) (string, error) {
 	go func() { done <- controller.Serve(ctx); close(done) }()
 	defer func() { cancel(); <-done }()
 	fmt.Fprintln(out, "Running real supervisor with mock intelligence and GitHub, using local Git.")
+	phase := "waiting for the initial workflow to complete"
+	phaseStarted := time.Now().UTC()
+	setPhase := func(next string) {
+		phase = next
+		phaseStarted = time.Now().UTC()
+	}
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	var saved *model.Snapshot
@@ -432,7 +441,7 @@ func Run(ctx context.Context, out io.Writer, checks []string) (string, error) {
 		case e = <-done:
 			return root, fmt.Errorf("supervisor ended before demo completed: %w", e)
 		case <-ctx.Done():
-			return root, ctx.Err()
+			return root, demoTimeout(ctx.Err(), phase, phaseStarted, f.P)
 		case <-ticker.C:
 			s, _, se := f.P.DB.Load()
 			if se != nil {
@@ -456,6 +465,7 @@ func Run(ctx context.Context, out io.Writer, checks []string) (string, error) {
 		return root, fmt.Errorf("parallel review roles used %d readers, want configured limit %d", got, f.Project.MaxReaders)
 	}
 	fmt.Fprintf(out, "Independent review roles used %d bounded reader slots.\n", f.Provider.ReviewMax.Load())
+	setPhase("waiting for the supervisor handoff")
 	if e = f.P.DB.Submit(store.Command{ID: model.ID(), Kind: "handoff"}); e != nil {
 		return root, e
 	}
@@ -465,9 +475,10 @@ func Run(ctx context.Context, out io.Writer, checks []string) (string, error) {
 			return root, e
 		}
 	case <-ctx.Done():
-		return root, ctx.Err()
+		return root, demoTimeout(ctx.Err(), phase, phaseStarted, f.P)
 	}
 	fmt.Fprintln(out, "Three tasks DONE; one BLOCKED_HUMAN; dependencies and merge train completed.")
+	setPhase("reconstructing the deleted machine-A project on machine B")
 	projectDir := f.P.Dir
 	if e = f.P.DB.Close(); e != nil {
 		return root, e
@@ -499,4 +510,35 @@ func Run(ctx context.Context, out io.Writer, checks []string) (string, error) {
 	}
 	fmt.Fprintln(out, "Deleted the complete machine-A project directory; machine B reconstructed every task and blocker.")
 	return root, nil
+}
+
+// demoTimeout adds the last portable durable state to the outer deadline. The
+// deterministic demo intentionally drives concurrent controller paths, so this
+// is the only evidence left when a worker, Git operation, or native check stops
+// making progress before the normal state-transition assertions can run.
+func demoTimeout(cause error, phase string, phaseStarted time.Time, p *engine.Project) error {
+	diagnostic := map[string]any{
+		"phase":         phase,
+		"phase_started": phaseStarted.UTC().Format(time.RFC3339Nano),
+		"timed_out_at":  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if p == nil || p.DB == nil {
+		diagnostic["state_error"] = "local project database is unavailable"
+	} else if snapshot, head, err := p.DB.Load(); err != nil {
+		diagnostic["state_error"] = safety.Redact(err.Error())
+	} else {
+		diagnostic["state_head"] = head
+		diagnostic["snapshot"] = snapshot
+		diagnostic["last_error"] = safety.Redact(p.DB.Get("last_error"))
+		diagnostic["lease_local_heartbeat"] = p.DB.Get(engine.LocalLeaseHeartbeatKey)
+	}
+	b, err := json.MarshalIndent(diagnostic, "", "  ")
+	if err != nil {
+		return fmt.Errorf("%w\ndemo timeout diagnostics could not be encoded: %v", cause, err)
+	}
+	text := safety.Redact(string(b))
+	if len(text) > maxTimeoutDiagnosticBytes {
+		text = text[:maxTimeoutDiagnosticBytes] + "\n[diagnostics truncated]"
+	}
+	return fmt.Errorf("%w\ndemo timeout diagnostics:\n%s", cause, text)
 }

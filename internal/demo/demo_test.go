@@ -43,13 +43,15 @@ func TestEndToEndRecovery(t *testing.T) {
 	defer cancel()
 	var output bytes.Buffer
 	root, e := Run(ctx, &output, []string{exe})
+	cleanup := true
 	t.Cleanup(func() {
-		if strings.Contains(filepath.Base(root), "aih-demo-") {
+		if cleanup && strings.Contains(filepath.Base(root), "aih-demo-") {
 			_ = os.RemoveAll(root)
 		}
 	})
 	if e != nil {
-		t.Fatalf("%s\n%s\nartifacts: %s", e, output.String(), root)
+		cleanup = false
+		t.Fatalf("%s\n%s\nfailed demo artifacts retained at: %s", e, output.String(), root)
 	}
 	if !strings.Contains(output.String(), "reconstructed every task") {
 		t.Fatal(output.String())
