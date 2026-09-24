@@ -612,6 +612,9 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		if t.Preflight != nil && t.Preflight.ReuseReason != "" {
 			fmt.Fprintf(cmd.OutOrStdout(), "  Preflight: %s (reuse %d)\n", t.Preflight.ReuseReason, t.Preflight.ReuseCount)
 		}
+		if t.Preflight != nil && t.Preflight.DirectFix != nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "  Direct FIX waiver: %s %s; exact head %s; findings %s\n", t.Preflight.DirectFix.Role, t.Preflight.DirectFix.Disposition, t.Preflight.DirectFix.HeadSHA, t.Preflight.DirectFix.Findings)
+		}
 		if t.Blocker != nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n  Reason: %s\n", t.Blocker.Question, t.Blocker.Reason)
 		}

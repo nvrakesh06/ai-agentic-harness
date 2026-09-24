@@ -912,6 +912,23 @@ func (c *Controller) retry(id, kind, reason string) {
 		} else {
 			task.FixCycles[kind] = count
 		}
+		if preflightErr == nil {
+			if direct := directFixRoute(effective, kind, task, preflightRoles); direct != nil {
+				task.Preflight = direct
+				allSatisfied := true
+				for _, role := range preflightRoles {
+					if !preflightRoleSatisfied(direct, task, effective, role) {
+						allSatisfied = false
+						break
+					}
+				}
+				if allSatisfied {
+					direct.Phase = "ready"
+				}
+				task.State = model.Fix
+				return nil
+			}
+		}
 		task.Findings = append(task.Findings, model.Finding{Severity: "high", Category: kind, Reason: reason, Role: kind})
 		task.State = model.Fix
 		if preflightErr == nil {
