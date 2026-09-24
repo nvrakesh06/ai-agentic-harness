@@ -72,6 +72,62 @@ func TestSchedulerDependenciesDomainsAndBlocked(t *testing.T) {
 		t.Fatal("dependency not released")
 	}
 }
+
+func TestRunnablePrioritizesDraftPRContinuationDeterministically(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Tasks["a-new"] = &Task{ID: "a-new", State: Ready, Domains: []string{"new"}}
+	s.Tasks["z-fix"] = &Task{ID: "z-fix", State: Fix, PR: 42, Domains: []string{"fix"}}
+	s.Tasks["dependent"] = &Task{ID: "dependent", State: Ready, Dependencies: []string{"z-fix"}, Domains: []string{"dependent"}}
+
+	ready := Runnable(s, map[string]bool{}, 1)
+	if len(ready) != 1 || ready[0].ID != "z-fix" {
+		t.Fatalf("draft PR continuation did not win a safe writer slot: %+v", ready)
+	}
+
+	delete(s.Tasks, "dependent")
+	s.Tasks["y-fix"] = &Task{ID: "y-fix", State: Fix, PR: 43, Domains: []string{"other-fix"}}
+	ready = Runnable(s, map[string]bool{}, 2)
+	if len(ready) != 2 || ready[0].ID != "y-fix" || ready[1].ID != "z-fix" {
+		t.Fatalf("equal draft PR continuations were not deterministically ordered: %+v", ready)
+	}
+}
+
+func TestRunnableDoesNotLetDraftPRContinuationBypassSafety(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Tasks["active"] = &Task{ID: "active", State: Running, Domains: []string{"shared"}}
+	s.Tasks["a-new"] = &Task{ID: "a-new", State: Ready, Domains: []string{"new"}}
+	s.Tasks["z-fix"] = &Task{ID: "z-fix", State: Fix, PR: 42, Domains: []string{"shared"}}
+
+	ready := Runnable(s, map[string]bool{"active": true}, 2)
+	if len(ready) != 1 || ready[0].ID != "a-new" {
+		t.Fatalf("conflicting draft PR continuation bypassed writer safety: %+v", ready)
+	}
+}
+
+func TestRunnableDraftPRPriorityDoesNotReduceWriterOccupancy(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Tasks["a-new"] = &Task{ID: "a-new", State: Ready, Domains: []string{"a"}}
+	s.Tasks["b-new"] = &Task{ID: "b-new", State: Ready, Domains: []string{"b"}}
+	s.Tasks["z-fix"] = &Task{ID: "z-fix", State: Fix, PR: 42, Domains: []string{"a", "b"}}
+
+	ready := Runnable(s, map[string]bool{}, 2)
+	if len(ready) != 2 || ready[0].ID != "a-new" || ready[1].ID != "b-new" {
+		t.Fatalf("draft PR priority reduced baseline writer occupancy: %+v", ready)
+	}
+}
+
+func TestRunnableDraftPRPriorityIgnoresBlockedDependants(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Tasks["a-fix"] = &Task{ID: "a-fix", State: Fix, PR: 41, Domains: []string{"a"}}
+	s.Tasks["a-blocked-dependent"] = &Task{ID: "a-blocked-dependent", State: Blocked, Dependencies: []string{"a-fix"}, Domains: []string{"blocked"}}
+	s.Tasks["z-fix"] = &Task{ID: "z-fix", State: Fix, PR: 42, Domains: []string{"z"}}
+	s.Tasks["z-waiting-dependent"] = &Task{ID: "z-waiting-dependent", State: Ready, Dependencies: []string{"z-fix"}, Domains: []string{"waiting"}}
+
+	ready := Runnable(s, map[string]bool{}, 1)
+	if len(ready) != 1 || ready[0].ID != "z-fix" {
+		t.Fatalf("blocked dependant boosted a draft PR ahead of actionable work: %+v", ready)
+	}
+}
 func TestPlanRejectsCyclesMissingAndUnsafeKeys(t *testing.T) {
 	a := PlanTask{Key: "a", Title: "a", Objective: "a", Acceptance: []string{"works"}, Areas: []string{"a"}, Domains: []string{"a"}, Risk: "low"}
 	b := a

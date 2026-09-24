@@ -753,6 +753,24 @@ func Runnable(s *Snapshot, active map[string]bool, limit int) []*Task {
 	return RunnableWhere(s, active, limit, func(*Task) bool { return true })
 }
 func RunnableWhere(s *Snapshot, active map[string]bool, limit int, eligible func(*Task) bool) []*Task {
+	baseline := runnableWhereOrdered(s, active, limit, eligible, Ordered(s))
+	ordered := Ordered(s)
+	// A task with a durable draft PR has already consumed a writer slice and may
+	// be holding up dependent work. Finish that bounded FIX or continuation
+	// before starting newly provisioned work when both are otherwise runnable.
+	// Task state has no durable ready-since value, so this intentionally does not
+	// add a starvation timer; IDs remain the deterministic tie-breaker.
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return runnablePriority(s, ordered[i]) > runnablePriority(s, ordered[j])
+	})
+	prioritized := runnableWhereOrdered(s, active, limit, eligible, ordered)
+	if len(prioritized) < len(baseline) {
+		return baseline
+	}
+	return prioritized
+}
+
+func runnableWhereOrdered(s *Snapshot, active map[string]bool, limit int, eligible func(*Task) bool, ordered []*Task) []*Task {
 	domains := map[string]bool{}
 	count := 0
 	for id := range active {
@@ -764,7 +782,7 @@ func RunnableWhere(s *Snapshot, active map[string]bool, limit int, eligible func
 		}
 	}
 	var result []*Task
-	for _, t := range Ordered(s) {
+	for _, t := range ordered {
 		if count >= limit {
 			break
 		}
@@ -792,6 +810,27 @@ func RunnableWhere(s *Snapshot, active map[string]bool, limit int, eligible func
 		}
 	}
 	return result
+}
+
+func runnablePriority(s *Snapshot, task *Task) int {
+	if task == nil || task.PR == 0 || (task.State != Ready && task.State != Fix) {
+		return 0
+	}
+	for _, candidate := range s.Tasks {
+		if !waitingOnDependency(candidate) {
+			continue
+		}
+		for _, dependency := range candidate.Dependencies {
+			if dependency == task.ID {
+				return 2
+			}
+		}
+	}
+	return 1
+}
+
+func waitingOnDependency(task *Task) bool {
+	return task != nil && (task.State == Planned || task.State == Ready || task.State == Fix)
 }
 
 type PlanTask struct {
