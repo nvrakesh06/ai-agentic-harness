@@ -303,14 +303,21 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 		if readErr != nil {
 			return provider.Result{}, readErr
 		}
-		runDir = filepath.Join(c.P.Dir, "review-worktrees", id)
+		runDir, readErr = c.P.ValidDisposableReviewWorktreePath(id)
+		if readErr != nil {
+			return provider.Result{}, readErr
+		}
 		if err := c.P.Git.Detached(ctx, runDir, readRef); err != nil {
 			return provider.Result{}, fmt.Errorf("create disposable read-only review worktree: %w", err)
 		}
 		// Non-writer roles run in an AIH-created detached checkout. Force removal
 		// is safe here and prevents a diagnostic's generated files from leaving a
 		// stranded worktree after either success or provider failure.
-		defer c.P.Git.RemoveDisposableWorktree(context.Background(), runDir)
+		defer func() {
+			if cleanupErr := c.P.RemoveDisposableReviewWorktree(context.Background(), id); cleanupErr != nil {
+				_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "read_only_worktree_cleanup_failed", safety.Redact(cleanupErr.Error()))
+			}
+		}()
 	}
 	prompt := roles.Compile(e, r, runtime.GOOS, t, objective, diff, evidence)
 	var operatorGuidance []model.Guidance

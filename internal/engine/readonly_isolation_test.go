@@ -118,3 +118,54 @@ func TestReadOnlyReviewerEmissionUsesDisposableCheckoutAndCleansIt(t *testing.T)
 	cancel()
 	<-done
 }
+
+func TestDisposableReviewWorktreeCleanupRejectsJunctionAndDiscardsGeneratedFiles(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	runID := "generated-diagnostic"
+	dir, err := f.P.ValidDisposableReviewWorktreePath(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Detached(ctx, dir, "refs/remotes/origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "emitted.js"), []byte("diagnostic output\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.RemoveDisposableReviewWorktree(ctx, runID); err != nil {
+		t.Fatalf("remove generated disposable review worktree: %v", err)
+	}
+	if _, err = os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("disposable review worktree remains after cleanup: %v", err)
+	}
+
+	root := filepath.Join(f.P.Dir, "review-worktrees")
+	outside := filepath.Join(t.TempDir(), "outside")
+	marker := filepath.Join(outside, "marker")
+	if err = os.MkdirAll(outside, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(marker, []byte("must remain"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink(outside, root); err != nil {
+		t.Skipf("junction fixture unavailable on this machine: %v", err)
+	}
+	if _, err = f.P.ValidDisposableReviewWorktreePath("swapped-root"); err == nil {
+		t.Fatal("review root junction was accepted")
+	}
+	if err = f.P.RemoveDisposableReviewWorktree(ctx, "swapped-root"); err == nil {
+		t.Fatal("review root junction was accepted for forced cleanup")
+	}
+	if _, err = os.Stat(marker); err != nil {
+		t.Fatalf("review worktree cleanup affected outside marker: %v", err)
+	}
+}

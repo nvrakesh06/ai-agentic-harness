@@ -241,28 +241,6 @@ func TestWorktreeCheckpointAndRebase(t *testing.T) {
 	}
 }
 
-func TestRemoveDisposableWorktreeDiscardsGeneratedFiles(t *testing.T) {
-	ctx := context.Background()
-	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.P.DB.Close()
-	dir := filepath.Join(f.P.Dir, "review-worktrees", "generated-diagnostic")
-	if err = f.P.Git.Detached(ctx, dir, "refs/remotes/origin/main"); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(filepath.Join(dir, "emitted.js"), []byte("diagnostic output\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err = f.P.Git.RemoveDisposableWorktree(ctx, dir); err != nil {
-		t.Fatalf("force-remove disposable checkout with generated file: %v", err)
-	}
-	if _, err = os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("disposable checkout remains after cleanup: %v", err)
-	}
-}
-
 func TestCheckpointExcludesExternalWorkerScratchButNamesSourceSecretCandidate(t *testing.T) {
 	ctx := context.Background()
 	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
