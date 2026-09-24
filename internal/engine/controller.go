@@ -569,7 +569,7 @@ func (c *Controller) commands() (bool, error) {
 			} else if objective := s.Objectives[cmd.Target]; objective == nil || objective.Blocker == "" {
 				e = errors.New("unknown blocked task/objective")
 			} else {
-				e = nil
+				e = validateObjectiveAnswer(cmd.Payload)
 			}
 			if e != nil {
 				_ = c.P.DB.Ack(cmd.ID, e.Error())
@@ -641,9 +641,9 @@ func (c *Controller) commands() (bool, error) {
 				}
 				if t == nil {
 					if o := s.Objectives[cmd.Target]; o != nil && o.Blocker != "" {
-						o.Text += "\nHuman answer: " + cmd.Payload
-						o.Blocker = ""
-						o.Attempts = 0
+						if e := applyObjectiveAnswer(o, cmd.Payload); e != nil {
+							return e
+						}
 						break
 					}
 					return errors.New("unknown blocked task/objective")

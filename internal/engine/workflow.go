@@ -491,6 +491,10 @@ func (c *Controller) plan(id string) {
 		return
 	}
 	if r.Status != "completed" {
+		if r.Status == "blocked" && strings.TrimSpace(r.Question) != "" {
+			c.planHumanBlock(id, r.Question)
+			return
+		}
 		c.planFailure(id, fmt.Errorf("%s %s", r.Summary, r.Question))
 		return
 	}
@@ -530,6 +534,39 @@ func (c *Controller) plan(id string) {
 		c.planFailure(id, e)
 	}
 }
+func (c *Controller) planHumanBlock(id, question string) {
+	if c.ctx.Err() != nil {
+		return
+	}
+	_ = c.mutate(func(s *model.Snapshot) error {
+		if o := s.Objectives[id]; o != nil {
+			markObjectivePlanningBlocked(o, c.portable(question))
+		}
+		return nil
+	})
+}
+
+func markObjectivePlanningBlocked(o *model.Objective, question string) {
+	o.Blocker = "Planning needs input: " + strings.TrimSpace(question)
+}
+
+func validateObjectiveAnswer(answer string) error {
+	if strings.TrimSpace(answer) == "" {
+		return errors.New("answer cannot be empty")
+	}
+	return nil
+}
+
+func applyObjectiveAnswer(o *model.Objective, answer string) error {
+	if err := validateObjectiveAnswer(answer); err != nil {
+		return err
+	}
+	o.Text += "\nHuman answer: " + answer
+	o.Blocker = ""
+	o.Attempts = 0
+	return nil
+}
+
 func (c *Controller) planFailure(id string, e error) {
 	if c.ctx.Err() != nil {
 		return
