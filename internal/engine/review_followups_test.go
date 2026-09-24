@@ -117,6 +117,41 @@ func TestReviewFollowupIdentitySurvivesAdditionalAcronym(t *testing.T) {
 	}
 }
 
+func TestReviewFollowupsGroupAdjacentFilesByOwnerArea(t *testing.T) {
+	task := &model.Task{ID: "review-followups-area", Issue: 48, HeadSHA: "abc123"}
+	findings := []model.Finding{
+		{Severity: "medium", Category: "accessibility", Location: "src/studio/App.tsx:40", Role: "designer", Reason: "Focus is missing."},
+		{Severity: "medium", Category: "reliability", Location: "src/studio/api-client.ts:80", Role: "qa", Reason: "Refresh can overlap."},
+		{Severity: "medium", Category: "layout", Location: "src/engine/layout.ts:12", Role: "reviewer", Reason: "Safe bounds are incorrect."},
+		{Severity: "medium", Category: "test", Location: "tests/studio-live.spec.ts:90", Role: "qa", Reason: "Capture lacks a narrow viewport."},
+	}
+	groups := groupReviewFollowups(task, findings)
+	if len(groups) != 3 {
+		t.Fatalf("four file observations should create three owner-area issues, got %#v", groups)
+	}
+	var studio *reviewFollowupGroup
+	for i := range groups {
+		if groups[i].scope == "file:src/studio" {
+			studio = &groups[i]
+		}
+	}
+	if studio == nil || len(studio.findings) != 2 || !strings.Contains(studio.body(task), "App.tsx:40") || !strings.Contains(studio.body(task), "api-client.ts:80") {
+		t.Fatalf("Studio owner issue lost independent file findings: %#v", studio)
+	}
+}
+
+func TestReviewFollowupProseLocationFallsBackToCategory(t *testing.T) {
+	task := &model.Task{ID: "review-followups-prose", Issue: 48, HeadSHA: "abc123"}
+	first := model.Finding{Severity: "medium", Category: "visual evidence", Location: "current-head studio browser captures", Reason: "Capture is missing."}
+	second := first
+	second.Location = "exact-head visual screenshots"
+	before := groupReviewFollowups(task, []model.Finding{first})
+	after := groupReviewFollowups(task, []model.Finding{second})
+	if len(before) != 1 || len(after) != 1 || before[0].scope != "category:visual evidence" || before[0].key != after[0].key {
+		t.Fatalf("prose location created fake source issue or unstable key: before=%#v after=%#v", before, after)
+	}
+}
+
 func TestReviewFollowupSourceScopeIgnoresLocationNotation(t *testing.T) {
 	const source = "src/http.ts"
 	for _, location := range []string{
