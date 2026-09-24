@@ -37,8 +37,8 @@ func reviewScope(task *model.Task, paths, roster []string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func reviewReusePaths(paths []string) bool {
-	if len(paths) == 0 {
+func reviewReusePaths(paths, allowed []string) bool {
+	if len(paths) == 0 || len(allowed) == 0 {
 		return false
 	}
 	for _, path := range paths {
@@ -49,19 +49,24 @@ func reviewReusePaths(paths []string) bool {
 			strings.Contains(lower, "auth") || strings.Contains(lower, "secret") || strings.Contains(lower, "permission") || strings.Contains(lower, "crypto") || strings.Contains(lower, "network") || strings.Contains(lower, "deserial") || strings.Contains(lower, "subprocess") {
 			return false
 		}
-		// The first policy intentionally accepts plain Markdown only. CSS/SCSS can
-		// import fonts or other resources through many equivalent syntaxes, and
-		// MDX can execute JSX/JavaScript. Expand this only with a parser-backed,
-		// separately reviewed classifier.
-		if !strings.HasSuffix(lower, ".md") {
+		if !strings.HasSuffix(lower, ".txt") || !matchesOne(allowed, lower) {
 			return false
 		}
 	}
 	return true
 }
 
-func reviewReuseDiffSafe(diff string, paths []string) bool {
-	if !reviewReusePaths(paths) {
+func matchesOne(patterns []string, name string) bool {
+	for _, pattern := range patterns {
+		if roles.Matches(strings.ToLower(pattern), name) {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewReuseDiffSafe(diff string, paths, allowed []string) bool {
+	if !reviewReusePaths(paths, allowed) {
 		return false
 	}
 	lower := strings.ToLower(diff)
@@ -71,6 +76,16 @@ func reviewReuseDiffSafe(diff string, paths []string) bool {
 	} {
 		if strings.Contains(lower, marker) {
 			return false
+		}
+	}
+	for _, line := range strings.Split(diff, "\n") {
+		if !strings.HasPrefix(line, "+") || strings.HasPrefix(line, "+++") {
+			continue
+		}
+		for _, r := range line[1:] {
+			if !(r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == '.' || r == ',' || r == ':' || r == ';' || r == '!' || r == '?' || r == '(' || r == ')' || r == '-' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+				return false
+			}
 		}
 	}
 	return true
@@ -89,8 +104,8 @@ func sameRoster(a, b []string) bool {
 }
 
 // reusableReviewDispositions implements the first deliberately small policy:
-// only a clean security pass can be reused, and only across an intervening
-// plain-Markdown documentation-only delta. QA, designer, reviewer and custom validators
+// only a clean security pass can be reused, and only across a project-explicit
+// inert text-data delta. QA, designer, reviewer and custom validators
 // always run for the new head.
 func (c *Controller) reusableReviewDispositions(ctx context.Context, effective config.Effective, task *model.Task, roster []string, scope string) map[string]model.ReviewDisposition {
 	provenance, ok := task.ReviewProvenance["security"]
@@ -98,12 +113,12 @@ func (c *Controller) reusableReviewDispositions(ctx context.Context, effective c
 		return nil
 	}
 	diff, paths, err := c.P.Git.Diff(ctx, provenance.Head, task.HeadSHA)
-	if err != nil || diff == "" || !reviewReuseDiffSafe(diff, paths) {
+	if err != nil || diff == "" || !reviewReuseDiffSafe(diff, paths, effective.Project.ReviewReuse.SecurityDataOnlyPaths) {
 		return nil
 	}
 	return map[string]model.ReviewDisposition{"security": {
 		Disposition: "reused",
-		Reason:      "prior zero-finding security review reused for plain-Markdown documentation delta",
+		Reason:      "prior zero-finding security review reused for configured inert text-data delta",
 		SourceHead:  provenance.Head,
 		Runtime:     provenance.Runtime,
 	}}

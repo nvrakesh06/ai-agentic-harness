@@ -16,26 +16,30 @@ func TestReviewReuseThreeHeadPolicyFailsClosed(t *testing.T) {
 	rulesHash := strings.Repeat("e", 64)
 	task := &model.Task{BaseSHA: base, HeadSHA: second, Security: true, Risk: "low"}
 	roster := []string{"qa", "reviewer", "security"}
-	scope := reviewScope(task, []string{"docs/dashboard.md"}, roster)
+	allowed := []string{"fixtures/review-data/*.txt"}
+	scope := reviewScope(task, []string{"fixtures/review-data/dashboard.txt"}, roster)
 	provenance := model.ReviewProvenance{Role: "security", Base: base, Head: first, Config: config, Rules: rulesHash, Roster: roster, Scope: scope, Provider: "codex", Runtime: "codex/gpt-6-terra/1.0.0"}
-	if !reviewReuseDiffSafe("diff --git a/docs/dashboard.md b/docs/dashboard.md\n+ Improve the dashboard hierarchy explanation.", []string{"docs/dashboard.md"}) {
-		t.Fatal("second plain-Markdown head was not eligible")
+	if !reviewReuseDiffSafe("diff --git a/fixtures/review-data/dashboard.txt b/fixtures/review-data/dashboard.txt\n+ Improve dashboard hierarchy explanation.", []string{"fixtures/review-data/dashboard.txt"}, allowed) {
+		t.Fatal("second configured text-data head was not eligible")
 	}
-	if reviewReuseDiffSafe("diff --git a/docs/dashboard.mdx b/docs/dashboard.mdx\n+ {fetch('/api/credentials')}", []string{"docs/dashboard.mdx"}) {
+	if reviewReuseDiffSafe("diff --git a/docs/dashboard.md b/docs/dashboard.md\n+ <script>alert(1)</script>", []string{"docs/dashboard.md"}, allowed) {
+		t.Fatal("raw HTML Markdown delta was incorrectly eligible")
+	}
+	if reviewReuseDiffSafe("diff --git a/docs/dashboard.mdx b/docs/dashboard.mdx\n+ {fetch('/api/credentials')}", []string{"docs/dashboard.mdx"}, allowed) {
 		t.Fatal("executable MDX delta was incorrectly eligible")
 	}
-	if reviewReuseDiffSafe("diff --git a/ui/dashboard.css b/ui/dashboard.css\n+ @namespace svg url(http://example.invalid/svg);", []string{"ui/dashboard.css"}) {
+	if reviewReuseDiffSafe("diff --git a/ui/dashboard.css b/ui/dashboard.css\n+ @namespace svg url(http://example.invalid/svg);", []string{"ui/dashboard.css"}, allowed) {
 		t.Fatal("CSS resource-loading delta was incorrectly eligible")
 	}
 	for _, policyPath := range []string{"AGENTS.md", "docs/CLAUDE.md", ".github/copilot-instructions.md", ".codex/policy.md", "docs/build-instructions.md"} {
-		if reviewReuseDiffSafe("diff --git a/"+policyPath+" b/"+policyPath+"\n+ change execution guidance", []string{policyPath}) {
+		if reviewReuseDiffSafe("diff --git a/"+policyPath+" b/"+policyPath+"\n+ change execution guidance", []string{policyPath}, allowed) {
 			t.Fatalf("agent/build policy markdown %q was incorrectly eligible", policyPath)
 		}
 	}
-	if reviewReuseDiffSafe("diff --git a/internal/auth/session.go b/internal/auth/session.go", []string{"docs/dashboard.md", "internal/auth/session.go"}) {
+	if reviewReuseDiffSafe("diff --git a/internal/auth/session.go b/internal/auth/session.go", []string{"fixtures/review-data/dashboard.txt", "internal/auth/session.go"}, allowed) {
 		t.Fatal("third security-sensitive head was incorrectly eligible")
 	}
-	changedScope := reviewScope(task, []string{"docs/dashboard.md", "internal/auth/session.go"}, roster)
+	changedScope := reviewScope(task, []string{"fixtures/review-data/dashboard.txt", "internal/auth/session.go"}, roster)
 	if changedScope == scope {
 		t.Fatal("security-sensitive third head did not change review scope")
 	}
