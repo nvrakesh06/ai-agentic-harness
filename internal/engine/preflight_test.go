@@ -47,7 +47,7 @@ func TestAcceptedCorrectionInvalidatesCompletedPreflight(t *testing.T) {
 	task := &model.Task{ID: "ui", ObjectiveID: "objective", State: model.Running, HeadSHA: "old-head", UI: true}
 	source := &model.Task{ID: "api", ObjectiveID: "objective", HeadSHA: strings.Repeat("a", 40)}
 	required := []roles.Role{{Name: "designer", Stage: "pre-implementation"}}
-	p := &model.Preflight{Phase: "writing", BaseSHA: "base", HeadSHA: task.HeadSHA, Config: "config", Rules: roles.Hash(), Scope: preflightScope(task), Completed: []string{"designer"}}
+	p := &model.Preflight{Phase: "writing", BaseSHA: "base", HeadSHA: task.HeadSHA, Config: "config", Rules: roles.Hash(), Scope: preflightScope(task, effective), Completed: []string{"designer"}}
 	if err := model.QueueGuidance(task, source, "correction", "The durable API uses cursor pagination; update the navigation contract."); err != nil {
 		t.Fatal(err)
 	}
@@ -62,10 +62,29 @@ func TestAcceptedCorrectionInvalidatesCompletedPreflight(t *testing.T) {
 		t.Fatal("failed implementation reused guidance predating its correction")
 	}
 	// Specialist output and checkpoint bookkeeping are not new task inputs.
-	p.Scope = preflightScope(task)
+	p.Scope = preflightScope(task, effective)
 	task.Decisions = append(task.Decisions, "designer: use existing navigation", "Checkpoint: repaired navigation")
 	if !reusePreflightForFix(p, task, effective, required) {
 		t.Fatal("ordinary progress invalidated unchanged task guidance")
+	}
+}
+
+func TestEligibleOperatorGuidanceInvalidatesPreflightButStalePolicyDoesNot(t *testing.T) {
+	head, configHash, rules := strings.Repeat("a", 40), strings.Repeat("b", 64), roles.Hash()
+	effective := config.Effective{BaseSHA: head, Hash: configHash}
+	task := &model.Task{ID: "ui", State: model.Running, HeadSHA: head}
+	baseline := preflightScope(task, effective)
+	p := &model.Preflight{Phase: "ready", BaseSHA: head, HeadSHA: head, Config: configHash, Rules: rules, Scope: baseline}
+	if err := model.QueueOperatorGuidance(task, "operator", head, head, configHash, rules, "Use the owned endpoint."); err != nil {
+		t.Fatal(err)
+	}
+	if preflightMatches(p, task, effective) {
+		t.Fatal("eligible operator guidance did not invalidate completed preflight")
+	}
+	changed := effective
+	changed.Hash = strings.Repeat("c", 64)
+	if got := preflightScope(task, changed); got != baseline {
+		t.Fatal("stale-policy operator guidance changed preflight scope")
 	}
 }
 
@@ -76,7 +95,7 @@ func TestCompletedPreflightSurvivesVerificationRecovery(t *testing.T) {
 				effective := config.Effective{BaseSHA: strings.Repeat("a", 40), Hash: strings.Repeat("b", 64), Policy: config.Policy{ImplementationRetries: 2}}
 				s := model.NewSnapshot("project123")
 				task := &model.Task{ID: "ui", State: state, HeadSHA: strings.Repeat("c", 40), UI: true, Attempts: 1}
-				task.Preflight = &model.Preflight{Phase: "writing", BaseSHA: effective.BaseSHA, HeadSHA: strings.Repeat("d", 40), Config: effective.Hash, Rules: roles.Hash(), Scope: preflightScope(task), Completed: []string{"designer"}, ReuseCount: 1}
+				task.Preflight = &model.Preflight{Phase: "writing", BaseSHA: effective.BaseSHA, HeadSHA: strings.Repeat("d", 40), Config: effective.Hash, Rules: roles.Hash(), Scope: preflightScope(task, effective), Completed: []string{"designer"}, ReuseCount: 1}
 				s.Tasks[task.ID] = task
 				if cleanStop {
 					resetInterruptedPreflight(task.Preflight)
@@ -155,7 +174,7 @@ func TestCompletedPreflightReusesOnlyBoundedUnchangedFixScope(t *testing.T) {
 	}
 	required := []roles.Role{{Name: "designer", Stage: "pre-implementation"}}
 	newPreflight := func(task *model.Task) *model.Preflight {
-		return &model.Preflight{Phase: "writing", BaseSHA: "base", HeadSHA: "old-head", Config: "config", Rules: roles.Hash(), Scope: preflightScope(task), Completed: []string{"designer"}}
+		return &model.Preflight{Phase: "writing", BaseSHA: "base", HeadSHA: "old-head", Config: "config", Rules: roles.Hash(), Scope: preflightScope(task, effective), Completed: []string{"designer"}}
 	}
 	task := newTask()
 	p := newPreflight(task)

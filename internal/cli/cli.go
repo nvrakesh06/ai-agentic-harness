@@ -167,9 +167,10 @@ func New() *cobra.Command {
 		return background(cmd, p)
 	}})
 	var guidanceSource, guidanceFile string
+	var operatorGuidance bool
 	guide := &cobra.Command{Use: "guide <target-task-id>", Short: "Queue a bounded cross-task correction for the next implementer invocation", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if guidanceSource == "" || guidanceFile == "" {
-			return errors.New("guide requires --from and --file")
+		if guidanceFile == "" || (!operatorGuidance && guidanceSource == "") || (operatorGuidance && guidanceSource != "") {
+			return errors.New("guide requires exactly one of --from or --operator, plus --file")
 		}
 		input, err := os.Open(guidanceFile)
 		if err != nil {
@@ -188,18 +189,50 @@ func New() *cobra.Command {
 			return err
 		}
 		defer p.DB.Close()
-		payload, err := json.Marshal(map[string]string{"source_task": guidanceSource, "text": string(contents)})
+		payload := map[string]any{"source_task": guidanceSource, "text": string(contents)}
+		if operatorGuidance {
+			if err = p.Git.Fetch(cmd.Context()); err != nil {
+				return err
+			}
+			effective, err := engine.Canonical(cmd.Context(), p.Git)
+			if err != nil {
+				return err
+			}
+			snapshot, _, loadErr := p.DB.Load()
+			if loadErr != nil {
+				return loadErr
+			}
+			target := snapshot.Tasks[args[0]]
+			if target == nil {
+				return errors.New("operator guidance requires a known task ID")
+			}
+			payload["operator"] = true
+			scopeHead := target.HeadSHA
+			if scopeHead == "" {
+				scopeHead = target.BaseSHA
+			}
+			payload["head"] = scopeHead
+			payload["base"] = effective.BaseSHA
+			payload["config"] = effective.Hash
+			payload["rules"] = roles.Hash()
+			probe := *target
+			if err := model.QueueOperatorGuidance(&probe, "local-preflight", scopeHead, effective.BaseSHA, effective.Hash, roles.Hash(), string(contents)); err != nil {
+				return err
+			}
+		}
+		encoded, err := json.Marshal(payload)
 		if err != nil {
 			return err
 		}
 		id := model.ID()
-		if err = p.DB.Submit(store.Command{ID: id, Kind: "guide", Target: args[0], Payload: string(payload)}); err != nil {
+		if err = p.DB.Submit(store.Command{ID: id, Kind: "guide", Target: args[0], Payload: string(encoded)}); err != nil {
 			return err
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Queued task guidance %s locally; remote acceptance is shown in status. Delivery occurs at the next implementer invocation.\n", id)
 		return background(cmd, p)
 	}}
 	guide.Flags().StringVar(&guidanceSource, "from", "", "source task ID with a durable code checkpoint")
+	guide.Flags().BoolVar(&operatorGuidance, "operator", false, "operator guidance scoped to the target's current head and policy")
 	guide.Flags().StringVar(&guidanceFile, "file", "", "UTF-8 correction text file (maximum 1600 bytes)")
 	root.AddCommand(guide)
 	for _, name := range []string{"stop", "handoff"} {

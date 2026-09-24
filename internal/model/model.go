@@ -112,6 +112,13 @@ type Guidance struct {
 	CommandID string `json:"command_id"`
 	SourceID  string `json:"source_task"`
 	SourceSHA string `json:"source_head"`
+	Operator  bool   `json:"operator,omitempty"`
+	Head      string `json:"target_head,omitempty"`
+	Base      string `json:"canonical_base,omitempty"`
+	Config    string `json:"config,omitempty"`
+	Rules     string `json:"rules,omitempty"`
+	Pending   bool   `json:"pending_delivery,omitempty"`
+	Delivered bool   `json:"delivered,omitempty"`
 	Text      string `json:"text"`
 }
 
@@ -123,6 +130,23 @@ func TaskGuidance(t *Task) []Guidance {
 		}
 		var item Guidance
 		if json.Unmarshal([]byte(strings.TrimPrefix(decision, guidancePrefix)), &item) == nil {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// EligibleGuidance keeps cross-task corrections compatible while making
+// operator guidance one-shot exact-scope input. Before first checkout the
+// durable base revision is the task's stable scope head.
+func EligibleGuidance(t *Task, baseSHA, configHash, rules string) []Guidance {
+	head := t.HeadSHA
+	if head == "" {
+		head = t.BaseSHA
+	}
+	var out []Guidance
+	for _, item := range TaskGuidance(t) {
+		if !item.Operator || (!item.Delivered && item.Base == baseSHA && item.Config == configHash && item.Rules == rules && (item.Head == head || item.Pending)) {
 			out = append(out, item)
 		}
 	}
@@ -152,6 +176,103 @@ func QueueGuidance(target, source *Task, commandID, message string) error {
 	}
 	target.Decisions = append(target.Decisions, guidancePrefix+string(encoded))
 	return nil
+}
+
+// QueueOperatorGuidance is deliberately scoped to the exact task checkpoint
+// and active policy hashes. It shares the durable delivery/replay mechanism
+// with cross-task guidance, but requires no synthetic source task.
+func QueueOperatorGuidance(target *Task, commandID, head, baseSHA, configHash, rules, message string) error {
+	if target == nil {
+		return errors.New("operator guidance requires a target")
+	}
+	scopeHead := target.HeadSHA
+	if scopeHead == "" {
+		scopeHead = target.BaseSHA
+	}
+	if (target.State != Ready && target.State != Running && target.State != Fix && target.State != SyncRequired) || scopeHead != head || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(head) || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(baseSHA) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(configHash) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(rules) {
+		return errors.New("operator guidance requires a READY, RUNNING, FIX, or SYNC_REQUIRED exact task head and policy scope")
+	}
+	message = strings.TrimSpace(message)
+	if message == "" || len(message) > MaxGuidanceBytes || !utf8.ValidString(message) || strings.ContainsRune(message, '\x00') || len(TaskGuidance(target)) >= MaxTaskGuidance {
+		return errors.New("operator guidance must be bounded and unique")
+	}
+	for _, prior := range TaskGuidance(target) {
+		if prior.Operator && prior.Head == head && prior.Base == baseSHA && prior.Config == configHash && prior.Rules == rules && prior.Text == message {
+			return errors.New("duplicate operator guidance")
+		}
+	}
+	encoded, err := json.Marshal(Guidance{CommandID: commandID, SourceID: "operator", SourceSHA: head, Operator: true, Head: head, Base: baseSHA, Config: configHash, Rules: rules, Text: message})
+	if err != nil {
+		return err
+	}
+	target.Decisions = append(target.Decisions, guidancePrefix+string(encoded))
+	return nil
+}
+
+// PromptTask removes durable guidance records from the task projection embedded
+// in a provider prompt. Eligible guidance is appended as a separate, scoped
+// section by the role compiler; durable Decisions remain the audit history.
+func PromptTask(t *Task) *Task {
+	if t == nil {
+		return nil
+	}
+	copy := *t
+	copy.Decisions = make([]string, 0, len(t.Decisions))
+	for _, decision := range t.Decisions {
+		if !strings.HasPrefix(decision, guidancePrefix) {
+			copy.Decisions = append(copy.Decisions, decision)
+		}
+	}
+	return &copy
+}
+
+func rewriteGuidance(t *Task, change func(Guidance, int) Guidance) {
+	seen := 0
+	for i, decision := range t.Decisions {
+		if !strings.HasPrefix(decision, guidancePrefix) {
+			continue
+		}
+		var item Guidance
+		if json.Unmarshal([]byte(strings.TrimPrefix(decision, guidancePrefix)), &item) != nil {
+			continue
+		}
+		item = change(item, seen)
+		seen++
+		encoded, err := json.Marshal(item)
+		if err == nil {
+			t.Decisions[i] = guidancePrefix + string(encoded)
+		}
+	}
+}
+
+// CarryLateOperatorGuidance authorizes a one-time delivery only for guidance
+// accepted during the implementer invocation that just checkpointed. It keeps
+// the original head and policy provenance for audit while allowing that bounded
+// supervisor-owned replay to cross the newly published checkpoint.
+func CarryLateOperatorGuidance(t *Task, guidanceAtStart int) {
+	rewriteGuidance(t, func(item Guidance, index int) Guidance {
+		if index >= guidanceAtStart && item.Operator && !item.Delivered && item.Head != t.HeadSHA {
+			item.Pending = true
+		}
+		return item
+	})
+}
+
+// MarkOperatorGuidanceDelivered records the one-time provider delivery before
+// starting that provider invocation, so restart cannot replay it a second time.
+func MarkOperatorGuidanceDelivered(t *Task, guidance []Guidance) {
+	ids := map[string]bool{}
+	for _, item := range guidance {
+		if item.Operator {
+			ids[item.CommandID] = true
+		}
+	}
+	rewriteGuidance(t, func(item Guidance, _ int) Guidance {
+		if item.Operator && ids[item.CommandID] {
+			item.Delivered = true
+		}
+		return item
+	})
 }
 
 type Verification struct {

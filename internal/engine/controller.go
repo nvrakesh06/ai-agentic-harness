@@ -482,12 +482,17 @@ func (c *Controller) Serve(parent context.Context) error {
 func (c *Controller) launch(fn func()) { c.jobs.Add(1); go func() { defer c.jobs.Done(); fn() }() }
 
 type guidanceCommand struct {
-	Source string `json:"source_task"`
-	Text   string `json:"text"`
+	Source   string `json:"source_task"`
+	Operator bool   `json:"operator,omitempty"`
+	Head     string `json:"head,omitempty"`
+	Base     string `json:"base,omitempty"`
+	Config   string `json:"config,omitempty"`
+	Rules    string `json:"rules,omitempty"`
+	Text     string `json:"text"`
 }
 type guidanceRejection struct{ error }
 
-func validateGuidanceCommand(s *model.Snapshot, cmd store.Command) (guidanceCommand, error) {
+func validateGuidanceCommand(s *model.Snapshot, cmd store.Command, baseSHA, configHash, rulesHash string) (guidanceCommand, error) {
 	var guidance guidanceCommand
 	if err := json.Unmarshal([]byte(cmd.Payload), &guidance); err != nil {
 		return guidance, errors.New("invalid guidance payload")
@@ -496,6 +501,20 @@ func validateGuidanceCommand(s *model.Snapshot, cmd store.Command) (guidanceComm
 		return guidance, err
 	}
 	target := s.Tasks[cmd.Target]
+	if guidance.Operator {
+		if guidance.Base != baseSHA || guidance.Config != configHash || guidance.Rules != rulesHash {
+			return guidance, errors.New("operator guidance policy scope is stale")
+		}
+		if target == nil {
+			return guidance, errors.New("operator guidance requires known task ID")
+		}
+		probe := *target
+		probe.Decisions = append([]string(nil), target.Decisions...)
+		if err := model.QueueOperatorGuidance(&probe, cmd.ID, guidance.Head, guidance.Base, guidance.Config, guidance.Rules, guidance.Text); err != nil {
+			return guidance, err
+		}
+		return guidance, nil
+	}
 	source := s.Tasks[guidance.Source]
 	if target == nil || source == nil {
 		return guidance, errors.New("guidance requires known task IDs")
@@ -559,13 +578,24 @@ func (c *Controller) commands() (bool, error) {
 			}
 		}
 		if cmd.Kind == "guide" {
-			guidance, err := validateGuidanceCommand(s, cmd)
+			effective, effectiveErr := c.effective(c.ctx)
+			if effectiveErr != nil {
+				_ = c.P.DB.Ack(cmd.ID, effectiveErr.Error())
+				continue
+			}
+			guidance, err := validateGuidanceCommand(s, cmd, effective.BaseSHA, effective.Hash, roles.Hash())
 			if err != nil {
 				_ = c.P.DB.Ack(cmd.ID, err.Error())
 				continue
 			}
 			err = c.save(c.ctx, func(s *model.Snapshot) error {
-				if err := model.QueueGuidance(s.Tasks[cmd.Target], s.Tasks[guidance.Source], cmd.ID, guidance.Text); err != nil {
+				var err error
+				if guidance.Operator {
+					err = model.QueueOperatorGuidance(s.Tasks[cmd.Target], cmd.ID, guidance.Head, guidance.Base, guidance.Config, guidance.Rules, guidance.Text)
+				} else {
+					err = model.QueueGuidance(s.Tasks[cmd.Target], s.Tasks[guidance.Source], cmd.ID, guidance.Text)
+				}
+				if err != nil {
 					return guidanceRejection{err}
 				}
 				s.Applied[cmd.ID] = true

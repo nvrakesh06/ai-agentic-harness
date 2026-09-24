@@ -172,6 +172,20 @@ func TestGuidanceAppearsOnlyInImplementerPrompt(t *testing.T) {
 	}
 }
 
+func TestExpiredOperatorGuidanceIsAbsentFromEntirePrompt(t *testing.T) {
+	head, oldBase, newBase := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)
+	configHash, rules := strings.Repeat("d", 64), Hash()
+	target := &model.Task{ID: "ui", State: model.Ready, HeadSHA: head}
+	const expired = "Do not expose this expired operator instruction."
+	if err := model.QueueOperatorGuidance(target, "operator", head, oldBase, configHash, rules, expired); err != nil {
+		t.Fatal(err)
+	}
+	prompt := Compile(config.Effective{BaseSHA: newBase, Hash: configHash}, Builtins()["implementer"], "windows", target, "work", "", "")
+	if strings.Contains(prompt, expired) || strings.Contains(prompt, "AIH_GUIDANCE_V1") {
+		t.Fatalf("expired durable guidance leaked into prompt: %s", prompt)
+	}
+}
+
 func TestBuiltinPromptsKeepOrchestrationInSupervisor(t *testing.T) {
 	builtins := Builtins()
 	orchestrator := builtins["orchestrator"].Instructions

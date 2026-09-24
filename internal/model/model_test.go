@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -219,5 +220,38 @@ func TestGuidanceIsBoundedPortableAndScopedToParallelTasks(t *testing.T) {
 	target.State = Ready
 	if err := QueueGuidance(target, source, "command-4", string(make([]byte, MaxGuidanceBytes+1))); err == nil {
 		t.Fatal("oversized guidance accepted")
+	}
+}
+
+func TestOperatorGuidanceScopesFixAndDeduplicates(t *testing.T) {
+	head, configHash, rules := strings.Repeat("a", 40), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	for _, state := range []State{Ready, Running, Fix, SyncRequired} {
+		task := &Task{ID: "task", State: state, HeadSHA: head}
+		if err := QueueOperatorGuidance(task, "operator-1", head, head, configHash, rules, "Keep the listener owned by the task."); err != nil {
+			t.Fatalf("%s operator guidance rejected: %v", state, err)
+		}
+		if err := QueueOperatorGuidance(task, "operator-2", head, head, configHash, rules, "Keep the listener owned by the task."); err == nil {
+			t.Fatal("duplicate operator guidance accepted")
+		}
+	}
+}
+
+func TestOperatorGuidanceUsesBaseBeforeFirstCheckoutAndExpiresByPolicy(t *testing.T) {
+	base, configHash, rules := strings.Repeat("a", 40), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	task := &Task{ID: "fresh", State: Ready, BaseSHA: base}
+	if err := QueueOperatorGuidance(task, "operator", base, base, configHash, rules, "Start with the supplied contract."); err != nil {
+		t.Fatal(err)
+	}
+	if got := EligibleGuidance(task, base, configHash, rules); len(got) != 1 {
+		t.Fatalf("fresh READY guidance missing: %#v", got)
+	}
+	if got := EligibleGuidance(task, base, strings.Repeat("d", 64), rules); len(got) != 0 {
+		t.Fatalf("stale policy guidance delivered: %#v", got)
+	}
+	if got := EligibleGuidance(task, base, configHash, strings.Repeat("e", 64)); len(got) != 0 {
+		t.Fatalf("stale rule guidance delivered: %#v", got)
+	}
+	if got := EligibleGuidance(task, strings.Repeat("f", 40), configHash, rules); len(got) != 0 {
+		t.Fatalf("main-only base change retained guidance: %#v", got)
 	}
 }

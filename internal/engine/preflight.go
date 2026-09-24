@@ -18,7 +18,7 @@ import (
 func preflightMatches(p *model.Preflight, t *model.Task, effective config.Effective) bool {
 	return p != nil && p.BaseSHA == effective.BaseSHA && p.HeadSHA == t.HeadSHA &&
 		p.Config == effective.Hash && p.Rules == roles.Hash() &&
-		(p.Scope == "" || p.Scope == preflightScope(t))
+		(p.Scope == "" || p.Scope == preflightScope(t, effective))
 }
 
 // reusablePreflightForFix deliberately accepts a changed task head only after
@@ -28,7 +28,7 @@ func preflightMatches(p *model.Preflight, t *model.Task, effective config.Effect
 func reusablePreflightForFix(p *model.Preflight, t *model.Task, effective config.Effective, required []roles.Role) bool {
 	if p == nil || t == nil || t.State != model.Fix || p.Phase != "writing" || p.HeadSHA == t.HeadSHA ||
 		p.BaseSHA != effective.BaseSHA || p.Config != effective.Hash || p.Rules != roles.Hash() ||
-		p.Scope == "" || p.Scope != preflightScope(t) || p.ReuseCount >= effective.Policy.ImplementationRetries {
+		p.Scope == "" || p.Scope != preflightScope(t, effective) || p.ReuseCount >= effective.Policy.ImplementationRetries {
 		return false
 	}
 	for _, role := range required {
@@ -70,9 +70,9 @@ type preflightScopeInput struct {
 // preflightScope records inputs that define the task's specialist contract.
 // Source-head changes are intentionally excluded: exact-head checks and final
 // review cover those changes after the bounded repair.
-func preflightScope(t *model.Task) string {
+func preflightScope(t *model.Task, effective config.Effective) string {
 	input := preflightScopeInput{Objective: t.Objective, Acceptance: append([]string(nil), t.Acceptance...), Areas: append([]string(nil), t.Areas...), Domains: append([]string(nil), t.Domains...), Risk: t.Risk, UI: t.UI, Security: t.Security, Roles: append([]string(nil), t.Roles...), DependsOn: append([]string(nil), t.Dependencies...)}
-	input.Guidance = model.TaskGuidance(t)
+	input.Guidance = model.EligibleGuidance(t, effective.BaseSHA, effective.Hash, roles.Hash())
 	for _, values := range [][]string{input.Acceptance, input.Areas, input.Domains, input.Roles, input.DependsOn} {
 		sort.Strings(values)
 	}
@@ -196,7 +196,7 @@ func (c *Controller) preflight(id string) {
 		}
 		if !preflightMatches(task.Preflight, task, effective) {
 			if !reusePreflightForFix(task.Preflight, task, effective, pre) {
-				task.Preflight = &model.Preflight{Phase: "queued", BaseSHA: effective.BaseSHA, HeadSHA: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Scope: preflightScope(task)}
+				task.Preflight = &model.Preflight{Phase: "queued", BaseSHA: effective.BaseSHA, HeadSHA: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Scope: preflightScope(task, effective)}
 			}
 		}
 		return nil
