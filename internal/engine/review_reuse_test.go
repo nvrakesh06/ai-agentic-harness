@@ -16,18 +16,21 @@ func TestReviewReuseThreeHeadPolicyFailsClosed(t *testing.T) {
 	rulesHash := strings.Repeat("e", 64)
 	task := &model.Task{BaseSHA: base, HeadSHA: second, Security: true, Risk: "low"}
 	roster := []string{"qa", "reviewer", "security"}
-	scope := reviewScope(task, []string{"ui/dashboard.css"}, roster)
+	scope := reviewScope(task, []string{"docs/dashboard.md"}, roster)
 	provenance := model.ReviewProvenance{Role: "security", Base: base, Head: first, Config: config, Rules: rulesHash, Roster: roster, Scope: scope, Provider: "codex", Runtime: "codex/gpt-6-terra/1.0.0"}
-	if !reviewReuseDiffSafe("diff --git a/ui/dashboard.css b/ui/dashboard.css\n+ .title { letter-spacing: 0; }", []string{"ui/dashboard.css"}) {
-		t.Fatal("second CSS-only head was not eligible")
+	if !reviewReuseDiffSafe("diff --git a/docs/dashboard.md b/docs/dashboard.md\n+ Improve the dashboard hierarchy explanation.", []string{"docs/dashboard.md"}) {
+		t.Fatal("second plain-Markdown head was not eligible")
 	}
-	if reviewReuseDiffSafe("diff --git a/ui/dashboard.css b/ui/dashboard.css\n+ @import url(https://fonts.example.invalid/font.css);", []string{"ui/dashboard.css"}) {
-		t.Fatal("remote font/resource CSS delta was incorrectly eligible")
+	if reviewReuseDiffSafe("diff --git a/docs/dashboard.mdx b/docs/dashboard.mdx\n+ {fetch('/api/credentials')}", []string{"docs/dashboard.mdx"}) {
+		t.Fatal("executable MDX delta was incorrectly eligible")
 	}
-	if reviewReuseDiffSafe("diff --git a/internal/auth/session.go b/internal/auth/session.go", []string{"ui/dashboard.css", "internal/auth/session.go"}) {
+	if reviewReuseDiffSafe("diff --git a/ui/dashboard.css b/ui/dashboard.css\n+ @namespace svg url(http://example.invalid/svg);", []string{"ui/dashboard.css"}) {
+		t.Fatal("CSS resource-loading delta was incorrectly eligible")
+	}
+	if reviewReuseDiffSafe("diff --git a/internal/auth/session.go b/internal/auth/session.go", []string{"docs/dashboard.md", "internal/auth/session.go"}) {
 		t.Fatal("third security-sensitive head was incorrectly eligible")
 	}
-	changedScope := reviewScope(task, []string{"ui/dashboard.css", "internal/auth/session.go"}, roster)
+	changedScope := reviewScope(task, []string{"docs/dashboard.md", "internal/auth/session.go"}, roster)
 	if changedScope == scope {
 		t.Fatal("security-sensitive third head did not change review scope")
 	}

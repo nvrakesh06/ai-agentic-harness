@@ -45,7 +45,11 @@ func reviewReusePaths(paths []string) bool {
 		if strings.HasPrefix(lower, ".aih/") || strings.Contains(lower, "auth") || strings.Contains(lower, "secret") || strings.Contains(lower, "permission") || strings.Contains(lower, "crypto") || strings.Contains(lower, "network") || strings.Contains(lower, "deserial") || strings.Contains(lower, "subprocess") {
 			return false
 		}
-		if !(strings.HasSuffix(lower, ".css") || strings.HasSuffix(lower, ".scss") || strings.HasSuffix(lower, ".md") || strings.HasSuffix(lower, ".mdx")) {
+		// The first policy intentionally accepts plain Markdown only. CSS/SCSS can
+		// import fonts or other resources through many equivalent syntaxes, and
+		// MDX can execute JSX/JavaScript. Expand this only with a parser-backed,
+		// separately reviewed classifier.
+		if !strings.HasSuffix(lower, ".md") {
 			return false
 		}
 	}
@@ -82,7 +86,7 @@ func sameRoster(a, b []string) bool {
 
 // reusableReviewDispositions implements the first deliberately small policy:
 // only a clean security pass can be reused, and only across an intervening
-// CSS/documentation-only delta. QA, designer, reviewer and custom validators
+// plain-Markdown documentation-only delta. QA, designer, reviewer and custom validators
 // always run for the new head.
 func (c *Controller) reusableReviewDispositions(ctx context.Context, effective config.Effective, task *model.Task, roster []string, scope string) map[string]model.ReviewDisposition {
 	provenance, ok := task.ReviewProvenance["security"]
@@ -95,7 +99,7 @@ func (c *Controller) reusableReviewDispositions(ctx context.Context, effective c
 	}
 	return map[string]model.ReviewDisposition{"security": {
 		Disposition: "reused",
-		Reason:      "prior zero-finding security review reused for presentation-only CSS/documentation delta",
+		Reason:      "prior zero-finding security review reused for plain-Markdown documentation delta",
 		SourceHead:  provenance.Head,
 		Runtime:     provenance.Runtime,
 	}}
