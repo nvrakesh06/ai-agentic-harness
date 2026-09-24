@@ -239,7 +239,7 @@ func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
 	required := []roles.Role{{Name: "designer", Stage: "review"}, {Name: "custom-ui", Stage: "pre-implementation"}}
 	task := &model.Task{
 		ID: "ui", State: model.Review, HeadSHA: strings.Repeat("c", 40), Objective: "Repair the caption layout", Acceptance: []string{"caption fits"},
-		Areas: []string{"ui"}, Domains: []string{"ui"}, Risk: "low", UI: true,
+		Areas: []string{"ui"}, Domains: []string{"ui"}, Risk: "high", Dependencies: []string{"semantic-engine"}, UI: true,
 		Findings: []model.Finding{{Role: "designer", Severity: "high", Category: "text-layout", Location: "src/caption.tsx:42", Reason: "Caption overlaps the coordinator label at narrow widths.", Resolution: "Wrap the caption in the existing text-fit component."}},
 	}
 	task.Evidence = &model.Evidence{Base: effective.BaseSHA, Head: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: []string{"native check passed"}, Reviews: map[string]string{"designer": "one bounded layout defect"}, ReviewRoster: []string{"designer"}}
@@ -265,6 +265,7 @@ func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
 		{"finding", func(t *model.Task) { t.Findings[0].Resolution = "Use a different component." }, effective},
 		{"security", func(t *model.Task) { t.Security = true }, effective},
 		{"schema sensitivity", func(t *model.Task) { t.Objective = "Repair the schema label layout" }, effective},
+		{"dependency sensitivity", func(t *model.Task) { t.Dependencies = []string{"schema-engine"} }, effective},
 	} {
 		t.Run(changed.name, func(t *testing.T) {
 			copy := model.Clone(&model.Snapshot{Tasks: map[string]*model.Task{"ui": task}}).Tasks["ui"]

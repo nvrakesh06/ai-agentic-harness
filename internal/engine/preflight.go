@@ -80,7 +80,7 @@ func directFixSensitive(text string) bool {
 }
 
 func directFixFinding(t *model.Task) (model.Finding, bool) {
-	if t == nil || !t.UI || t.Security || t.Risk != "low" || len(t.Dependencies) != 0 || len(t.Findings) != 1 {
+	if t == nil || !t.UI || t.Security || len(t.Findings) != 1 {
 		return model.Finding{}, false
 	}
 	finding := t.Findings[0]
@@ -102,7 +102,7 @@ func directFixFinding(t *model.Task) (model.Finding, bool) {
 	for _, item := range model.TaskGuidance(t) {
 		guidance = append(guidance, item.Text)
 	}
-	if directFixSensitive(strings.Join(append(append(append(append(append([]string{t.Objective}, t.Acceptance...), t.Areas...), t.Domains...), t.Roles...), guidance...), " ")) {
+	if directFixSensitive(strings.Join(append(append(append(append(append(append([]string{t.Objective}, t.Acceptance...), t.Areas...), t.Domains...), t.Roles...), t.Dependencies...), guidance...), " ")) {
 		return model.Finding{}, false
 	}
 	return finding, true
