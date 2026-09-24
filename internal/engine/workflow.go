@@ -294,6 +294,14 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 		p = provider.New(e.Project.Provider)
 	}
 	runtimeDir := filepath.Join(c.P.Dir, "sessions", id)
+	runDir := dir
+	if r.Name != "implementer" && t != nil && t.HeadSHA != "" {
+		runDir = filepath.Join(c.P.Dir, "review-worktrees", id)
+		if err := c.P.Git.Detached(ctx, runDir, t.HeadSHA); err != nil {
+			return provider.Result{}, fmt.Errorf("create disposable read-only review worktree: %w", err)
+		}
+		defer c.P.Git.RemoveWorktree(context.Background(), runDir)
+	}
 	prompt := roles.Compile(e, r, runtime.GOOS, t, objective, diff, evidence)
 	var operatorGuidance []model.Guidance
 	if r.Name == "implementer" && t != nil {
@@ -308,7 +316,7 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 		}
 		prompt += "\nWORKER SCRATCH\nUse the supplied external scratch directory for temporary tooling, package-manager caches, downloads, and generated diagnostics. Do not create worker caches or downloaded tools inside the source worktree. Scratch is local-only and is never checkpointed: " + scratch + "\n"
 	}
-	request := provider.Request{Directory: dir, Runtime: runtimeDir, Scratch: scratch, Prompt: prompt, Role: r.Name, Model: resolved.RequestModel, Write: r.Name == "implementer", Timeout: time.Duration(e.Project.WorkerSeconds) * time.Second}
+	request := provider.Request{Directory: runDir, Runtime: runtimeDir, Scratch: scratch, Prompt: prompt, Role: r.Name, Model: resolved.RequestModel, Write: r.Name == "implementer", Timeout: time.Duration(e.Project.WorkerSeconds) * time.Second}
 	readonlyStatus := ""
 	if !request.Write && dir != "" {
 		readonlyStatus, err = (gitx.Git{Dir: dir}).Run(ctx, "", "status", "--porcelain")
