@@ -186,3 +186,32 @@ func TestDisposableReviewWorktreeCleanupRejectsJunctionAndDiscardsGeneratedFiles
 		t.Fatalf("review worktree cleanup affected outside marker: %v", err)
 	}
 }
+
+func TestDisposableAnalysisWorktreeCleanupDiscardsGeneratedFiles(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	runID := "generated-analysis-diagnostic"
+	dir, err := f.P.ValidDisposableAnalysisWorktreePath(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Detached(ctx, dir, "refs/remotes/origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "analysis-emitted.js"), []byte("orchestrator diagnostic output\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.RemoveDisposableAnalysisWorktree(ctx, runID); err != nil {
+		t.Fatalf("remove generated disposable analysis worktree: %v", err)
+	}
+	if _, err = os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("disposable analysis worktree remains after forced cleanup: %v", err)
+	}
+	if err = f.P.RemoveDisposableAnalysisWorktree(ctx, "../outside"); err == nil {
+		t.Fatal("unsafe analysis worktree identifier was accepted for forced cleanup")
+	}
+}

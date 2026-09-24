@@ -315,6 +315,45 @@ func (p *Project) RemoveDisposableReviewWorktree(ctx context.Context, runID stri
 	return nil
 }
 
+// ValidDisposableAnalysisWorktreePath returns the sole path the orchestrator
+// may use for its throwaway planning checkout.
+func (p *Project) ValidDisposableAnalysisWorktreePath(runID string) (string, error) {
+	_, target, err := p.disposableAnalysisWorktreeTarget(runID)
+	if err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+// RemoveDisposableAnalysisWorktree discards only an AIH-created, validated
+// detached orchestrator checkout. Planning is read-only but diagnostic tools
+// can still leave generated files, so this owns the required forced removal.
+func (p *Project) RemoveDisposableAnalysisWorktree(ctx context.Context, runID string) error {
+	root, target, err := p.disposableAnalysisWorktreeTarget(runID)
+	if err != nil {
+		return err
+	}
+	if _, err = os.Lstat(root); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect disposable analysis root: %w", err)
+	}
+	if _, err = os.Lstat(target); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect disposable analysis worktree: %w", err)
+	}
+	// Re-resolve immediately before forced removal so a swapped root or target
+	// junction fails closed instead of redirecting cleanup outside AIH.
+	if _, _, err = p.disposableAnalysisWorktreeTarget(runID); err != nil {
+		return err
+	}
+	if _, err = p.Git.Run(ctx, "", "worktree", "remove", "--force", target); err != nil {
+		return fmt.Errorf("remove disposable analysis worktree: %w", err)
+	}
+	return nil
+}
+
 func (p *Project) disposableReviewWorktreeTarget(runID string) (string, string, error) {
 	if !safeTaskScratchID(runID) {
 		return "", "", errors.New("unsafe disposable review worktree identifier")
@@ -330,6 +369,25 @@ func (p *Project) disposableReviewWorktreeTarget(runID string) (string, string, 
 	}
 	if err = mustResolveTo(target, target); err != nil {
 		return "", "", fmt.Errorf("unsafe disposable review worktree: %w", err)
+	}
+	return root, target, nil
+}
+
+func (p *Project) disposableAnalysisWorktreeTarget(runID string) (string, string, error) {
+	if !safeTaskScratchID(runID) {
+		return "", "", errors.New("unsafe disposable analysis worktree identifier")
+	}
+	project, err := filepath.EvalSymlinks(p.Dir)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve project directory: %w", err)
+	}
+	root := filepath.Join(project, "analysis")
+	target := filepath.Join(root, runID)
+	if err = mustResolveTo(root, root); err != nil {
+		return "", "", fmt.Errorf("unsafe disposable analysis root: %w", err)
+	}
+	if err = mustResolveTo(target, target); err != nil {
+		return "", "", fmt.Errorf("unsafe disposable analysis worktree: %w", err)
 	}
 	return root, target, nil
 }

@@ -251,9 +251,20 @@ func (c *Controller) effective(ctx context.Context) (config.Effective, error) {
 	return e, eErr
 }
 func (c *Controller) role(ctx context.Context, e config.Effective, r roles.Role, t *model.Task, dir, objective, diff, evidence string) (provider.Result, error) {
-	return c.roleWithCompletion(ctx, e, r, t, dir, objective, diff, evidence, nil)
+	return c.roleWithCompletionAtRef(ctx, e, r, t, dir, objective, diff, evidence, nil, "")
 }
 func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective, r roles.Role, t *model.Task, dir, objective, diff, evidence string, complete func(*model.Snapshot, provider.Result, error) error) (provider.Result, error) {
+	return c.roleWithCompletionAtRef(ctx, e, r, t, dir, objective, diff, evidence, complete, "")
+}
+
+// roleAtRef runs a read-only role against an explicit immutable revision. It is
+// used when the durable task head intentionally differs from the source under
+// review, such as post-verify recovery after a repair on main.
+func (c *Controller) roleAtRef(ctx context.Context, e config.Effective, r roles.Role, t *model.Task, dir, objective, diff, evidence, readRef string) (provider.Result, error) {
+	return c.roleWithCompletionAtRef(ctx, e, r, t, dir, objective, diff, evidence, nil, readRef)
+}
+
+func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effective, r roles.Role, t *model.Task, dir, objective, diff, evidence string, complete func(*model.Snapshot, provider.Result, error) error, explicitReadRef string) (provider.Result, error) {
 	if r.Name != "implementer" {
 		select {
 		case c.readers <- struct{}{}:
@@ -299,7 +310,7 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 		// Preflight runs before an implementer has made a task head. Use the
 		// immutable planning base in that case so an advisory command can never
 		// write into the writer worktree merely because it is early in the task.
-		readRef, readErr := readOnlyCheckoutRef(t, e)
+		readRef, readErr := readOnlyCheckoutRef(t, e, explicitReadRef)
 		if readErr != nil {
 			return provider.Result{}, readErr
 		}
@@ -404,9 +415,12 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 	return result, err
 }
 
-func readOnlyCheckoutRef(t *model.Task, e config.Effective) (string, error) {
+func readOnlyCheckoutRef(t *model.Task, e config.Effective, explicit string) (string, error) {
 	if t == nil {
 		return "", errors.New("read-only role has no task for disposable checkout")
+	}
+	if explicit != "" {
+		return explicit, nil
 	}
 	if t.HeadSHA != "" {
 		return t.HeadSHA, nil
@@ -456,12 +470,21 @@ func (c *Controller) plan(id string) {
 		c.planFailure(id, e)
 		return
 	}
-	dir := filepath.Join(c.P.Dir, "analysis", model.ID())
+	runID := model.ID()
+	dir, e := c.P.ValidDisposableAnalysisWorktreePath(runID)
+	if e != nil {
+		c.planFailure(id, e)
+		return
+	}
 	if e = c.P.Git.Detached(c.ctx, dir, "refs/remotes/origin/main"); e != nil {
 		c.planFailure(id, e)
 		return
 	}
-	defer c.P.Git.RemoveWorktree(context.Background(), dir)
+	defer func() {
+		if cleanupErr := c.P.RemoveDisposableAnalysisWorktree(context.Background(), runID); cleanupErr != nil {
+			_ = c.P.DB.Event("", "", "orchestrator", effective.Project.Provider, "analysis_worktree_cleanup_failed", safety.Redact(cleanupErr.Error()))
+		}
+	}()
 	r, e := c.role(c.ctx, effective, roles.Builtins()["orchestrator"], nil, dir, o.Text, "", "")
 	if e != nil {
 		c.planFailure(id, e)
