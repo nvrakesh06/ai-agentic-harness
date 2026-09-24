@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -45,6 +46,63 @@ func TestReviewReuseThreeHeadPolicyFailsClosed(t *testing.T) {
 	}
 	if provenance.Config != config || provenance.Rules != rulesHash || !sameRoster(provenance.Roster, roster) {
 		t.Fatal("fixture lost provenance identity")
+	}
+}
+
+func TestReviewReuseScopeInvalidatesChangedTaskContract(t *testing.T) {
+	task := &model.Task{Title: "Explain ownership", Objective: "Show the reassignment", Acceptance: []string{"Show the timeout"}, Areas: []string{"fixtures/review-data/**"}, Security: true, Risk: "low"}
+	paths := []string{"fixtures/review-data/dashboard.txt"}
+	roster := []string{"qa", "reviewer", "security"}
+	original := reviewScope(task, paths, roster)
+	for name, change := range map[string]func(*model.Task){
+		"objective":         func(next *model.Task) { next.Objective = "Show authentication too" },
+		"acceptance":        func(next *model.Task) { next.Acceptance = []string{"Show authorization"} },
+		"human answer":      func(next *model.Task) { next.Decisions = []string{"Human answer: include credential handling"} },
+		"operator guidance": func(next *model.Task) { next.Decisions = []string{"GUIDANCE: verify credential redaction"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			next := *task
+			change(&next)
+			if reviewScope(&next, paths, roster) == original {
+				t.Fatal("changed task contract retained prior security review scope")
+			}
+		})
+	}
+	if reviewScope(task, paths, roster) != original {
+		t.Fatal("unchanged task contract did not retain deterministic scope")
+	}
+}
+
+func TestReviewReuseRejectsGitSymlinkAndExecutableMetadata(t *testing.T) {
+	allowed := []string{"fixtures/review-data/*.txt"}
+	path := "fixtures/review-data/link.txt"
+	for _, file := range []struct{ name, mode, content string }{
+		{"symlink", "120000", ".."},
+		{"executable", "100755", "safe"},
+	} {
+		t.Run(file.name, func(t *testing.T) {
+			dir := t.TempDir()
+			runGit := func(input string, args ...string) string {
+				t.Helper()
+				cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+				cmd.Stdin = strings.NewReader(input)
+				output, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v: %v: %s", args, err, output)
+				}
+				return strings.TrimSpace(string(output))
+			}
+			runGit("", "init", "-q")
+			blob := runGit(file.content, "hash-object", "-w", "--stdin")
+			runGit("", "update-index", "--add", "--cacheinfo", file.mode, blob, path)
+			diff := runGit("", "diff", "--cached", "--no-ext-diff")
+			if !strings.Contains(diff, "new file mode "+file.mode) {
+				t.Fatalf("fixture lacks expected Git mode: %s", diff)
+			}
+			if reviewReuseDiffSafe(diff, []string{path}, allowed) {
+				t.Fatal("non-regular Git object reused security review")
+			}
+		})
 	}
 }
 

@@ -26,13 +26,20 @@ func reviewScope(task *model.Task, paths, roster []string) string {
 	sort.Strings(copyRoles)
 	sort.Strings(copyTaskRoles)
 	payload, _ := json.Marshal(struct {
-		Paths    []string `json:"paths"`
-		Roster   []string `json:"roster"`
-		Roles    []string `json:"roles"`
-		Risk     string   `json:"risk"`
-		UI       bool     `json:"ui"`
-		Security bool     `json:"security"`
-	}{copyPaths, copyRoles, copyTaskRoles, task.Risk, task.UI, task.Security})
+		Paths        []string `json:"paths"`
+		Roster       []string `json:"roster"`
+		Roles        []string `json:"roles"`
+		Title        string   `json:"title"`
+		Objective    string   `json:"objective"`
+		Acceptance   []string `json:"acceptance"`
+		Dependencies []string `json:"dependencies"`
+		Areas        []string `json:"areas"`
+		Domains      []string `json:"domains"`
+		Decisions    []string `json:"decisions"`
+		Risk         string   `json:"risk"`
+		UI           bool     `json:"ui"`
+		Security     bool     `json:"security"`
+	}{copyPaths, copyRoles, copyTaskRoles, task.Title, task.Objective, task.Acceptance, task.Dependencies, task.Areas, task.Domains, task.Decisions, task.Risk, task.UI, task.Security})
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
 }
@@ -71,7 +78,8 @@ func reviewReuseDiffSafe(diff string, paths, allowed []string) bool {
 	}
 	lower := strings.ToLower(diff)
 	for _, marker := range []string{
-		"binary files ", "similarity index ", "rename from ", "rename to ", "old mode ", "new mode ",
+		"binary files ", "similarity index ", "rename from ", "rename to ", "copy from ", "copy to ",
+		"old mode ", "new mode ", "new file mode ", "deleted file mode ",
 		"@import", "url(", "http://", "https://", "//", "curl ", "invoke-webrequest", "powershell", "cmd.exe", "bash -c", "sh -c",
 	} {
 		if strings.Contains(lower, marker) {
@@ -79,6 +87,12 @@ func reviewReuseDiffSafe(diff string, paths, allowed []string) bool {
 		}
 	}
 	for _, line := range strings.Split(diff, "\n") {
+		if strings.HasPrefix(line, "index ") {
+			fields := strings.Fields(line)
+			if len(fields) != 3 || fields[2] != "100644" {
+				return false
+			}
+		}
 		if !strings.HasPrefix(line, "+") || strings.HasPrefix(line, "+++") {
 			continue
 		}
