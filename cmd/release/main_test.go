@@ -34,6 +34,9 @@ func TestRunReleaseTestsCancelsAfterPackageFailure(t *testing.T) {
 		fmt.Fprintln(os.Stdout, `{"Time":"2026-01-01T00:00:00Z","Action":"output","Package":"example.com/first","Output":"ordinary test output containing FAIL must not drive cancellation\\n"}`)
 		fmt.Fprintln(os.Stdout, `{"Time":"2026-01-01T00:00:01Z","Action":"fail","Package":"example.com/first","Test":"TestFailsFirst"}`)
 		time.Sleep(100 * time.Millisecond)
+		if err := os.WriteFile(os.Getenv("GO_WANT_RELEASE_TEST_PACKAGE_FAILURE_MARKER"), []byte("emitted"), 0600); err != nil {
+			os.Exit(4)
+		}
 		fmt.Fprintln(os.Stdout, `{"Time":"2026-01-01T00:00:01Z","Action":"fail","Package":"example.com/first"}`)
 		select {}
 	}
@@ -45,7 +48,9 @@ func TestRunReleaseTestsCancelsAfterPackageFailure(t *testing.T) {
 	}
 	t.Setenv("GO_WANT_RELEASE_TEST_FAILURE_HELPER", "1")
 	marker := filepath.Join(t.TempDir(), "descendant-pulse")
+	packageFailure := filepath.Join(t.TempDir(), "package-failure-emitted")
 	t.Setenv("GO_WANT_RELEASE_TEST_FAILURE_MARKER", marker)
+	t.Setenv("GO_WANT_RELEASE_TEST_PACKAGE_FAILURE_MARKER", packageFailure)
 	original := releaseTestCommand
 	releaseTestCommand = func() (string, []string) {
 		return os.Args[0], []string{"-test.run=TestRunReleaseTestsCancelsAfterPackageFailure", "--"}
@@ -62,6 +67,9 @@ func TestRunReleaseTestsCancelsAfterPackageFailure(t *testing.T) {
 	}
 	if got := err.Error(); !strings.Contains(got, "example.com/first") || !strings.Contains(got, "cancelled remaining package tests") {
 		t.Fatalf("failure did not identify the failed package and cancellation: %v", err)
+	}
+	if _, err := os.Stat(packageFailure); err != nil {
+		t.Fatalf("runner cancelled after a test-level failure before the package failure event: %v", err)
 	}
 	assertReleaseDescendantStopped(t, marker)
 }
