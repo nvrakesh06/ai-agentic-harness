@@ -309,6 +309,13 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 		prompt += "\nWORKER SCRATCH\nUse the supplied external scratch directory for temporary tooling, package-manager caches, downloads, and generated diagnostics. Do not create worker caches or downloaded tools inside the source worktree. Scratch is local-only and is never checkpointed: " + scratch + "\n"
 	}
 	request := provider.Request{Directory: dir, Runtime: runtimeDir, Scratch: scratch, Prompt: prompt, Role: r.Name, Model: resolved.RequestModel, Write: r.Name == "implementer", Timeout: time.Duration(e.Project.WorkerSeconds) * time.Second}
+	readonlyStatus := ""
+	if !request.Write && dir != "" {
+		readonlyStatus, err = (gitx.Git{Dir: dir}).Run(ctx, "", "status", "--porcelain")
+		if err != nil {
+			return provider.Result{}, err
+		}
+	}
 	var result provider.Result
 	if r.Name == "implementer" {
 		checkpointPrompt := prompt + "\n\nSOFT DEADLINE CHECKPOINT\nStop expanding scope. Inspect and preserve the existing worktree edits, run only the smallest relevant verification that fits, and immediately return the required structured result. Use completed only if the assigned acceptance criteria are satisfied; otherwise use in_progress and report the exact handoff, tests, and remaining risks. Do not undo safe existing work or begin unrelated improvements."
@@ -323,6 +330,14 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 		})
 	} else {
 		result, err = p.Run(ctx, request)
+		if err == nil && dir != "" {
+			after, statusErr := (gitx.Git{Dir: dir}).Run(ctx, "", "status", "--porcelain")
+			if statusErr != nil {
+				err = statusErr
+			} else if after != readonlyStatus {
+				err = fmt.Errorf("read-only %s run modified task worktree; preserve and repair these paths before review completion: %s", r.Name, short(after, 1000))
+			}
+		}
 	}
 	outcome := result.Status
 	if err != nil {
