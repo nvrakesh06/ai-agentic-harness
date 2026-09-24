@@ -66,6 +66,7 @@ func TestVisualPrepareHelper(t *testing.T) {
 	if os.Getenv("AIH_VISUAL_PREPARE_HELPER") != "1" {
 		return
 	}
+	appendVisualEnvironmentMarker("prepare")
 	if marker := os.Getenv("AIH_VISUAL_PREPARE_MARKER"); marker != "" {
 		if os.Getenv("AIH_VISUAL_PREPARE_COUNT") == "1" {
 			previous, _ := os.ReadFile(marker)
@@ -76,6 +77,44 @@ func TestVisualPrepareHelper(t *testing.T) {
 	}
 	if os.Getenv("AIH_VISUAL_PREPARE_WAIT") == "1" {
 		select {}
+	}
+}
+
+func appendVisualEnvironmentMarker(role string) {
+	appendVisualEnvironmentMarkerValue(role, os.Getenv("PLAYWRIGHT_BROWSERS_PATH"))
+}
+
+func appendVisualEnvironmentMarkerValue(role, value string) {
+	marker := os.Getenv("AIH_VISUAL_ENV_MARKER")
+	if marker == "" {
+		return
+	}
+	previous, _ := os.ReadFile(marker)
+	_ = os.WriteFile(marker, append(previous, []byte(role+"="+value+"\n")...), 0600)
+}
+
+func TestVisualEnvironmentBindsPrivatePlaywrightBrowserCache(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "visual-cache")
+	hostileBrowserCache := filepath.Join(t.TempDir(), "shared-playwright")
+	t.Setenv("PLAYWRIGHT_BROWSERS_PATH", hostileBrowserCache)
+	t.Setenv("LOCALAPPDATA", filepath.Join(t.TempDir(), "host-local-app-data"))
+	values := map[string]string{}
+	counts := map[string]int{}
+	for _, item := range visualEnvironment(cache) {
+		parts := strings.SplitN(item, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.ToUpper(parts[0])
+		values[key] = parts[1]
+		counts[key]++
+	}
+	want := filepath.Join(cache, "playwright-browsers")
+	if values["PLAYWRIGHT_BROWSERS_PATH"] != want || counts["PLAYWRIGHT_BROWSERS_PATH"] != 1 {
+		t.Fatalf("PLAYWRIGHT_BROWSERS_PATH = %q (%d entries), want one private cache path %q", values["PLAYWRIGHT_BROWSERS_PATH"], counts["PLAYWRIGHT_BROWSERS_PATH"], want)
+	}
+	if values["AIH_VISUAL_CACHE_DIR"] != cache || values["XDG_CACHE_HOME"] != cache {
+		t.Fatalf("visual cache bindings = %#v, want %q", values, cache)
 	}
 }
 
@@ -264,6 +303,10 @@ func TestCaptureVisualDoesNotRunIgnoredWriterRenderer(t *testing.T) {
 	t.Setenv("AIH_VISUAL_PREPARE_COUNT", "1")
 	t.Setenv("AIH_VISUAL_SERVER_HELPER", "1")
 	t.Setenv("AIH_VISUAL_WRITER_TRIPWIRE", tripwire)
+	envMarker := filepath.Join(t.TempDir(), "playwright-browser-paths")
+	t.Setenv("AIH_VISUAL_ENV_MARKER", envMarker)
+	t.Setenv("PLAYWRIGHT_BROWSERS_PATH", filepath.Join(t.TempDir(), "host-shared-playwright"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(t.TempDir(), "host-local-app-data"))
 	originalBrowserRun := runVisualBrowser
 	runVisualBrowser = func(_ context.Context, dir string, env []string, _ string) (string, error) {
 		values := map[string]string{}
@@ -279,6 +322,14 @@ func TestCaptureVisualDoesNotRunIgnoredWriterRenderer(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, "node_modules", "fake-renderer")); err == nil {
 			return "", errors.New("browser runner observed writer fake renderer")
 		}
+		browserCache := values["PLAYWRIGHT_BROWSERS_PATH"]
+		if browserCache == "" {
+			return "", errors.New("browser runner missing Playwright browser cache")
+		}
+		if err := os.MkdirAll(browserCache, 0700); err != nil {
+			return "", err
+		}
+		appendVisualEnvironmentMarkerValue("browser", browserCache)
 		var targets []config.VisualCaptureTarget
 		if err := json.Unmarshal([]byte(values["AIH_VISUAL_TARGETS"]), &targets); err != nil {
 			return "", err
@@ -318,6 +369,24 @@ func TestCaptureVisualDoesNotRunIgnoredWriterRenderer(t *testing.T) {
 	if _, err := os.Stat(tripwire); !os.IsNotExist(err) {
 		t.Fatalf("ignored writer renderer was invoked: %v", err)
 	}
+	paths, err := os.ReadFile(envMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(paths)), "\n") {
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			bound[parts[0]] = parts[1]
+		}
+	}
+	wantBrowserCache := bound["prepare"]
+	if wantBrowserCache == "" || bound["server"] != wantBrowserCache || bound["browser"] != wantBrowserCache || !strings.HasSuffix(wantBrowserCache, filepath.Join("cache", "playwright-browsers")) {
+		t.Fatalf("capture environment did not use one private Playwright cache: %q", paths)
+	}
+	if _, err := os.Stat(wantBrowserCache); !os.IsNotExist(err) {
+		t.Fatalf("browser cache survived capture cleanup: %v", err)
+	}
 }
 
 // TestNativeVisualAdapter is a disposable project-side adapter. It deliberately
@@ -327,6 +396,7 @@ func TestNativeVisualAdapter(t *testing.T) {
 	if os.Getenv("AIH_VISUAL_SERVER_HELPER") != "1" {
 		return
 	}
+	appendVisualEnvironmentMarker("server")
 	if tripwire := os.Getenv("AIH_VISUAL_WRITER_TRIPWIRE"); tripwire != "" {
 		if _, err := os.Stat(filepath.Join("node_modules", "fake-renderer")); err == nil {
 			_ = os.WriteFile(tripwire, []byte("writer fake renderer was visible"), 0600)
