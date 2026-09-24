@@ -651,7 +651,17 @@ func (c *Controller) commands() (bool, error) {
 				if e := model.Answer(t, cmd.Payload); e != nil {
 					return e
 				}
-				t.Preflight = nil
+				// A human can point the supervisor at a concrete fix already in the
+				// durable task checkpoint. Preserve prior guidance only when the
+				// answer proves that exact head; ordinary answers can change the task
+				// contract and must receive a fresh preflight.
+				effective, effectiveErr := c.effective(c.ctx)
+				preflightRoles, rolesErr := requiredPreflightRoles(effective, t)
+				if effectiveErr == nil && rolesErr == nil && humanContinuationEvidence(t, cmd.Payload) && reusePreflightForContinuation(t.Preflight, t, effective, preflightRoles) {
+					t.Decisions = append(t.Decisions, "Human checkpoint continuation: reused completed pre-implementation guidance at "+t.HeadSHA+".")
+				} else {
+					t.Preflight = nil
+				}
 			case "improvement":
 				s.Improvements = append(s.Improvements, cmd.Payload)
 			case "assign-role":

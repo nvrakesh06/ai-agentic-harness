@@ -89,8 +89,11 @@ ID is in the snapshot, preventing duplicate application after a local crash.
 portable preflight record. Completed roles resume after takeover; a change to the
 canonical base, task contract/scope, accepted cross-task corrections, configuration,
 or role rules invalidates the record. A changed task head alone can reuse fully
-completed guidance only for a
-bounded `FIX` retry, with its durable scope fingerprint and reuse reason recorded.
+completed guidance for a bounded `FIX` retry or an implementer's durable
+`in_progress` checkpoint continuation, with its durable scope fingerprint and
+reuse reason recorded. A human unblock keeps that guidance only for the exact
+structured acknowledgement `AIH-CONTINUE CHECKPOINT <full-head-sha>`; any other
+answer can introduce a decision and receives fresh specialist guidance.
 Exact-head native checks and final independent reviews are never reused.
 Shutdown and takeover clear interrupted reader ownership while preserving completed
 guidance eligibility and its reuse counter across verification recovery.
