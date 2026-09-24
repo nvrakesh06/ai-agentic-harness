@@ -189,7 +189,7 @@ func TestExpiredOperatorGuidanceIsAbsentFromEntirePrompt(t *testing.T) {
 func TestBuiltinPromptsKeepOrchestrationInSupervisor(t *testing.T) {
 	builtins := Builtins()
 	orchestrator := builtins["orchestrator"].Instructions
-	for _, value := range []string{"exactly one lowercase value", "low, medium, or high"} {
+	for _, value := range []string{"exactly one lowercase value", "low, medium, or high", "Plan independent safe tasks", "only when no safe task can be planned"} {
 		if !strings.Contains(orchestrator, value) {
 			t.Fatalf("orchestrator prompt does not constrain risk values: %q", orchestrator)
 		}
