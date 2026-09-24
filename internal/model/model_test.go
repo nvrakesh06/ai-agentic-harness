@@ -199,6 +199,29 @@ func TestSchemaThreeSnapshotMigratesVisualEvidenceAndRequiresMatchingConfig(t *t
 	}
 }
 
+func TestSchemaFiveMigratesReviewProvenanceWithoutInventingReuse(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Schema = 5
+	head := strings.Repeat("a", 40)
+	s.Tasks["task"] = &Task{ID: "task", State: Review, HeadSHA: head}
+	b, _ := json.Marshal(s)
+	migrated, changed, err := Decode(b)
+	if err != nil || !changed || migrated.Schema != StateSchema || len(migrated.Tasks["task"].ReviewProvenance) != 0 {
+		t.Fatalf("schema-5 migration invented review reuse: %#v changed=%t err=%v", migrated.Tasks["task"], changed, err)
+	}
+	configHash, rulesHash, scope := strings.Repeat("b", 64), strings.Repeat("c", 64), strings.Repeat("d", 64)
+	migrated.Tasks["task"].ReviewProvenance = map[string]ReviewProvenance{"security": {Role: "security", Base: head, Head: head, Config: configHash, Rules: rulesHash, Roster: []string{"qa", "reviewer", "security"}, Scope: scope, Provider: "codex", Runtime: "codex/gpt-6-sol/1.0.0", Summary: "passed", CompletedAt: time.Now().UTC()}}
+	b, _ = json.Marshal(migrated)
+	if _, changed, err = Decode(b); err != nil || changed {
+		t.Fatalf("valid durable provenance rejected: changed=%t err=%v", changed, err)
+	}
+	migrated.Tasks["task"].ReviewProvenance["security"] = ReviewProvenance{Role: "security", Base: head, Head: head, Config: "bad", Rules: rulesHash, Roster: []string{"security"}, Scope: scope, Provider: "codex", Runtime: "runtime", CompletedAt: time.Now().UTC()}
+	b, _ = json.Marshal(migrated)
+	if _, _, err = Decode(b); err == nil {
+		t.Fatal("invalid provenance identity accepted")
+	}
+}
+
 func TestDirectFixWaiverRoundTripsAndRejectsIncompleteIdentity(t *testing.T) {
 	s := NewSnapshot("project123")
 	base, head := fmt.Sprintf("%040x", 1), fmt.Sprintf("%040x", 2)
