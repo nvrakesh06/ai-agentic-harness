@@ -3,8 +3,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -26,6 +28,8 @@ import (
 const releaseTestTimeout = "15m"
 
 const releasePermitWait = 2 * time.Minute
+
+var newReleaseTestCommand = exec.CommandContext
 
 func main() {
 	if e := release(); e != nil {
@@ -64,10 +68,11 @@ func release() error {
 	// Serialize package workers: the suite intentionally exercises real Git and
 	// process lifecycles, and concurrent package runs can make its bounded
 	// Windows timings unreliable on a constrained development machine.
-	for _, args := range [][]string{{"test", "-p=1", "./...", "-count=1", "-timeout", releaseTestTimeout}, {"vet", "./..."}} {
-		if e := run(nil, "go", args...); e != nil {
-			return e
-		}
+	if e := runReleaseTests(); e != nil {
+		return e
+	}
+	if e := run(nil, "go", "vet", "./..."); e != nil {
+		return e
 	}
 	if e := os.MkdirAll("dist", 0755); e != nil {
 		return e
@@ -110,6 +115,51 @@ func release() error {
 		return run(nil, "gh", args...)
 	}
 	return nil
+}
+
+// runReleaseTests stops the serial suite when go test reports that a package
+// failed. The JSON stream distinguishes package results from arbitrary test
+// output, so a log line containing the word "fail" cannot cancel the gate.
+func runReleaseTests() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	args := []string{"test", "-json", "-p=1", "./...", "-count=1", "-timeout", releaseTestTimeout}
+	fmt.Println("go", strings.Join(args, " "))
+	cmd := newReleaseTestCommand(ctx, "go", args...)
+	cmd.Stderr = os.Stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	var failedPackage string
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fmt.Fprintln(os.Stdout, line)
+		var event struct {
+			Action  string
+			Package string
+		}
+		if json.Unmarshal([]byte(line), &event) == nil && event.Action == "fail" && event.Package != "" {
+			failedPackage = event.Package
+			cancel()
+			break
+		}
+	}
+	scanErr := scanner.Err()
+	waitErr := cmd.Wait()
+	if scanErr != nil {
+		return fmt.Errorf("read go test JSON output: %w", scanErr)
+	}
+	if failedPackage != "" {
+		return fmt.Errorf("go test reported failure for %s; cancelled remaining package tests: %w", failedPackage, waitErr)
+	}
+	return waitErr
 }
 
 // acquireReleaseMachinePermit owns its interrupt handler only while waiting for
