@@ -173,6 +173,32 @@ func TestSchemaTwoMigratesAndPreflightProgressRoundTrips(t *testing.T) {
 	}
 }
 
+func TestSchemaThreeSnapshotMigratesVisualEvidenceAndRequiresMatchingConfig(t *testing.T) {
+	// This is a current schema-3 shaped review snapshot: capacity, preflight,
+	// roster, and ordinary exact-head evidence were already durable before v4.
+	s := NewSnapshot("project123")
+	s.Schema = 3
+	head := strings.Repeat("a", 40)
+	configHash := strings.Repeat("b", 64)
+	s.Tasks["task-a"] = &Task{ID: "task-a", State: Review, Preflight: &Preflight{Phase: "ready", BaseSHA: head, HeadSHA: head, Config: configHash, Rules: strings.Repeat("c", 64), Completed: []string{"designer"}}, Evidence: &Evidence{Base: head, Head: head, Config: configHash, Rules: strings.Repeat("c", 64), Checks: []string{"check=tests exit=0"}, Reviews: map[string]string{}, ReviewRoster: []string{"reviewer"}}}
+	b, _ := json.Marshal(s)
+	migrated, changed, err := Decode(b)
+	if err != nil || !changed || migrated.Schema != StateSchema || migrated.Tasks["task-a"].Evidence.Visual != nil {
+		t.Fatalf("schema-3 migration changed current review state: %#v %v", migrated, err)
+	}
+	visual := &VisualEvidence{Head: head, Config: configHash, Manifest: "visual-evidence/task-a/" + head + "-" + configHash[:16] + "/manifest.json", ManifestSHA256: strings.Repeat("d", 64), Artifacts: []VisualArtifact{{Path: "desktop.png", SHA256: strings.Repeat("e", 64)}}, Summary: "blank page"}
+	migrated.Tasks["task-a"].Evidence.Visual = visual
+	b, _ = json.Marshal(migrated)
+	if _, changed, err := Decode(b); err != nil || changed {
+		t.Fatalf("valid visual evidence rejected: %v", err)
+	}
+	visual.Config = strings.Repeat("f", 64)
+	b, _ = json.Marshal(migrated)
+	if _, _, err := Decode(b); err == nil {
+		t.Fatal("visual config different from evidence config accepted")
+	}
+}
+
 func TestVerificationRetryGuardRoundTripsAndValidates(t *testing.T) {
 	s := NewSnapshot("project123")
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte("native verification")))

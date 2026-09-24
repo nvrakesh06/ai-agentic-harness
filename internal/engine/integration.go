@@ -25,7 +25,7 @@ func (c *Controller) integrate(id string) {
 	base := effective.BaseSHA
 	if t.Evidence == nil || t.Evidence.Base != base || t.Evidence.Head != t.HeadSHA || t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() {
 		if e = c.verifyReview(id); e != nil {
-			c.retry(id, "verification", e.Error())
+			c.handleVerificationError(id, e)
 			return
 		}
 		t = c.Snapshot().Tasks[id]

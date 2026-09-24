@@ -159,6 +159,20 @@ func TestMachineAndNativeChecks(t *testing.T) {
 	}
 }
 
+func TestVisualCaptureRequiresServerAdapterCommand(t *testing.T) {
+	p := Defaults()
+	p.VisualCapture = &VisualCapture{Server: []string{"node", "scripts/visual-server.mjs"}, Timeout: 30}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("valid server adapter rejected: %v", err)
+	}
+	for _, command := range [][]string{nil, {}, {""}} {
+		p.VisualCapture.Server = command
+		if err := p.Validate(); err == nil {
+			t.Fatalf("empty server adapter accepted: %#v", command)
+		}
+	}
+}
+
 func TestParseLocalIncludesCustomRoles(t *testing.T) {
 	root := t.TempDir()
 	files := canonicalFiles()

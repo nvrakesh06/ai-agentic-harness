@@ -16,7 +16,7 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 3
+const StateSchema = 4
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
@@ -304,12 +304,29 @@ type Evidence struct {
 	Config             string            `json:"config"`
 	Rules              string            `json:"rules"`
 	Checks             []string          `json:"checks"`
+	Visual             *VisualEvidence   `json:"visual,omitempty"`
 	Reviews            map[string]string `json:"reviews"`
 	ReviewRoster       []string          `json:"review_roster,omitempty"`
 	ReviewRosterReason string            `json:"review_roster_reason,omitempty"`
 	IntegrationSHA     string            `json:"integration_sha,omitempty"`
 	IntegrationOwner   string            `json:"integration_owner,omitempty"`
 	At                 time.Time         `json:"at"`
+}
+
+// VisualEvidence references supervisor-owned local capture artifacts. Image
+// bytes and diagnostics remain outside the portable state snapshot.
+type VisualEvidence struct {
+	Head           string           `json:"head"`
+	Config         string           `json:"config"`
+	Manifest       string           `json:"manifest"`
+	ManifestSHA256 string           `json:"manifest_sha256"`
+	Artifacts      []VisualArtifact `json:"artifacts"`
+	Summary        string           `json:"summary"`
+}
+
+type VisualArtifact struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
 }
 type Objective struct {
 	ID       string `json:"id"`
@@ -486,6 +503,22 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			}
 			if (p.Scope != "" && !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(p.Scope)) || p.ReuseCount < 0 {
 				return nil, false, errors.New("invalid preflight reuse identity")
+			}
+		}
+		if t.Evidence != nil && t.Evidence.Visual != nil {
+			v := t.Evidence.Visual
+			if v.Head != t.Evidence.Head || v.Config != t.Evidence.Config ||
+				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.Head) ||
+				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Config) ||
+				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.ManifestSHA256) ||
+				len(v.Summary) > 1000 || len(v.Artifacts) < 1 || len(v.Artifacts) > 8 ||
+				v.Manifest != "visual-evidence/"+id+"/"+v.Head+"-"+v.Config[:16]+"/manifest.json" {
+				return nil, false, errors.New("invalid visual evidence reference")
+			}
+			for _, artifact := range v.Artifacts {
+				if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}\.(png|jpg|jpeg|txt|json)$`).MatchString(artifact.Path) || strings.Contains(artifact.Path, "..") || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(artifact.SHA256) {
+					return nil, false, errors.New("invalid visual artifact reference")
+				}
 			}
 		}
 		if _, ok := edges[t.State]; !ok && t.State != Done {

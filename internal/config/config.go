@@ -29,6 +29,7 @@ type Project struct {
 	Models         map[string]string `yaml:"models" json:"models"`
 	ProviderModels map[string]string `yaml:"provider_models" json:"provider_models"`
 	Checks         []Check           `yaml:"checks" json:"checks"`
+	VisualCapture  *VisualCapture    `yaml:"visual_capture,omitempty" json:"visual_capture,omitempty"`
 	WorkerSeconds  int               `yaml:"worker_timeout_seconds" json:"worker_timeout_seconds"`
 	LeaseSeconds   int               `yaml:"lease_seconds" json:"lease_seconds"`
 	ReleaseRepo    string            `yaml:"release_repo" json:"release_repo"`
@@ -49,6 +50,13 @@ type Check struct {
 	Platforms []string `yaml:"platforms,omitempty" json:"platforms,omitempty"`
 	Timeout   int      `yaml:"timeout_seconds" json:"timeout_seconds"`
 	Class     string   `yaml:"class,omitempty" json:"class,omitempty"`
+}
+
+// VisualCapture declares the project adapter command. AIH supplies ephemeral
+// TLS material, chooses no port itself, and owns the browser and gateway.
+type VisualCapture struct {
+	Server  []string `yaml:"server" json:"server"`
+	Timeout int      `yaml:"timeout_seconds" json:"timeout_seconds"`
 }
 type Policy struct {
 	ImplementationRetries int `yaml:"implementation_retries"`
@@ -269,6 +277,14 @@ func (p Project) Validate() error {
 			if platform != "windows" && platform != "darwin" && platform != "linux" {
 				return errors.New("unknown verification platform")
 			}
+		}
+	}
+	if p.VisualCapture != nil {
+		if len(p.VisualCapture.Server) == 0 || strings.TrimSpace(p.VisualCapture.Server[0]) == "" {
+			return errors.New("visual_capture needs a server command argv")
+		}
+		if p.VisualCapture.Timeout < 1 || p.VisualCapture.Timeout > 300 {
+			return errors.New("visual_capture timeout_seconds must be between 1 and 300")
 		}
 	}
 	for _, capability := range p.Models {

@@ -61,6 +61,13 @@ checks:
     command: [go, test, ./...]
     class: heavy
     timeout_seconds: 600
+# Optional. AIH owns the browser runner when a reviewer requests visual
+# evidence that its sandbox cannot capture.
+visual_capture:
+  # This adapter binds 127.0.0.1:0, uses AIH_VISUAL_TLS_CERT and
+  # AIH_VISUAL_TLS_KEY, then prints: AIH_VISUAL_READY https://127.0.0.1:<port>
+  server: [node, scripts/aih-visual-server.mjs]
+  timeout_seconds: 90
 release_repo: nvrakesh06/ai-agentic-harness
 ```
 
@@ -79,6 +86,44 @@ timeouts start after a slot is acquired. `status` and `watch` show each queued
 or running check and its elapsed wait or run time.
 Checks must leave tracked source and unignored files unchanged. Use check-mode
 formatters and ignore build outputs in the application itself.
+
+`visual_capture` is optional and separate from build/test checks. `server` is a
+project adapter argv that AIH runs from the pinned task worktree. The adapter must
+bind `127.0.0.1:0` itself, serve HTTPS with the fresh paths in
+`AIH_VISUAL_TLS_CERT` and `AIH_VISUAL_TLS_KEY`, and print one bounded readiness
+line: `AIH_VISUAL_READY https://127.0.0.1:<port>`. AIH pins that certificate,
+places an AIH-owned loopback gateway in front of the browser, then launches its
+fixed Chrome channel and viewport with a fresh browser context. It blocks redirects,
+subresources, WebSockets, and other requests outside the gateway origin, and kills
+the complete adapter process tree on completion, timeout, or cancellation. The
+project cannot choose browser argv, a profile, CDP endpoint, or a pre-existing
+listener. AIH writes `manifest.json`, a screenshot, and redacted network diagnostics
+outside source, verifies the worktree remains clean at the exact head before
+sealing hashes, and gives the requesting reviewer one exact-head retry. Capture is
+evidence, never a visual pass.
+
+The browser package is a supervisor capability, not a project dependency. Install
+Playwright below `AIH_HOME/tools` outside every target worktree and set
+`AIH_PLAYWRIGHT_MODULE` to its absolute `.../node_modules/playwright` directory
+before starting the supervisor. `AIH_HOME/tools` itself must be a real child of
+the resolved AIH home, not a symlink or junction. AIH resolves both paths and
+rejects a missing, relative, project-owned, or symlink-escaping module path; it
+never resolves browser code from the reviewed project.
+
+AIH redacts textual manifest and network diagnostics before saving local visual
+evidence. Screenshot pixels are opaque image data: AIH does not perform OCR or
+claim to detect secrets rendered in a frame. Visual capture is therefore supported
+only for applications whose capture route cannot display sensitive data. Image bytes
+remain local to the supervising machine and are never written into portable state;
+only artifact names and hashes are checkpointed.
+
+This feature adds portable state schema 4. Before activating a schema-4
+supervisor, hand off the schema-3 supervisor, retain the local SQLite database
+and `aih-state` checkpoint, build a separate new binary, and resume it once.
+Confirm status shows the same tasks, heads, and PRs. Do not restart an older
+schema-3 binary after schema-4 state is published. Captures remain local to the
+machine; after reconstruction elsewhere, rerun a capture at the same head if
+the reviewer needs the images.
 
 AIH runs configured checks on the synchronized task head and again on the exact
 merge commit before its atomic publication. After publication, the same controller
