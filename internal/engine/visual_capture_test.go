@@ -85,6 +85,9 @@ func TestNativeVisualAdapter(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(`<!doctype html><div id="root"></div><img src="https://outside.invalid/pixel.png"><img src="/redirect-pixel"><script>new WebSocket('ws://outside.invalid/socket')</script><script src="/api-client.ts"></script>`))
+		case "/detail":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:rgb(17,34,51)}</style><main>detail state</main>`))
 		case "/api-client.ts":
 			http.NotFound(w, r)
 		case "/redirect-pixel":
@@ -158,8 +161,31 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "detail.png")); err != nil {
 		t.Fatalf("multi-target screenshot missing: %v", err)
 	}
+	detailFile, err := os.Open(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "detail.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	detailImage, _, err := image.Decode(detailFile)
+	closeErr := detailFile.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("detail screenshot decode: %v %v", err, closeErr)
+	}
+	desktopFile, err := os.Open(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "desktop.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	desktopImage, _, err := image.Decode(desktopFile)
+	closeErr = desktopFile.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("desktop screenshot decode: %v %v", err, closeErr)
+	}
+	detailPixel := color.RGBAModel.Convert(detailImage.At(10, 10)).(color.RGBA)
+	desktopPixel := color.RGBAModel.Convert(desktopImage.At(10, 10)).(color.RGBA)
+	if desktopPixel == detailPixel || detailPixel.R > 64 || detailPixel.G > 64 || detailPixel.B > 64 {
+		t.Fatalf("detail screenshot did not render its distinct state: desktop=%#v detail=%#v", desktopPixel, detailPixel)
+	}
 	network, err := os.ReadFile(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "network.txt"))
-	if err != nil || !strings.Contains(string(network), "404 /api-client.ts") || !strings.Contains(string(network), "BLOCKED GET https://outside.invalid") || !strings.Contains(string(network), "BLOCKED WEBSOCKET ws://outside.invalid") || !strings.Contains(string(network), "BLOCKED REDIRECT "+forbidden.URL) {
+	if err != nil || !strings.Contains(string(network), "404 /api-client.ts") || !strings.Contains(string(network), "detail GET 200 /detail") || !strings.Contains(string(network), "BLOCKED GET https://outside.invalid") || !strings.Contains(string(network), "BLOCKED WEBSOCKET ws://outside.invalid") || !strings.Contains(string(network), "BLOCKED REDIRECT "+forbidden.URL) {
 		t.Fatalf("real blank-page capture omitted failed module evidence: %q %v", network, err)
 	}
 	if forbiddenRequests.Load() != 0 {
