@@ -67,6 +67,10 @@ checks:
 # Optional. AIH owns the browser runner when a reviewer requests visual
 # evidence that its sandbox cannot capture.
 visual_capture:
+  # Optional. Runs once in AIH's fresh detached checkout at the reviewed head.
+  # It may install or integrity-check the runtime for this capture only.
+  prepare: [your-runtime, prepare]
+  prepare_timeout_seconds: 180
   # This adapter binds 127.0.0.1:0, uses AIH_VISUAL_TLS_CERT and
   # AIH_VISUAL_TLS_KEY, then prints: AIH_VISUAL_READY https://127.0.0.1:<port>
   server: [node, scripts/aih-visual-server.mjs]
@@ -100,8 +104,12 @@ or running check and its elapsed wait or run time.
 Checks must leave tracked source and unignored files unchanged. Use check-mode
 formatters and ignore build outputs in the application itself.
 
-`visual_capture` is optional and separate from build/test checks. `server` is a
-project adapter argv that AIH runs from the pinned task worktree. The adapter must
+`visual_capture` is optional and separate from build/test checks. `prepare` and
+`server` are project adapter argv values that AIH runs only from a fresh,
+supervisor-owned detached checkout at the pinned task head. `prepare` is optional,
+uses its own bounded timeout (or the capture timeout when omitted), and runs once
+before all configured targets; it can install or verify the runtime in a private
+capture cache. AIH never starts either command in the writer worktree. The adapter must
 bind `127.0.0.1:0` itself, serve HTTPS with the fresh paths in
 `AIH_VISUAL_TLS_CERT` and `AIH_VISUAL_TLS_KEY`, and print one bounded readiness
 line: `AIH_VISUAL_READY https://127.0.0.1:<port>`. AIH pins that certificate,

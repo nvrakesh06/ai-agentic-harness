@@ -55,9 +55,14 @@ type Check struct {
 // VisualCapture declares the project adapter command. AIH supplies ephemeral
 // TLS material, chooses no port itself, and owns the browser and gateway.
 type VisualCapture struct {
-	Server  []string              `yaml:"server" json:"server"`
-	Timeout int                   `yaml:"timeout_seconds" json:"timeout_seconds"`
-	Targets []VisualCaptureTarget `yaml:"targets,omitempty" json:"targets,omitempty"`
+	// Prepare optionally creates or verifies the adapter runtime in the
+	// supervisor-owned detached checkout. It is run once per capture, before
+	// Server, and never in a writer worktree.
+	Prepare        []string              `yaml:"prepare,omitempty" json:"prepare,omitempty"`
+	PrepareTimeout int                   `yaml:"prepare_timeout_seconds,omitempty" json:"prepare_timeout_seconds,omitempty"`
+	Server         []string              `yaml:"server" json:"server"`
+	Timeout        int                   `yaml:"timeout_seconds" json:"timeout_seconds"`
+	Targets        []VisualCaptureTarget `yaml:"targets,omitempty" json:"targets,omitempty"`
 }
 
 // VisualCaptureTarget is a same-origin application route and the viewport at
@@ -319,6 +324,17 @@ func (p Project) Validate() error {
 		}
 		if p.VisualCapture.Timeout < 1 || p.VisualCapture.Timeout > 300 {
 			return errors.New("visual_capture timeout_seconds must be between 1 and 300")
+		}
+		if len(p.VisualCapture.Prepare) == 0 && p.VisualCapture.PrepareTimeout != 0 {
+			return errors.New("visual_capture prepare_timeout_seconds requires a prepare command argv")
+		}
+		if len(p.VisualCapture.Prepare) > 0 {
+			if strings.TrimSpace(p.VisualCapture.Prepare[0]) == "" {
+				return errors.New("visual_capture prepare needs a command argv")
+			}
+			if p.VisualCapture.PrepareTimeout != 0 && (p.VisualCapture.PrepareTimeout < 1 || p.VisualCapture.PrepareTimeout > 300) {
+				return errors.New("visual_capture prepare_timeout_seconds must be between 1 and 300")
+			}
 		}
 		if len(p.VisualCapture.Targets) > maxVisualCaptureTargets {
 			return fmt.Errorf("visual_capture targets must contain at most %d entries", maxVisualCaptureTargets)
