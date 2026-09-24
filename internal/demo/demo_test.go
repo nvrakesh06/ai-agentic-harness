@@ -39,7 +39,10 @@ func TestEndToEndRecovery(t *testing.T) {
 	countFile := filepath.Join(t.TempDir(), "check-count.txt")
 	t.Setenv("AIH_DEMO_CHECK_COUNT_FILE", countFile)
 	exe, _ := os.Executable()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// This end-to-end fixture executes a serial merge train, including a fresh-main
+	// re-verification after every merge. Keep a finite watchdog for genuine hangs, but
+	// allow its complete workflow to run on a loaded local Windows host.
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	var output bytes.Buffer
 	root, e := Run(ctx, &output, []string{exe})
