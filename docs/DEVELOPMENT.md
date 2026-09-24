@@ -71,6 +71,16 @@ visual_capture:
   # AIH_VISUAL_TLS_KEY, then prints: AIH_VISUAL_READY https://127.0.0.1:<port>
   server: [node, scripts/aih-visual-server.mjs]
   timeout_seconds: 90
+  # Optional. Omit targets for the legacy / at 1280x720 desktop.png capture.
+  targets:
+    - id: desktop
+      path: /
+      width: 1280
+      height: 720
+    - id: settings
+      path: /settings
+      width: 1280
+      height: 720
 release_repo: nvrakesh06/ai-agentic-harness
 ```
 
@@ -96,14 +106,18 @@ bind `127.0.0.1:0` itself, serve HTTPS with the fresh paths in
 `AIH_VISUAL_TLS_CERT` and `AIH_VISUAL_TLS_KEY`, and print one bounded readiness
 line: `AIH_VISUAL_READY https://127.0.0.1:<port>`. AIH pins that certificate,
 places an AIH-owned loopback gateway in front of the browser, then launches its
-fixed Chrome channel and viewport with a fresh browser context. It blocks redirects,
+fixed Chrome channel and a fresh browser context/page per target. It blocks redirects,
 subresources, WebSockets, and other requests outside the gateway origin, and kills
 the complete adapter process tree on completion, timeout, or cancellation. The
-project cannot choose browser argv, a profile, CDP endpoint, or a pre-existing
-listener. AIH writes `manifest.json`, a screenshot, and redacted network diagnostics
-outside source, verifies the worktree remains clean at the exact head before
-sealing hashes, and gives the requesting reviewer one exact-head retry. Capture is
-evidence, never a visual pass.
+project cannot choose browser argv, a profile, CDP endpoint, external URLs, or a
+pre-existing listener. Each target path is a same-origin absolute path without a
+host, query, or fragment; AIH bounds target count, viewports, aggregate pixels and
+local artifact size. AIH writes `manifest.json`, one screenshot per target, and a
+bounded redacted network diagnostic log outside source. The log prefixes entries
+with target IDs. Capture fails as a unit if any target, dimensions, or manifest
+mapping fails, so AIH never seals or caches a partial result. It verifies the
+worktree remains clean at the exact head before sealing hashes and gives the
+requesting reviewer one exact-head retry. Capture is evidence, never a visual pass.
 
 The browser package is a supervisor capability, not a project dependency. Install
 Playwright below `AIH_HOME/tools` outside every target worktree and set

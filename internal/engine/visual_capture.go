@@ -40,7 +40,11 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
 )
 
-const visualFileLimit = 8 << 20
+const (
+	visualFileLimit      = 8 << 20
+	visualArtifactLimit  = 9 // eight screenshots plus one shared diagnostic log
+	visualAggregateLimit = 64 << 20
+)
 const visualReadyPrefix = "AIH_VISUAL_READY "
 
 // The runner is deliberately AIH-owned. It creates a fresh browser context,
@@ -63,7 +67,9 @@ const output = process.env.AIH_VISUAL_OUTPUT_DIR;
 const head = process.env.AIH_VISUAL_HEAD;
 const target = process.env.AIH_VISUAL_URL;
 const origin = new URL(target).origin;
+const targets = JSON.parse(process.env.AIH_VISUAL_TARGETS);
 const network = [];
+const record = line => { if (network.length < 512) network.push(line.slice(0, 512)); };
 let browser;
 try {
   browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -71,37 +77,46 @@ try {
   console.error('AIH_VISUAL_UNAVAILABLE:browser-launch');
   process.exit(78);
 }
-let context;
+const captured = [];
 try {
-  context = await browser.newContext({ viewport: { width: 1280, height: 720 }, serviceWorkers: 'block' });
-  if (typeof context.route !== 'function' || typeof context.routeWebSocket !== 'function') throw new Error('missing route API');
-} catch {
+  for (const item of targets) {
+    const targetURL = new URL(item.path, target);
+    if (targetURL.origin !== origin) throw new Error('target escaped AIH gateway');
+    let context;
+    try {
+      context = await browser.newContext({ viewport: { width: item.width, height: item.height }, serviceWorkers: 'block' });
+      if (typeof context.route !== 'function' || typeof context.routeWebSocket !== 'function') throw new Error('missing route API');
+    } catch {
+      console.error('AIH_VISUAL_UNAVAILABLE:playwright-api');
+      process.exit(78);
+    }
+    await context.route('**/*', async route => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.origin !== origin) { record(item.id + ' BLOCKED ' + request.method() + ' ' + url.origin); return route.abort('blockedbyclient'); }
+      const response = await route.fetch({ maxRedirects: 0 });
+      const location = response.headers()['location'];
+      if (location && new URL(location, url).origin !== origin) { record(item.id + ' BLOCKED REDIRECT ' + new URL(location, url).origin); return route.abort('blockedbyclient'); }
+      return route.fulfill({ response });
+    });
+    await context.routeWebSocket('**/*', async ws => {
+      const url = new URL(ws.url());
+      if (url.origin !== origin.replace(/^http/, 'ws')) { record(item.id + ' BLOCKED WEBSOCKET ' + url.origin); return ws.close(); }
+      await ws.connectToServer();
+    });
+    context.on('response', response => record(item.id + ' ' + response.request().method() + ' ' + response.status() + ' ' + new URL(response.url()).pathname));
+    const page = await context.newPage();
+    await page.goto(targetURL.href, { waitUntil: 'networkidle' });
+    const screenshot = item.id + '.png';
+    await page.screenshot({ path: join(output, screenshot) });
+    captured.push({ id: item.id, path: item.path, width: item.width, height: item.height, screenshot });
+    await context.close();
+  }
+  writeFileSync(join(output, 'network.txt'), network.join('\n'));
+  writeFileSync(join(output, 'manifest.json'), JSON.stringify({ head, summary: 'AIH-owned browser capture', artifacts: [...captured.map(item => item.screenshot), 'network.txt'], targets: captured }));
+} finally {
   await browser.close();
-  console.error('AIH_VISUAL_UNAVAILABLE:playwright-api');
-  process.exit(78);
 }
-await context.route('**/*', async route => {
-  const request = route.request();
-  const url = new URL(request.url());
-  if (url.origin !== origin) { network.push('BLOCKED ' + request.method() + ' ' + url.origin); return route.abort('blockedbyclient'); }
-  const response = await route.fetch({ maxRedirects: 0 });
-  const location = response.headers()['location'];
-  if (location && new URL(location, url).origin !== origin) { network.push('BLOCKED REDIRECT ' + new URL(location, url).origin); return route.abort('blockedbyclient'); }
-  return route.fulfill({ response });
-});
-await context.routeWebSocket('**/*', async ws => {
-  const url = new URL(ws.url());
-  if (url.origin !== origin.replace(/^http/, 'ws')) { network.push('BLOCKED WEBSOCKET ' + url.origin); return ws.close(); }
-  await ws.connectToServer();
-});
-context.on('response', response => network.push(response.request().method() + ' ' + response.status() + ' ' + new URL(response.url()).pathname));
-const page = await context.newPage();
-await page.goto(target, { waitUntil: 'networkidle' });
-await page.screenshot({ path: join(output, 'desktop.png') });
-writeFileSync(join(output, 'network.txt'), network.join('\n'));
-writeFileSync(join(output, 'manifest.json'), JSON.stringify({ head, summary: 'AIH-owned browser capture', artifacts: ['desktop.png', 'network.txt'] }));
-await context.close();
-await browser.close();
 `
 
 // visualCaptureUnavailableError denotes a supervisor capability problem. It
@@ -274,9 +289,18 @@ func startVisualGateway(ctx context.Context, target *url.URL, cert *x509.Certifi
 }
 
 type visualManifest struct {
-	Head      string   `json:"head"`
-	Summary   string   `json:"summary"`
-	Artifacts []string `json:"artifacts"`
+	Head      string                 `json:"head"`
+	Summary   string                 `json:"summary"`
+	Artifacts []string               `json:"artifacts"`
+	Targets   []visualManifestTarget `json:"targets,omitempty"`
+}
+
+type visualManifestTarget struct {
+	ID         string `json:"id"`
+	Path       string `json:"path"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
+	Screenshot string `json:"screenshot"`
 }
 
 var visualName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}\.(png|jpg|jpeg|txt|json)$`)
@@ -284,49 +308,55 @@ var visualTaskID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`)
 var visualRevision = regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)
 var visualHash = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
-func visualArtifact(root, name string) (model.VisualArtifact, error) {
+func visualArtifact(root, name string) (model.VisualArtifact, image.Config, error) {
 	if !visualName.MatchString(name) || strings.Contains(name, "..") {
-		return model.VisualArtifact{}, errors.New("visual artifact name must be a flat safe filename")
+		return model.VisualArtifact{}, image.Config{}, errors.New("visual artifact name must be a flat safe filename")
 	}
 	path := filepath.Join(root, name)
 	info, err := os.Lstat(path)
 	if err != nil {
-		return model.VisualArtifact{}, err
+		return model.VisualArtifact{}, image.Config{}, err
 	}
 	if !info.Mode().IsRegular() || info.Size() > visualFileLimit {
-		return model.VisualArtifact{}, errors.New("visual artifact must be a regular file <= 8 MiB")
+		return model.VisualArtifact{}, image.Config{}, errors.New("visual artifact must be a regular file <= 8 MiB")
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return model.VisualArtifact{}, err
+		return model.VisualArtifact{}, image.Config{}, err
 	}
 	defer f.Close()
 	h := sha256.New()
 	if _, err = io.Copy(h, io.LimitReader(f, visualFileLimit+1)); err != nil {
-		return model.VisualArtifact{}, err
+		return model.VisualArtifact{}, image.Config{}, err
 	}
+	var dimensions image.Config
 	if strings.HasSuffix(name, ".png") || strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".jpeg") {
 		if _, err = f.Seek(0, io.SeekStart); err != nil {
-			return model.VisualArtifact{}, err
+			return model.VisualArtifact{}, image.Config{}, err
 		}
-		imageConfig, _, decodeErr := image.DecodeConfig(f)
-		if decodeErr != nil || imageConfig.Width < 1 || imageConfig.Height < 1 || imageConfig.Width > 4096 || imageConfig.Height > 4096 {
-			return model.VisualArtifact{}, errors.New("visual screenshot must be a valid image <= 4096x4096")
+		var decodeErr error
+		dimensions, _, decodeErr = image.DecodeConfig(f)
+		if decodeErr != nil || dimensions.Width < 1 || dimensions.Height < 1 || dimensions.Width > 4096 || dimensions.Height > 4096 {
+			return model.VisualArtifact{}, image.Config{}, errors.New("visual screenshot must be a valid image <= 4096x4096")
 		}
 	}
 	if strings.HasSuffix(name, ".txt") || strings.HasSuffix(name, ".json") {
 		body, err := os.ReadFile(path)
 		if err != nil {
-			return model.VisualArtifact{}, err
+			return model.VisualArtifact{}, image.Config{}, err
 		}
 		if err = safety.Check(string(body)); err != nil {
-			return model.VisualArtifact{}, err
+			return model.VisualArtifact{}, image.Config{}, err
 		}
 	}
-	return model.VisualArtifact{Path: name, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
+	return model.VisualArtifact{Path: name, SHA256: hex.EncodeToString(h.Sum(nil))}, dimensions, nil
 }
 
 func loadVisualEvidence(dir, taskID, head, configHash string) (*model.VisualEvidence, error) {
+	return loadVisualEvidenceForTargets(dir, taskID, head, configHash, nil)
+}
+
+func loadVisualEvidenceForTargets(dir, taskID, head, configHash string, targets []config.VisualCaptureTarget) (*model.VisualEvidence, error) {
 	manifestPath := filepath.Join(dir, "manifest.json")
 	info, err := os.Lstat(manifestPath)
 	if err != nil {
@@ -349,37 +379,78 @@ func loadVisualEvidence(dir, taskID, head, configHash string) (*model.VisualEvid
 	if m.Head != head {
 		return nil, errors.New("visual manifest captured head differs from reviewed head")
 	}
-	if len(m.Summary) > 1000 || len(m.Artifacts) == 0 || len(m.Artifacts) > 8 {
-		return nil, errors.New("visual manifest needs a bounded summary and 1..8 artifacts")
+	if len(m.Summary) > 1000 || len(m.Artifacts) == 0 || len(m.Artifacts) > visualArtifactLimit {
+		return nil, errors.New("visual manifest needs a bounded summary and 1..9 artifacts")
 	}
 	seen := map[string]bool{}
 	artifacts := make([]model.VisualArtifact, 0, len(m.Artifacts))
+	images := map[string]image.Config{}
 	var total int64
-	image := false
+	hasImage := false
 	for _, name := range m.Artifacts {
 		if seen[name] {
 			return nil, errors.New("duplicate visual artifact")
 		}
 		seen[name] = true
-		artifact, err := visualArtifact(dir, name)
+		artifact, dimensions, err := visualArtifact(dir, name)
 		if err != nil {
 			return nil, err
 		}
 		info, _ := os.Stat(filepath.Join(dir, name))
 		total += info.Size()
-		if total > 16<<20 {
-			return nil, errors.New("visual artifacts exceed 16 MiB")
+		if total > visualAggregateLimit {
+			return nil, errors.New("visual artifacts exceed 64 MiB")
 		}
 		if strings.HasSuffix(name, ".png") || strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".jpeg") {
-			image = true
+			hasImage = true
+			images[name] = dimensions
 		}
 		artifacts = append(artifacts, artifact)
 	}
-	if !image {
+	if !hasImage {
 		return nil, errors.New("visual manifest contains no screenshot")
+	}
+	if err := validateVisualManifestTargets(m, targets, images); err != nil {
+		return nil, err
 	}
 	manifestHash := sha256.Sum256(body)
 	return &model.VisualEvidence{Head: head, Config: configHash, Manifest: filepath.ToSlash(filepath.Join("visual-evidence", taskID, head+"-"+configHash[:16], "manifest.json")), ManifestSHA256: hex.EncodeToString(manifestHash[:]), Artifacts: artifacts, Summary: m.Summary}, nil
+}
+
+func validateVisualManifestTargets(m visualManifest, expected []config.VisualCaptureTarget, images map[string]image.Config) error {
+	if len(expected) == 0 {
+		return nil // legacy callers and pre-target captures remain readable.
+	}
+	if len(m.Targets) != len(expected) || len(m.Artifacts) != len(expected)+1 {
+		return errors.New("visual manifest target mapping does not match configured targets")
+	}
+	artifactNames := map[string]bool{}
+	for _, artifact := range m.Artifacts {
+		artifactNames[artifact] = true
+	}
+	if !artifactNames["network.txt"] {
+		return errors.New("visual manifest target mapping is missing network diagnostics")
+	}
+	seen := map[string]bool{}
+	for i, target := range expected {
+		got := m.Targets[i]
+		filename := target.ID + ".png"
+		if got.ID != target.ID || got.Path != target.Path || got.Width != target.Width || got.Height != target.Height || got.Screenshot != filename || seen[got.ID] {
+			return errors.New("visual manifest target mapping does not match configured targets")
+		}
+		if !artifactNames[filename] {
+			return errors.New("visual manifest target mapping is missing a screenshot artifact")
+		}
+		seen[got.ID] = true
+		dimensions, ok := images[filename]
+		if !ok || dimensions.Width != target.Width || dimensions.Height != target.Height {
+			return errors.New("visual screenshot dimensions do not match its configured viewport")
+		}
+	}
+	if len(images) != len(expected) {
+		return errors.New("visual manifest contains an unmapped screenshot")
+	}
+	return nil
 }
 
 // The supervisor writes this seal after validation. On reuse, compare the
@@ -397,6 +468,10 @@ func sealVisualEvidence(dir string, evidence *model.VisualEvidence) error {
 	return closeErr
 }
 func loadSealedVisualEvidence(dir, taskID, head, configHash string) (*model.VisualEvidence, error) {
+	return loadSealedVisualEvidenceForTargets(dir, taskID, head, configHash, nil)
+}
+
+func loadSealedVisualEvidenceForTargets(dir, taskID, head, configHash string, targets []config.VisualCaptureTarget) (*model.VisualEvidence, error) {
 	info, err := os.Lstat(filepath.Join(dir, "capture-seal.json"))
 	if err != nil {
 		return nil, err
@@ -412,7 +487,7 @@ func loadSealedVisualEvidence(dir, taskID, head, configHash string) (*model.Visu
 	if err = json.Unmarshal(body, &sealed); err != nil {
 		return nil, err
 	}
-	current, err := loadVisualEvidence(dir, taskID, head, configHash)
+	current, err := loadVisualEvidenceForTargets(dir, taskID, head, configHash, targets)
 	if err != nil {
 		return nil, err
 	}
@@ -443,6 +518,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	if capture == nil {
 		return nil, &visualCaptureUnavailableError{errors.New("visual capture is not configured for this project")}
 	}
+	targets := capture.CaptureTargets()
 	if !visualTaskID.MatchString(task.ID) || !visualRevision.MatchString(task.HeadSHA) || !visualHash.MatchString(e.Hash) {
 		return nil, &visualCaptureUnavailableError{errors.New("visual capture needs an exact task head and config hash")}
 	}
@@ -475,7 +551,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return nil, errors.New("visual evidence path is not a directory")
 		}
-		if cached, err := loadSealedVisualEvidence(output, task.ID, task.HeadSHA, e.Hash); err == nil {
+		if cached, err := loadSealedVisualEvidenceForTargets(output, task.ID, task.HeadSHA, e.Hash, targets); err == nil {
 			cached.Summary = safety.Portable(cached.Summary, c.P.Dir, dir)
 			if task.Evidence != nil && task.Evidence.Visual != nil && !reflect.DeepEqual(*task.Evidence.Visual, *cached) {
 				return nil, errors.New("cached visual capture differs from durable review evidence")
@@ -536,7 +612,11 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		return nil, visualCaptureRunError(capture.Server[0], err, "")
 	}
 	defer gateway.Close()
-	env := append(cleanEnvironment(), "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA, "AIH_VISUAL_URL="+gateway.url, "AIH_VISUAL_PLAYWRIGHT_MODULE="+playwright)
+	targetJSON, err := json.Marshal(targets)
+	if err != nil {
+		return nil, err
+	}
+	env := append(cleanEnvironment(), "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA, "AIH_VISUAL_URL="+gateway.url, "AIH_VISUAL_PLAYWRIGHT_MODULE="+playwright, "AIH_VISUAL_TARGETS="+string(targetJSON))
 	out, err := platform.Run(checkCtx, dir, env, "", "node", runner)
 	if err != nil {
 		return nil, visualCaptureRunError("node", err, out)
@@ -551,7 +631,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	if err != nil || dirty != "" {
 		return nil, errors.New("visual capture modified source or created unignored files")
 	}
-	visual, err := loadVisualEvidence(temporary, task.ID, task.HeadSHA, e.Hash)
+	visual, err := loadVisualEvidenceForTargets(temporary, task.ID, task.HeadSHA, e.Hash, targets)
 	if err != nil {
 		return nil, &checkFailure{name: "visual capture", command: "node", err: err}
 	}
