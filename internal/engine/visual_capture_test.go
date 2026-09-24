@@ -85,6 +85,9 @@ func TestNativeVisualAdapter(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(`<!doctype html><div id="root"></div><img src="https://outside.invalid/pixel.png"><img src="/redirect-pixel"><script>new WebSocket('ws://outside.invalid/socket')</script><script src="/api-client.ts"></script>`))
+		case "/detail":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:rgb(17,34,51)}</style><main>detail state</main>`))
 		case "/api-client.ts":
 			http.NotFound(w, r)
 		case "/redirect-pixel":
@@ -141,17 +144,48 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	t.Setenv("AIH_VISUAL_TEST_FORBIDDEN", forbidden.URL)
 	adapter := []string{os.Args[0], "-test.run=^TestNativeVisualAdapter$"}
 	c := &Controller{P: &Project{Home: home, Dir: state}}
-	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: adapter, Timeout: 10}}}
+	targets := []config.VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 1280, Height: 720}, {ID: "detail", Path: "/detail", Width: 640, Height: 480}}
+	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: adapter, Timeout: 10, Targets: targets}}}
 	task := &model.Task{ID: "task-visual", HeadSHA: head}
 	if _, err := c.captureVisual(context.Background(), effective, &model.Task{ID: "../outside", HeadSHA: head}, worktree); err == nil {
 		t.Fatal("unsafe task ID escaped evidence root")
 	}
 	visual, err := c.captureVisual(context.Background(), effective, task, worktree)
-	if err != nil || visual.Head != head || len(visual.Artifacts) != 2 {
+	if err != nil || visual.Head != head || len(visual.Artifacts) != 3 {
 		t.Fatalf("capture failed: %#v %v", visual, err)
 	}
+	manifest, err := os.ReadFile(filepath.Join(state, filepath.FromSlash(visual.Manifest)))
+	if err != nil || !strings.Contains(string(manifest), `"id":"detail"`) || !strings.Contains(string(manifest), `"screenshot":"detail.png"`) {
+		t.Fatalf("multi-target manifest missing detail mapping: %q %v", manifest, err)
+	}
+	if _, err := os.Stat(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "detail.png")); err != nil {
+		t.Fatalf("multi-target screenshot missing: %v", err)
+	}
+	detailFile, err := os.Open(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "detail.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	detailImage, _, err := image.Decode(detailFile)
+	closeErr := detailFile.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("detail screenshot decode: %v %v", err, closeErr)
+	}
+	desktopFile, err := os.Open(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "desktop.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	desktopImage, _, err := image.Decode(desktopFile)
+	closeErr = desktopFile.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("desktop screenshot decode: %v %v", err, closeErr)
+	}
+	detailPixel := color.RGBAModel.Convert(detailImage.At(10, 10)).(color.RGBA)
+	desktopPixel := color.RGBAModel.Convert(desktopImage.At(10, 10)).(color.RGBA)
+	if desktopPixel == detailPixel || detailPixel.R > 64 || detailPixel.G > 64 || detailPixel.B > 64 {
+		t.Fatalf("detail screenshot did not render its distinct state: desktop=%#v detail=%#v", desktopPixel, detailPixel)
+	}
 	network, err := os.ReadFile(filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)), "network.txt"))
-	if err != nil || !strings.Contains(string(network), "404 /api-client.ts") || !strings.Contains(string(network), "BLOCKED GET https://outside.invalid") || !strings.Contains(string(network), "BLOCKED WEBSOCKET ws://outside.invalid") || !strings.Contains(string(network), "BLOCKED REDIRECT "+forbidden.URL) {
+	if err != nil || !strings.Contains(string(network), "404 /api-client.ts") || !strings.Contains(string(network), "detail GET 200 /detail") || !strings.Contains(string(network), "BLOCKED GET https://outside.invalid") || !strings.Contains(string(network), "BLOCKED WEBSOCKET ws://outside.invalid") || !strings.Contains(string(network), "BLOCKED REDIRECT "+forbidden.URL) {
 		t.Fatalf("real blank-page capture omitted failed module evidence: %q %v", network, err)
 	}
 	if forbiddenRequests.Load() != 0 {
@@ -266,7 +300,7 @@ func TestPlaywrightModuleRequiresResolvedAIHToolsPath(t *testing.T) {
 }
 
 func TestVisualRunnerOwnsLoopbackAndProfilePolicy(t *testing.T) {
-	for _, want := range []string{"channel: 'chrome'", "viewport: { width: 1280, height: 720 }", "serviceWorkers: 'block'", "await context.route", "route.fetch({ maxRedirects: 0 })", "BLOCKED REDIRECT", "await context.routeWebSocket", "url.origin !== origin", "route.abort('blockedbyclient')", "ws.close()", "await ws.connectToServer()", "context.newPage", "browser.close"} {
+	for _, want := range []string{"channel: 'chrome'", "AIH_VISUAL_TARGETS", "for (const item of targets)", "viewport: { width: item.width, height: item.height }", "serviceWorkers: 'block'", "await context.route", "route.fetch({ maxRedirects: 0 })", "BLOCKED REDIRECT", "await context.routeWebSocket", "url.origin !== origin", "route.abort('blockedbyclient')", "ws.close()", "await ws.connectToServer()", "context.newPage", "browser.close", "network.length < 512"} {
 		if !strings.Contains(visualRunner, want) {
 			t.Fatalf("AIH runner omitted required policy %q", want)
 		}
@@ -370,5 +404,42 @@ func TestVisualManifestBoundsAndSecretRejection(t *testing.T) {
 	write("frame.png", "corrupt image")
 	if _, err := loadVisualEvidence(dir, "task-1", head, cfg); err == nil {
 		t.Fatal("corrupt screenshot accepted")
+	}
+}
+
+func TestVisualManifestRequiresEveryConfiguredTargetAndViewport(t *testing.T) {
+	dir := t.TempDir()
+	head, cfg := strings.Repeat("a", 40), strings.Repeat("b", 64)
+	if err := writeVisualPNG(filepath.Join(dir, "desktop.png")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVisualPNG(filepath.Join(dir, "detail.png")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "network.txt"), []byte("desktop GET 200 /\ndetail GET 200 /detail"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	targets := []config.VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 2, Height: 2}, {ID: "detail", Path: "/detail", Width: 2, Height: 2}}
+	writeManifest := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeManifest(fmt.Sprintf(`{"head":%q,"summary":"two states","artifacts":["desktop.png","detail.png","network.txt"],"targets":[{"id":"desktop","path":"/","width":2,"height":2,"screenshot":"desktop.png"},{"id":"detail","path":"/detail","width":2,"height":2,"screenshot":"detail.png"}]}`, head))
+	if _, err := loadVisualEvidenceForTargets(dir, "task-1", head, cfg, targets); err != nil {
+		t.Fatalf("valid mapped targets rejected: %v", err)
+	}
+	writeManifest(fmt.Sprintf(`{"head":%q,"summary":"bad mapping","artifacts":["desktop.png","detail.png","network.txt"],"targets":[{"id":"desktop","path":"/","width":2,"height":2,"screenshot":"desktop.png"}]}`, head))
+	if _, err := loadVisualEvidenceForTargets(dir, "task-1", head, cfg, targets); err == nil {
+		t.Fatal("partial target manifest accepted")
+	}
+	writeManifest(fmt.Sprintf(`{"head":%q,"summary":"missing diagnostics","artifacts":["desktop.png","detail.png"],"targets":[{"id":"desktop","path":"/","width":2,"height":2,"screenshot":"desktop.png"},{"id":"detail","path":"/detail","width":2,"height":2,"screenshot":"detail.png"}]}`, head))
+	if _, err := loadVisualEvidenceForTargets(dir, "task-1", head, cfg, targets); err == nil {
+		t.Fatal("target manifest without shared diagnostics accepted")
+	}
+	writeManifest(fmt.Sprintf(`{"head":%q,"summary":"bad viewport","artifacts":["desktop.png","detail.png","network.txt"],"targets":[{"id":"desktop","path":"/","width":3,"height":2,"screenshot":"desktop.png"},{"id":"detail","path":"/detail","width":2,"height":2,"screenshot":"detail.png"}]}`, head))
+	if _, err := loadVisualEvidenceForTargets(dir, "task-1", head, cfg, targets); err == nil {
+		t.Fatal("mismatched screenshot dimensions accepted")
 	}
 }

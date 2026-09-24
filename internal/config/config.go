@@ -55,9 +55,43 @@ type Check struct {
 // VisualCapture declares the project adapter command. AIH supplies ephemeral
 // TLS material, chooses no port itself, and owns the browser and gateway.
 type VisualCapture struct {
-	Server  []string `yaml:"server" json:"server"`
-	Timeout int      `yaml:"timeout_seconds" json:"timeout_seconds"`
+	Server  []string              `yaml:"server" json:"server"`
+	Timeout int                   `yaml:"timeout_seconds" json:"timeout_seconds"`
+	Targets []VisualCaptureTarget `yaml:"targets,omitempty" json:"targets,omitempty"`
 }
+
+// VisualCaptureTarget is a same-origin application route and the viewport at
+// which AIH captures it. It deliberately has no browser, profile, or URL host
+// controls: those remain supervisor-owned.
+type VisualCaptureTarget struct {
+	ID     string `yaml:"id" json:"id"`
+	Path   string `yaml:"path" json:"path"`
+	Width  int    `yaml:"width" json:"width"`
+	Height int    `yaml:"height" json:"height"`
+}
+
+const (
+	maxVisualCaptureTargets = 8
+	maxVisualTargetPixels   = 4 << 20
+	maxVisualCapturePixels  = 16 << 20
+)
+
+var visualTargetID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
+
+var windowsReservedVisualTargetID = map[string]bool{
+	"con": true, "prn": true, "aux": true, "nul": true,
+	"com1": true, "com2": true, "com3": true, "com4": true, "com5": true, "com6": true, "com7": true, "com8": true, "com9": true,
+	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true, "lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
+}
+
+// CaptureTargets returns the legacy browser capture when configuration omits targets.
+func (v *VisualCapture) CaptureTargets() []VisualCaptureTarget {
+	if len(v.Targets) == 0 {
+		return []VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 1280, Height: 720}}
+	}
+	return v.Targets
+}
+
 type Policy struct {
 	ImplementationRetries int `yaml:"implementation_retries"`
 	ReviewCycles          int `yaml:"review_fix_cycles"`
@@ -285,6 +319,29 @@ func (p Project) Validate() error {
 		}
 		if p.VisualCapture.Timeout < 1 || p.VisualCapture.Timeout > 300 {
 			return errors.New("visual_capture timeout_seconds must be between 1 and 300")
+		}
+		if len(p.VisualCapture.Targets) > maxVisualCaptureTargets {
+			return fmt.Errorf("visual_capture targets must contain at most %d entries", maxVisualCaptureTargets)
+		}
+		seen := map[string]bool{}
+		pixels := 0
+		for _, target := range p.VisualCapture.Targets {
+			filenameID := strings.ToLower(target.ID)
+			if !visualTargetID.MatchString(target.ID) || seen[filenameID] || windowsReservedVisualTargetID[filenameID] {
+				return errors.New("visual_capture target IDs must be unique case-insensitive safe filenames")
+			}
+			seen[filenameID] = true
+			u, err := url.Parse(target.Path)
+			if err != nil || target.Path == "" || !strings.HasPrefix(target.Path, "/") || strings.HasPrefix(target.Path, "//") || u.IsAbs() || u.Host != "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+				return errors.New("visual_capture target path must be a same-origin absolute path without host, query, or fragment")
+			}
+			if target.Width < 1 || target.Height < 1 || target.Width > 4096 || target.Height > 4096 || target.Width*target.Height > maxVisualTargetPixels {
+				return errors.New("visual_capture target viewport exceeds the allowed dimensions")
+			}
+			pixels += target.Width * target.Height
+			if pixels > maxVisualCapturePixels {
+				return errors.New("visual_capture target viewports exceed the aggregate pixel limit")
+			}
 		}
 	}
 	for _, capability := range p.Models {
