@@ -105,9 +105,10 @@ evidence, never a visual pass.
 The browser package is a supervisor capability, not a project dependency. Install
 Playwright below `AIH_HOME/tools` outside every target worktree and set
 `AIH_PLAYWRIGHT_MODULE` to its absolute `.../node_modules/playwright` directory
-before starting the supervisor. AIH resolves both paths and rejects a missing,
-relative, project-owned, or symlink-escaping module path; it never resolves browser
-code from the reviewed project.
+before starting the supervisor. `AIH_HOME/tools` itself must be a real child of
+the resolved AIH home, not a symlink or junction. AIH resolves both paths and
+rejects a missing, relative, project-owned, or symlink-escaping module path; it
+never resolves browser code from the reviewed project.
 
 AIH redacts textual manifest and network diagnostics before saving local visual
 evidence. Screenshot pixels are opaque image data: AIH does not perform OCR or

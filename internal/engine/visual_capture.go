@@ -134,9 +134,18 @@ func playwrightModule(home string) (string, error) {
 	if module == "" || !filepath.IsAbs(module) || home == "" {
 		return "", &visualCaptureUnavailableError{errors.New("AIH_PLAYWRIGHT_MODULE must name an absolute module below AIH_HOME/tools")}
 	}
-	tools, err := filepath.EvalSymlinks(filepath.Join(home, "tools"))
+	resolvedHome, err := filepath.EvalSymlinks(home)
 	if err != nil {
+		return "", &visualCaptureUnavailableError{errors.New("AIH home is unavailable")}
+	}
+	expectedTools := filepath.Join(resolvedHome, "tools")
+	toolsInfo, err := os.Lstat(expectedTools)
+	if err != nil || !toolsInfo.IsDir() || toolsInfo.Mode()&os.ModeSymlink != 0 {
 		return "", &visualCaptureUnavailableError{errors.New("AIH tools directory is unavailable")}
+	}
+	tools, err := filepath.EvalSymlinks(expectedTools)
+	if err != nil || filepath.Clean(tools) != filepath.Clean(expectedTools) {
+		return "", &visualCaptureUnavailableError{errors.New("AIH tools directory must be a real child of AIH_HOME")}
 	}
 	module, err = filepath.EvalSymlinks(module)
 	if err != nil {

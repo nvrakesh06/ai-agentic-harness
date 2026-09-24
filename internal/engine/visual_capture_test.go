@@ -252,6 +252,17 @@ func TestPlaywrightModuleRequiresResolvedAIHToolsPath(t *testing.T) {
 	if _, err = playwrightModule(home); err == nil {
 		t.Fatal("Playwright symlink escaping AIH tools accepted")
 	}
+	toolsRoot := filepath.Join(home, "tools")
+	if err = os.RemoveAll(toolsRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink(project, toolsRoot); err != nil {
+		t.Skipf("tools-root symlink unavailable: %v", err)
+	}
+	t.Setenv("AIH_PLAYWRIGHT_MODULE", filepath.Join(toolsRoot, "node_modules", "playwright"))
+	if _, err = playwrightModule(home); err == nil {
+		t.Fatal("AIH tools root linked into a project worktree accepted")
+	}
 }
 
 func TestVisualRunnerOwnsLoopbackAndProfilePolicy(t *testing.T) {
