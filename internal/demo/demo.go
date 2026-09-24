@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,13 @@ import (
 )
 
 const maxTimeoutDiagnosticBytes = 16 * 1024
+
+const (
+	timeoutDiagnosticDBBudget = 250 * time.Millisecond
+	timeoutDiagnosticTextMax  = 512
+	timeoutDiagnosticTasksMax = 32
+	timeoutDiagnosticRunsMax  = 32
+)
 
 type Fixture struct {
 	Root, Remote, Source, Home string
@@ -524,13 +532,26 @@ func demoTimeout(cause error, phase string, phaseStarted time.Time, p *engine.Pr
 	}
 	if p == nil || p.DB == nil {
 		diagnostic["state_error"] = "local project database is unavailable"
-	} else if snapshot, head, err := p.DB.Load(); err != nil {
-		diagnostic["state_error"] = safety.Redact(err.Error())
 	} else {
-		diagnostic["state_head"] = head
-		diagnostic["snapshot"] = snapshot
-		diagnostic["last_error"] = safety.Redact(p.DB.Get("last_error"))
-		diagnostic["lease_local_heartbeat"] = p.DB.Get(engine.LocalLeaseHeartbeatKey)
+		readCtx, cancel := context.WithTimeout(context.Background(), timeoutDiagnosticDBBudget)
+		defer cancel()
+		snapshot, head, err := p.DB.LoadContext(readCtx)
+		if err != nil {
+			diagnostic["state_error"] = diagnosticText(err.Error())
+		} else {
+			diagnostic["state_head"] = diagnosticText(head)
+			diagnostic["snapshot"] = summarizeTimeoutSnapshot(snapshot)
+			if lastError, readErr := p.DB.GetContext(readCtx, "last_error"); readErr != nil {
+				diagnostic["runtime_error"] = diagnosticText(readErr.Error())
+			} else {
+				diagnostic["last_error"] = diagnosticText(lastError)
+			}
+			if heartbeat, readErr := p.DB.GetContext(readCtx, engine.LocalLeaseHeartbeatKey); readErr != nil {
+				diagnostic["runtime_error"] = diagnosticText(readErr.Error())
+			} else {
+				diagnostic["lease_local_heartbeat"] = diagnosticText(heartbeat)
+			}
+		}
 	}
 	b, err := json.MarshalIndent(diagnostic, "", "  ")
 	if err != nil {
@@ -541,4 +562,100 @@ func demoTimeout(cause error, phase string, phaseStarted time.Time, p *engine.Pr
 		text = text[:maxTimeoutDiagnosticBytes] + "\n[diagnostics truncated]"
 	}
 	return fmt.Errorf("%w\ndemo timeout diagnostics:\n%s", cause, text)
+}
+
+type timeoutSnapshot struct {
+	Schema             int             `json:"state_schema"`
+	Revision           uint64          `json:"revision"`
+	Controller         timeoutLease    `json:"controller"`
+	IntegrationBlocked string          `json:"integration_blocked,omitempty"`
+	Capacity           timeoutCapacity `json:"capacity"`
+	Tasks              []timeoutTask   `json:"tasks"`
+	Runs               []timeoutRun    `json:"runs"`
+	TaskCount          int             `json:"task_count"`
+	RunCount           int             `json:"run_count"`
+}
+
+type timeoutCapacity struct {
+	State        string                    `json:"state"`
+	ReasonCode   string                    `json:"reason_code,omitempty"`
+	Verification []model.VerificationCheck `json:"verification,omitempty"`
+}
+
+type timeoutLease struct {
+	Machine   string    `json:"machine_id"`
+	Owner     string    `json:"owner"`
+	Epoch     uint64    `json:"lease_epoch"`
+	Heartbeat time.Time `json:"last_heartbeat"`
+	Expires   time.Time `json:"expires_at"`
+}
+
+type timeoutTask struct {
+	ID      string      `json:"id"`
+	State   model.State `json:"state"`
+	RunID   string      `json:"run_id,omitempty"`
+	Updated time.Time   `json:"updated"`
+}
+
+type timeoutRun struct {
+	Task    string    `json:"task"`
+	Role    string    `json:"role"`
+	Started time.Time `json:"started"`
+	Outcome string    `json:"outcome"`
+}
+
+func summarizeTimeoutSnapshot(snapshot *model.Snapshot) timeoutSnapshot {
+	if snapshot == nil {
+		return timeoutSnapshot{}
+	}
+	summary := timeoutSnapshot{
+		Schema:   snapshot.Schema,
+		Revision: snapshot.Revision,
+		Controller: timeoutLease{
+			Machine:   diagnosticText(snapshot.Controller.Machine),
+			Owner:     diagnosticText(snapshot.Controller.Owner),
+			Epoch:     snapshot.Controller.Epoch,
+			Heartbeat: snapshot.Controller.Heartbeat,
+			Expires:   snapshot.Controller.Expires,
+		},
+		IntegrationBlocked: diagnosticText(snapshot.IntegrationBlocked),
+		Capacity: timeoutCapacity{
+			State:      diagnosticText(snapshot.Capacity.State),
+			ReasonCode: diagnosticText(snapshot.Capacity.ReasonCode),
+		},
+		TaskCount: len(snapshot.Tasks),
+		RunCount:  len(snapshot.Runs),
+	}
+	for _, check := range snapshot.Capacity.Verification {
+		if len(summary.Capacity.Verification) == timeoutDiagnosticTasksMax {
+			break
+		}
+		check.Task = diagnosticText(check.Task)
+		check.Check = diagnosticText(check.Check)
+		check.Class = diagnosticText(check.Class)
+		check.Phase = diagnosticText(check.Phase)
+		summary.Capacity.Verification = append(summary.Capacity.Verification, check)
+	}
+	for _, task := range snapshot.Tasks {
+		if len(summary.Tasks) == timeoutDiagnosticTasksMax {
+			break
+		}
+		summary.Tasks = append(summary.Tasks, timeoutTask{ID: diagnosticText(task.ID), State: task.State, RunID: diagnosticText(task.RunID), Updated: task.Updated})
+	}
+	sort.Slice(summary.Tasks, func(i, j int) bool { return summary.Tasks[i].ID < summary.Tasks[j].ID })
+	start := len(snapshot.Runs) - timeoutDiagnosticRunsMax
+	if start < 0 {
+		start = 0
+	}
+	for _, run := range snapshot.Runs[start:] {
+		summary.Runs = append(summary.Runs, timeoutRun{Task: diagnosticText(run.Task), Role: diagnosticText(run.Role), Started: run.Started, Outcome: diagnosticText(run.Outcome)})
+	}
+	return summary
+}
+
+func diagnosticText(value string) string {
+	if len(value) > timeoutDiagnosticTextMax {
+		value = value[:timeoutDiagnosticTextMax] + "[truncated]"
+	}
+	return safety.Redact(value)
 }

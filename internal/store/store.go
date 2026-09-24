@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -64,9 +65,12 @@ func (s *Store) Save(head string, snap *model.Snapshot) error {
 	return e
 }
 func (s *Store) Load() (*model.Snapshot, string, error) {
+	return s.LoadContext(context.Background())
+}
+func (s *Store) LoadContext(ctx context.Context) (*model.Snapshot, string, error) {
 	var h string
 	var b []byte
-	e := s.DB.QueryRow("SELECT head,body FROM snapshot WHERE id=1").Scan(&h, &b)
+	e := s.DB.QueryRowContext(ctx, "SELECT head,body FROM snapshot WHERE id=1").Scan(&h, &b)
 	if e != nil {
 		return nil, "", e
 	}
@@ -110,7 +114,14 @@ func (s *Store) Set(key, value string) error {
 	return e
 }
 func (s *Store) Get(key string) string {
-	var v string
-	_ = s.DB.QueryRow("SELECT value FROM runtime WHERE key=?", key).Scan(&v)
+	v, _ := s.GetContext(context.Background(), key)
 	return v
+}
+func (s *Store) GetContext(ctx context.Context, key string) (string, error) {
+	var v string
+	e := s.DB.QueryRowContext(ctx, "SELECT value FROM runtime WHERE key=?", key).Scan(&v)
+	if e == sql.ErrNoRows {
+		return "", nil
+	}
+	return v, e
 }
