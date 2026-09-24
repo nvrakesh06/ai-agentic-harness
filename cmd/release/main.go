@@ -3,23 +3,29 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
 )
 
 // releaseTestTimeout bounds a single package test binary. The engine package
-// creates real temporary Git repositories and has repeatedly taken more than
-// six minutes on a clean, serialized Windows host. Individual integration
-// fixtures retain their own, shorter context deadlines.
-const releaseTestTimeout = "10m"
+// creates real temporary Git repositories and can take more than ten minutes
+// on a loaded, serialized Windows host. Fifteen minutes leaves room for the
+// complete package while retaining bounded fixture-level admission deadlines.
+const releaseTestTimeout = "15m"
+
+const releasePermitWait = 2 * time.Minute
 
 func main() {
 	if e := release(); e != nil {
@@ -50,6 +56,15 @@ func release() error {
 			return fmt.Errorf("HEAD must be tagged v%s", model.Version)
 		}
 	}
+	interrupt, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	ctx, cancel := context.WithTimeout(interrupt, releasePermitWait)
+	defer cancel()
+	releaseMachine, e := releaseMachinePermit(ctx)
+	if e != nil {
+		return e
+	}
+	defer releaseMachine()
 	// Serialize package workers: the suite intentionally exercises real Git and
 	// process lifecycles, and concurrent package runs can make its bounded
 	// Windows timings unreliable on a constrained development machine.
@@ -99,6 +114,28 @@ func release() error {
 		return run(nil, "gh", args...)
 	}
 	return nil
+}
+
+// releaseMachinePermit shares the native heavy-check slots used by supervised
+// application verification. A manual release gate therefore waits visibly for
+// an active consumer check instead of turning resource contention into a test
+// failure.
+func releaseMachinePermit(ctx context.Context) (func(), error) {
+	home, err := config.Home("")
+	if err != nil {
+		return nil, err
+	}
+	machine, err := config.MachineConfig(home)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(os.Stderr, "waiting up to %s for AIH machine heavy-check capacity (%d slot(s)); interrupt to cancel\n", releasePermitWait, machine.MaxHeavyChecks)
+	release, err := platform.AcquireSlot(ctx, filepath.Join(home, "verification"), "heavy", machine.MaxHeavyChecks)
+	if err != nil {
+		return nil, fmt.Errorf("release gate resource contention: AIH machine heavy-check capacity was unavailable within %s: %w", releasePermitWait, err)
+	}
+	fmt.Fprintln(os.Stderr, "acquired AIH machine heavy-check capacity")
+	return release, nil
 }
 func run(env []string, name string, args ...string) error {
 	fmt.Println(name, strings.Join(args, " "))

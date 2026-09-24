@@ -2,9 +2,7 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -109,28 +107,7 @@ func acquireMachineCheck(ctx context.Context, home string, slots int) (func(), e
 	if slots < 1 || slots > 8 {
 		return nil, fmt.Errorf("invalid machine heavy-check capacity %d", slots)
 	}
-	dir := filepath.Join(home, "verification")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, err
-	}
-	for {
-		for i := 0; i < slots; i++ {
-			lock, err := platform.Acquire(filepath.Join(dir, fmt.Sprintf("heavy-%d.lock", i)))
-			if err == nil {
-				return func() { _ = lock.Close() }, nil
-			}
-			if !errors.Is(err, platform.ErrLocked) {
-				return nil, err
-			}
-		}
-		timer := time.NewTimer(50 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
+	return platform.AcquireSlot(ctx, filepath.Join(home, "verification"), "heavy", slots)
 }
 
 func (c *Controller) verificationState(ctx context.Context, taskID, name, class, phase string) error {

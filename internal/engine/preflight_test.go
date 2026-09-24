@@ -42,6 +42,26 @@ func TestManyReadyPreflightsAreBoundedWithoutStarvingCoding(t *testing.T) {
 	}
 }
 
+func TestPreflightReservationAdmitsIndependentWriters(t *testing.T) {
+	s := model.NewSnapshot("project123")
+	for _, id := range []string{"ui_a", "ui_b", "ui_c"} {
+		s.Tasks[id] = &model.Task{ID: id, State: model.Ready, UI: true, Domains: []string{id}}
+	}
+	for _, id := range []string{"code_a", "code_b"} {
+		s.Tasks[id] = &model.Task{ID: id, State: model.Ready, Domains: []string{id}}
+	}
+	selected := selectPreflights(s, map[string]bool{}, map[string]bool{}, 2, 2, roles.Builtins())
+	code := 0
+	for _, candidate := range selected {
+		if !candidate.task.UI {
+			code++
+		}
+	}
+	if code != 2 {
+		t.Fatalf("reader pressure starved independent writers: %#v", selected)
+	}
+}
+
 func TestAcceptedCorrectionInvalidatesCompletedPreflight(t *testing.T) {
 	effective := config.Effective{BaseSHA: "base", Hash: "config", Policy: config.Policy{ImplementationRetries: 2}}
 	task := &model.Task{ID: "ui", ObjectiveID: "objective", State: model.Running, HeadSHA: "old-head", UI: true}

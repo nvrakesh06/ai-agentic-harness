@@ -236,7 +236,7 @@ macOS and Linux arm64 cross-builds are not claims of native validation.
 ## Development and troubleshooting
 
 ```sh
-go test -p 1 ./... -timeout 10m
+go test -p 1 ./... -timeout 15m
 go run ./cmd/checkfmt           # formatting lint, also on Windows
 go vet ./...                   # static analysis
 go build ./cmd/aih             # compilation includes Go type checking
