@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/buildinfo"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
@@ -27,7 +28,10 @@ const (
 	// LocalLeaseHeartbeatKey is machine-local observability. The remote snapshot
 	// remains the fencing authority; this value must never authorize publication.
 	LocalLeaseHeartbeatKey = "lease_local_heartbeat"
-	maxLocalLeasePulse     = 30 * time.Second
+	// LocalSupervisorBuildKey identifies the binary holding supervisor.lock.
+	// This is local status evidence, never a fencing or publication authority.
+	LocalSupervisorBuildKey = "supervisor_build"
+	maxLocalLeasePulse      = 30 * time.Second
 )
 
 type Controller struct {
@@ -311,6 +315,10 @@ func (c *Controller) Serve(parent context.Context) error {
 		return e
 	}
 	log.Printf("AIH supervisor started: project=%s epoch=%d", c.s.Project, c.s.Controller.Epoch)
+	identity, _ := json.Marshal(buildinfo.Current())
+	if e = c.P.DB.Set(LocalSupervisorBuildKey, string(identity)); e != nil {
+		return e
+	}
 	_ = c.P.DB.Set("pid", strconv.Itoa(os.Getpid()))
 	_ = c.P.DB.Set("last_error", "")
 	defer c.P.DB.Set("pid", "")
