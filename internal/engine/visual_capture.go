@@ -47,6 +47,17 @@ const (
 )
 const visualReadyPrefix = "AIH_VISUAL_READY "
 
+const (
+	visualSealVersion     = 2
+	visualSealEnvironment = "detached-checkout-v1"
+)
+
+var errLegacyVisualSeal = errors.New("visual capture seal lacks detached checkout provenance")
+
+var runVisualBrowser = func(ctx context.Context, dir string, env []string, runner string) (string, error) {
+	return platform.Run(ctx, dir, env, "", "node", runner)
+}
+
 // The runner is deliberately AIH-owned. It creates a fresh browser context,
 // pins its viewport/channel, and aborts every request whose origin differs
 // from the configured loopback origin, including redirects, subresources, and
@@ -143,7 +154,6 @@ func (v *visualCheckout) Close(ctx context.Context) error {
 	if v == nil || v.path == "" {
 		return nil
 	}
-	defer func() { v.path = "" }()
 	marker, err := os.ReadFile(v.marker)
 	if err != nil || string(marker) != v.path+"\n"+v.head+"\n" {
 		return errors.New("visual checkout ownership marker is unavailable")
@@ -161,6 +171,7 @@ func (v *visualCheckout) Close(ctx context.Context) error {
 	if _, err = v.git.Run(ctx, "", "worktree", "remove", "--force", v.path); err != nil {
 		return fmt.Errorf("remove AIH-owned visual checkout: %w", err)
 	}
+	v.path = ""
 	if err = os.Remove(v.marker); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -551,14 +562,21 @@ func validateVisualManifestTargets(m visualManifest, expected []config.VisualCap
 	return nil
 }
 
-// The supervisor writes this seal after validation. On reuse, compare the
-// manifest and every artifact hash with the original accepted capture.
+// The supervisor writes this seal after validation. Version 2 binds reuse to
+// the detached-checkout capture environment. Older seals predate that boundary
+// and must be quarantined and recaptured rather than being treated as proof.
+type visualEvidenceSeal struct {
+	Version     int                  `json:"version"`
+	Environment string               `json:"environment"`
+	Evidence    model.VisualEvidence `json:"evidence"`
+}
+
 func sealVisualEvidence(dir string, evidence *model.VisualEvidence) error {
 	f, err := os.OpenFile(filepath.Join(dir, "capture-seal.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
-	err = json.NewEncoder(f).Encode(evidence)
+	err = json.NewEncoder(f).Encode(visualEvidenceSeal{Version: visualSealVersion, Environment: visualSealEnvironment, Evidence: *evidence})
 	closeErr := f.Close()
 	if err != nil {
 		return err
@@ -581,15 +599,18 @@ func loadSealedVisualEvidenceForTargets(dir, taskID, head, configHash string, ta
 	if err != nil {
 		return nil, err
 	}
-	var sealed model.VisualEvidence
-	if err = json.Unmarshal(body, &sealed); err != nil {
+	var seal visualEvidenceSeal
+	if err = json.Unmarshal(body, &seal); err != nil {
 		return nil, err
+	}
+	if seal.Version != visualSealVersion || seal.Environment != visualSealEnvironment {
+		return nil, errLegacyVisualSeal
 	}
 	current, err := loadVisualEvidenceForTargets(dir, taskID, head, configHash, targets)
 	if err != nil {
 		return nil, err
 	}
-	if !reflect.DeepEqual(sealed, *current) {
+	if !reflect.DeepEqual(seal.Evidence, *current) {
 		return nil, errors.New("cached visual capture differs from its accepted manifest or artifact hashes")
 	}
 	return current, nil
@@ -612,7 +633,7 @@ func quarantineVisualCapture(output string) error {
 // fresh supervisor-owned detached checkout. The command owns browser startup
 // and loopback policy; AIH bounds its process lifetime and accepts only
 // validated local artifacts.
-func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task *model.Task, dir string) (*model.VisualEvidence, error) {
+func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task *model.Task, dir string) (visual *model.VisualEvidence, retErr error) {
 	capture := e.Project.VisualCapture
 	if capture == nil {
 		return nil, &visualCaptureUnavailableError{errors.New("visual capture is not configured for this project")}
@@ -696,7 +717,12 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	if err != nil {
 		return nil, &checkFailure{name: "visual capture", command: "git", err: err}
 	}
-	defer checkout.Close(context.Background())
+	defer func() {
+		if closeErr := checkout.Close(context.Background()); closeErr != nil {
+			visual = nil
+			retErr = errors.Join(retErr, fmt.Errorf("visual capture cleanup: %w", closeErr))
+		}
+	}()
 	cache := filepath.Join(temporary, "cache")
 	if err = os.Mkdir(cache, 0700); err != nil {
 		return nil, err
@@ -737,7 +763,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		return nil, err
 	}
 	env := visualEnvironment(cache, "AIH_VISUAL_OUTPUT_DIR="+temporary, "AIH_VISUAL_HEAD="+task.HeadSHA, "AIH_VISUAL_URL="+gateway.url, "AIH_VISUAL_PLAYWRIGHT_MODULE="+playwright, "AIH_VISUAL_TARGETS="+string(targetJSON))
-	out, err := platform.Run(checkCtx, checkout.path, env, "", "node", runner)
+	out, err := runVisualBrowser(checkCtx, checkout.path, env, runner)
 	if err != nil {
 		return nil, visualCaptureRunError("node", err, out)
 	}
@@ -750,7 +776,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	if _, err = (gitx.Git{Dir: checkout.path}).Run(ctx, "", "diff", "--quiet", "HEAD", "--"); err != nil {
 		return nil, errors.New("visual capture modified tracked source")
 	}
-	visual, err := loadVisualEvidenceForTargets(temporary, task.ID, task.HeadSHA, e.Hash, targets)
+	visual, err = loadVisualEvidenceForTargets(temporary, task.ID, task.HeadSHA, e.Hash, targets)
 	if err != nil {
 		return nil, &checkFailure{name: "visual capture", command: "node", err: err}
 	}

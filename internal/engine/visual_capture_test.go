@@ -67,7 +67,12 @@ func TestVisualPrepareHelper(t *testing.T) {
 		return
 	}
 	if marker := os.Getenv("AIH_VISUAL_PREPARE_MARKER"); marker != "" {
-		_ = os.WriteFile(marker, []byte(os.Getenv("AIH_VISUAL_PREPARE_VALUE")+"\n"), 0600)
+		if os.Getenv("AIH_VISUAL_PREPARE_COUNT") == "1" {
+			previous, _ := os.ReadFile(marker)
+			_ = os.WriteFile(marker, append(previous, '1'), 0600)
+		} else {
+			_ = os.WriteFile(marker, []byte(os.Getenv("AIH_VISUAL_PREPARE_VALUE")+"\n"), 0600)
+		}
 	}
 	if os.Getenv("AIH_VISUAL_PREPARE_WAIT") == "1" {
 		select {}
@@ -103,14 +108,17 @@ func visualCheckoutFixture(t *testing.T) (*Controller, *model.Task, string, stri
 	run(source, "remote", "add", "control", control)
 	run(source, "push", "control", "HEAD:refs/heads/aih/task")
 	writer := filepath.Join(t.TempDir(), "writer")
-	cmd = exec.Command("git", "clone", control, writer)
+	cmd = exec.Command("git", "clone", "-b", "aih/task", control, writer)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("clone writer: %v %s", err, out)
 	}
-	if err := os.WriteFile(filepath.Join(writer, ".gitignore"), []byte("fake-renderer\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(writer, ".gitignore"), []byte("node_modules/\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(writer, "fake-renderer"), []byte("not invoked"), 0600); err != nil {
+	if err := os.MkdirAll(filepath.Join(writer, "node_modules"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(writer, "node_modules", "fake-renderer"), []byte("not invoked"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	return &Controller{P: &Project{Dir: state, Git: gitx.Git{Dir: control}}}, &model.Task{ID: "task-visual", HeadSHA: head}, writer, source, func(dir string, args ...string) string { return run(dir, args...) }
@@ -140,7 +148,7 @@ func TestVisualPrepareUsesFreshDetachedCheckoutNotWriterRuntime(t *testing.T) {
 	if err != nil || strings.TrimSpace(string(got)) != checkout.path {
 		t.Fatalf("prepare ran outside detached checkout: %q %v", got, err)
 	}
-	if got, err := os.ReadFile(filepath.Join(writer, "fake-renderer")); err != nil || string(got) != "not invoked" {
+	if got, err := os.ReadFile(filepath.Join(writer, "node_modules", "fake-renderer")); err != nil || string(got) != "not invoked" {
 		t.Fatalf("ignored writer runtime was invoked or changed: %q %v", got, err)
 	}
 	checkoutPath := checkout.path
@@ -206,12 +214,124 @@ func TestVisualCheckoutDoesNotReusePreparedHeadAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestLegacyVisualSealIsQuarantinedForDetachedCheckoutRecapture(t *testing.T) {
+	dir := t.TempDir()
+	head, cfg := strings.Repeat("a", 40), strings.Repeat("b", 64)
+	if err := writeVisualPNG(filepath.Join(dir, "desktop.png")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "network.txt"), []byte("desktop GET 200 /"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(fmt.Sprintf(`{"head":%q,"summary":"legacy cache","artifacts":["desktop.png","network.txt"]}`, head)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := loadVisualEvidence(dir, "task-visual", head, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := json.Marshal(evidence) // schema used before detached checkout provenance
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "capture-seal.json"), legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = loadSealedVisualEvidence(dir, "task-visual", head, cfg); !errors.Is(err, errLegacyVisualSeal) {
+		t.Fatalf("legacy seal was reusable instead of requiring recapture: %v", err)
+	}
+	if err = quarantineVisualCapture(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(dir + ".corrupt"); err != nil {
+		t.Fatalf("legacy seal was not safely quarantined: %v", err)
+	}
+}
+
+func TestCaptureVisualDoesNotRunIgnoredWriterRenderer(t *testing.T) {
+	c, task, writer, _, _ := visualCheckoutFixture(t)
+	home := t.TempDir()
+	module := filepath.Join(home, "tools", "playwright")
+	if err := os.MkdirAll(module, 0700); err != nil {
+		t.Fatal(err)
+	}
+	c.P.Home = home
+	t.Setenv("AIH_PLAYWRIGHT_MODULE", module)
+	prepareMarker := filepath.Join(t.TempDir(), "prepare-count")
+	tripwire := filepath.Join(t.TempDir(), "writer-renderer-invoked")
+	t.Setenv("AIH_VISUAL_PREPARE_HELPER", "1")
+	t.Setenv("AIH_VISUAL_PREPARE_MARKER", prepareMarker)
+	t.Setenv("AIH_VISUAL_PREPARE_COUNT", "1")
+	t.Setenv("AIH_VISUAL_SERVER_HELPER", "1")
+	t.Setenv("AIH_VISUAL_WRITER_TRIPWIRE", tripwire)
+	originalBrowserRun := runVisualBrowser
+	runVisualBrowser = func(_ context.Context, dir string, env []string, _ string) (string, error) {
+		values := map[string]string{}
+		for _, item := range env {
+			parts := strings.SplitN(item, "=", 2)
+			if len(parts) == 2 {
+				values[parts[0]] = parts[1]
+			}
+		}
+		if dir == writer {
+			return "", errors.New("browser runner used writer worktree")
+		}
+		if _, err := os.Stat(filepath.Join(dir, "node_modules", "fake-renderer")); err == nil {
+			return "", errors.New("browser runner observed writer fake renderer")
+		}
+		var targets []config.VisualCaptureTarget
+		if err := json.Unmarshal([]byte(values["AIH_VISUAL_TARGETS"]), &targets); err != nil {
+			return "", err
+		}
+		artifacts := []string{"network.txt"}
+		manifestTargets := make([]visualManifestTarget, 0, len(targets))
+		for _, target := range targets {
+			name := target.ID + ".png"
+			if err := writeVisualPNG(filepath.Join(values["AIH_VISUAL_OUTPUT_DIR"], name)); err != nil {
+				return "", err
+			}
+			artifacts = append([]string{name}, artifacts...)
+			manifestTargets = append(manifestTargets, visualManifestTarget{ID: target.ID, Path: target.Path, Width: target.Width, Height: target.Height, Screenshot: name})
+		}
+		if err := os.WriteFile(filepath.Join(values["AIH_VISUAL_OUTPUT_DIR"], "network.txt"), []byte("capture GET 200 /"), 0600); err != nil {
+			return "", err
+		}
+		manifest, err := json.Marshal(visualManifest{Head: values["AIH_VISUAL_HEAD"], Summary: "test capture", Artifacts: artifacts, Targets: manifestTargets})
+		if err != nil {
+			return "", err
+		}
+		return "", os.WriteFile(filepath.Join(values["AIH_VISUAL_OUTPUT_DIR"], "manifest.json"), manifest, 0600)
+	}
+	defer func() { runVisualBrowser = originalBrowserRun }()
+	targets := []config.VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 2, Height: 2}, {ID: "detail", Path: "/detail", Width: 2, Height: 2}}
+	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Prepare: []string{os.Args[0], "-test.run=^TestVisualPrepareHelper$"}, PrepareTimeout: 5, Server: []string{os.Args[0], "-test.run=^TestNativeVisualAdapter$"}, Timeout: 10, Targets: targets}}}
+	visual, err := c.captureVisual(context.Background(), effective, task, writer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if visual == nil || len(visual.Artifacts) != 3 {
+		t.Fatalf("full capture did not produce every target: %#v", visual)
+	}
+	if got, err := os.ReadFile(prepareMarker); err != nil || string(got) != "1" {
+		t.Fatalf("prepare did not run exactly once for multi-target capture: %q %v", got, err)
+	}
+	if _, err := os.Stat(tripwire); !os.IsNotExist(err) {
+		t.Fatalf("ignored writer renderer was invoked: %v", err)
+	}
+}
+
 // TestNativeVisualAdapter is a disposable project-side adapter. It deliberately
 // binds port zero and publishes only the bounded readiness line required by
 // AIH; certificate paths are supplied by the supervisor.
 func TestNativeVisualAdapter(t *testing.T) {
 	if os.Getenv("AIH_VISUAL_SERVER_HELPER") != "1" {
 		return
+	}
+	if tripwire := os.Getenv("AIH_VISUAL_WRITER_TRIPWIRE"); tripwire != "" {
+		if _, err := os.Stat(filepath.Join("node_modules", "fake-renderer")); err == nil {
+			_ = os.WriteFile(tripwire, []byte("writer fake renderer was visible"), 0600)
+			os.Exit(3)
+		}
 	}
 	cert, err := tls.LoadX509KeyPair(os.Getenv("AIH_VISUAL_TLS_CERT"), os.Getenv("AIH_VISUAL_TLS_KEY"))
 	if err != nil {
