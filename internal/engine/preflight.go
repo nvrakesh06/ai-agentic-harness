@@ -79,9 +79,9 @@ func directFixSensitive(text string) bool {
 	return false
 }
 
-func directFixFinding(finding model.Finding) bool {
+func directFixFinding(finding model.Finding, visualRoles map[string]bool) bool {
 	category := strings.ToLower(strings.TrimSpace(finding.Category))
-	if finding.Role != "designer" || (category != "visual" && category != "layout" && category != "text-layout" && category != "text layout") ||
+	if !visualRoles[finding.Role] || (category != "visual" && category != "layout" && category != "text-layout" && category != "text layout") ||
 		!directFixLocation.MatchString(strings.TrimSpace(finding.Location)) {
 		return false
 	}
@@ -125,24 +125,44 @@ func containsAny(text string, values ...string) bool {
 	return false
 }
 
-func directFixFindings(t *model.Task) ([]model.Finding, bool) {
+func visualReviewRoles(effective config.Effective, evidence *model.Evidence) map[string]bool {
+	if !completedReviewRoster(evidence) {
+		return nil
+	}
+	all, err := roles.Load(effective.Files)
+	if err != nil {
+		return nil
+	}
+	visual := map[string]bool{}
+	for _, name := range evidence.ReviewRoster {
+		role, ok := all[name]
+		if !ok {
+			return nil
+		}
+		if role.Stage == "review" && role.Mode == "validator" && (role.Name == "designer" || role.Extends == "designer") {
+			visual[name] = true
+		}
+	}
+	return visual
+}
+
+func directFixSensitivePath(value string) bool {
+	value = strings.ReplaceAll(value, `\`, "/")
+	return strings.Contains(value, "/") && directFixSensitive(value)
+}
+
+func directFixFindings(t *model.Task, visualRoles map[string]bool) ([]model.Finding, bool) {
 	if t == nil || !t.UI || t.Security || len(t.Findings) == 0 || len(t.Findings) > 2 {
 		return nil, false
 	}
-	guidance := make([]string, 0, len(model.TaskGuidance(t)))
-	for _, item := range model.TaskGuidance(t) {
-		guidance = append(guidance, item.Text)
-	}
-	// Acceptance criteria and assigned role names can require an architecture
-	// review without making this narrowly located UI repair architecture-sensitive.
-	// Those specialists remain required below; source-scope sensitivity comes from
-	// the objective, affected areas/domains, dependencies, guidance, and findings.
-	if directFixSensitive(strings.Join(append(append(append(append([]string{t.Objective}, t.Areas...), t.Domains...), t.Dependencies...), guidance...), " ")) {
-		return nil, false
+	for _, path := range append(append(append([]string(nil), t.Areas...), t.Domains...), t.Dependencies...) {
+		if directFixSensitivePath(path) {
+			return nil, false
+		}
 	}
 	seenLocations := map[string]bool{}
 	for _, finding := range t.Findings {
-		if !directFixFinding(finding) || seenLocations[finding.Location] {
+		if !directFixFinding(finding, visualRoles) || seenLocations[finding.Location] {
 			return nil, false
 		}
 		seenLocations[finding.Location] = true
@@ -154,13 +174,14 @@ func directFixFindings(t *model.Task) ([]model.Finding, bool) {
 // records only a completed built-in designer review of at most two exact visual repairs.
 func directFixWaiver(t *model.Task, effective config.Effective, required []roles.Role) *model.Preflight {
 	if t == nil || t.State != model.Review || t.Evidence == nil || t.Evidence.Base != effective.BaseSHA || t.Evidence.Head != t.HeadSHA ||
-		t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || len(t.Evidence.Checks) == 0 || !completedReviewRoster(t.Evidence) || t.Evidence.Reviews["designer"] == "" {
+		t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || len(t.Evidence.Checks) == 0 || !completedReviewRoster(t.Evidence) {
 		return nil
 	}
-	if !slices.Contains(t.Evidence.ReviewRoster, "designer") || !slices.ContainsFunc(required, func(role roles.Role) bool { return role.Name == "designer" && role.Stage == "review" }) {
+	if !slices.ContainsFunc(required, func(role roles.Role) bool { return role.Name == "designer" && role.Stage == "review" }) {
 		return nil
 	}
-	findings, ok := directFixFindings(t)
+	visualRoles := visualReviewRoles(effective, t.Evidence)
+	findings, ok := directFixFindings(t, visualRoles)
 	if !ok {
 		return nil
 	}
@@ -172,10 +193,10 @@ func directFixWaiver(t *model.Task, effective config.Effective, required []roles
 
 func directFixWaiverMatches(p *model.Preflight, t *model.Task, effective config.Effective) bool {
 	if p == nil || p.DirectFix == nil || !preflightMatches(p, t, effective) || t == nil || t.Evidence == nil || t.Evidence.Base != effective.BaseSHA ||
-		t.Evidence.Head != t.HeadSHA || t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || len(t.Evidence.Checks) == 0 || !completedReviewRoster(t.Evidence) || t.Evidence.Reviews["designer"] == "" {
+		t.Evidence.Head != t.HeadSHA || t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || len(t.Evidence.Checks) == 0 || !completedReviewRoster(t.Evidence) {
 		return false
 	}
-	findings, ok := directFixFindings(t)
+	findings, ok := directFixFindings(t, visualReviewRoles(effective, t.Evidence))
 	w := p.DirectFix
 	return ok && w.Role == "designer" && w.Disposition == "waived" && w.BaseSHA == effective.BaseSHA && w.HeadSHA == t.HeadSHA &&
 		w.Config == effective.Hash && w.Rules == roles.Hash() && w.Scope == preflightScope(t) && w.Findings == findingsFingerprint(findings)

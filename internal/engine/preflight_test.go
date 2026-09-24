@@ -235,17 +235,20 @@ func TestCompletedPreflightReusesOnlyBoundedUnchangedFixScope(t *testing.T) {
 }
 
 func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
-	effective := config.Effective{BaseSHA: strings.Repeat("a", 40), Hash: strings.Repeat("b", 64)}
-	required := []roles.Role{{Name: "designer", Stage: "review"}, {Name: "animation-architecture", Stage: "pre-implementation"}}
+	effective := config.Effective{BaseSHA: strings.Repeat("a", 40), Hash: strings.Repeat("b", 64), Files: map[string]string{
+		".aih/roles/animation-architecture.yaml": "name: animation-architecture\nextends: reviewer\nstage: review\n",
+		".aih/roles/visual-quality.yaml":         "name: visual-quality\nextends: designer\nstage: review\n",
+	}}
+	required := []roles.Role{{Name: "designer", Stage: "review"}, {Name: "animation-preflight", Stage: "pre-implementation"}}
 	task := &model.Task{
-		ID: "ui", State: model.Review, HeadSHA: strings.Repeat("c", 40), Objective: "Repair the caption layout", Acceptance: []string{"caption fits", "animation-architecture review completes"},
+		ID: "ui", State: model.Review, HeadSHA: strings.Repeat("c", 40), Objective: "Repair animation architecture caption layout", Acceptance: []string{"caption fits", "animation-architecture review completes"},
 		Areas: []string{"ui"}, Domains: []string{"ui"}, Risk: "high", Dependencies: []string{"semantic-engine"}, Roles: []string{"animation-architecture"}, UI: true,
 		Findings: []model.Finding{
-			{Role: "designer", Severity: "high", Category: "text-layout", Location: "src/caption.tsx:42", Reason: "Caption overlaps the coordinator label at narrow widths.", Resolution: "Wrap the caption in the existing text-fit component."},
-			{Role: "designer", Severity: "high", Category: "text-layout", Location: "src/labels.tsx:58", Reason: "Non-breaking-space labels bypass text-fit measurement and overflow.", Resolution: "Replace NBSP labels before the text-fit validation test."},
+			{Role: "visual-quality", Severity: "high", Category: "text-layout", Location: "src/caption.tsx:42", Reason: "Caption overlaps the coordinator label at narrow widths.", Resolution: "Wrap the caption in the existing text-fit component."},
+			{Role: "visual-quality", Severity: "high", Category: "text-layout", Location: "src/labels.tsx:58", Reason: "Non-breaking-space labels bypass text-fit measurement and overflow.", Resolution: "Replace NBSP labels before the text-fit validation test."},
 		},
 	}
-	task.Evidence = &model.Evidence{Base: effective.BaseSHA, Head: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: []string{"native check passed"}, Reviews: map[string]string{"designer": "two bounded layout defects", "reviewer": "completed", "qa": "completed", "security": "completed"}, ReviewRoster: []string{"designer", "reviewer", "qa", "security"}}
+	task.Evidence = &model.Evidence{Base: effective.BaseSHA, Head: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: []string{"native check passed"}, Reviews: map[string]string{"visual-quality": "two bounded layout defects", "animation-architecture": "completed", "qa": "completed", "security": "completed"}, ReviewRoster: []string{"animation-architecture", "qa", "security", "visual-quality"}}
 	p := directFixWaiver(task, effective, required)
 	if p == nil || p.DirectFix == nil || p.DirectFix.Role != "designer" || p.Phase != "queued" {
 		t.Fatalf("eligible exact-head review did not produce a structured designer waiver: %+v", p)
@@ -259,13 +262,13 @@ func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
 	}
 	vague := model.Clone(&model.Snapshot{Tasks: map[string]*model.Task{"ui": task}}).Tasks["ui"]
 	vague.State = model.Review
-	vague.Findings = []model.Finding{{Role: "designer", Severity: "high", Category: "text-layout", Location: "src/labels.tsx:58", Reason: "Label looks wrong", Resolution: "Make label better."}}
+	vague.Findings = []model.Finding{{Role: "visual-quality", Severity: "high", Category: "text-layout", Location: "src/labels.tsx:58", Reason: "Label looks wrong", Resolution: "Make label better."}}
 	if directFixWaiver(vague, effective, required) != nil {
 		t.Fatal("vague visual finding bypassed the designer preflight")
 	}
 	generic := model.Clone(&model.Snapshot{Tasks: map[string]*model.Task{"ui": task}}).Tasks["ui"]
 	generic.State = model.Review
-	generic.Findings = []model.Finding{{Role: "designer", Severity: "high", Category: "layout", Location: "src/labels.tsx:58", Reason: "Spacing is wrong", Resolution: "Adjust layout"}}
+	generic.Findings = []model.Finding{{Role: "visual-quality", Severity: "high", Category: "layout", Location: "src/labels.tsx:58", Reason: "Spacing is wrong", Resolution: "Adjust layout"}}
 	if directFixWaiver(generic, effective, required) != nil {
 		t.Fatal("generic spacing/layout finding bypassed the designer preflight")
 	}
@@ -289,8 +292,8 @@ func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
 		{"rules", func(*model.Task) {}, effective},
 		{"finding", func(t *model.Task) { t.Findings[0].Resolution = "Use a different component." }, effective},
 		{"security", func(t *model.Task) { t.Security = true }, effective},
-		{"schema sensitivity", func(t *model.Task) { t.Objective = "Repair the schema label layout" }, effective},
-		{"dependency sensitivity", func(t *model.Task) { t.Dependencies = []string{"schema-engine"} }, effective},
+		{"schema path sensitivity", func(t *model.Task) { t.Areas = []string{"src/schema/labels.tsx"} }, effective},
+		{"dependency path sensitivity", func(t *model.Task) { t.Dependencies = []string{"src/schema-engine"} }, effective},
 	} {
 		t.Run(changed.name, func(t *testing.T) {
 			copy := model.Clone(&model.Snapshot{Tasks: map[string]*model.Task{"ui": task}}).Tasks["ui"]
