@@ -13,9 +13,9 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
 )
 
-// reviewFollowups creates one durable work item per source file. Distinct
-// observations in that file remain separate bullets so one owner can address
-// them together without duplicate issues from independent review roles.
+// reviewFollowups creates one durable work item per owner area. Distinct
+// observations remain separate bullets so one owner can address them together
+// without duplicate issues from independent review roles or adjacent files.
 func (c *Controller) reviewFollowups(task *model.Task, findings []model.Finding) error {
 	for _, group := range groupReviewFollowups(task, findings) {
 		issue, err := c.P.Hub.EnsureIssue(c.ctx, group.key, group.title, group.body(task))
@@ -49,7 +49,7 @@ func groupReviewFollowups(task *model.Task, findings []model.Finding) []reviewFo
 
 	byScope := map[string]*reviewFollowupGroup{}
 	for _, finding := range medium {
-		source := followupSourceFile(finding.Location)
+		source := followupOwnerScope(followupSourceFile(finding.Location))
 		scope := "file:" + source
 		if source == "" {
 			scope = "category:" + normalizedCategory(finding.Category)
@@ -108,6 +108,30 @@ func normalizedCategory(category string) string {
 	return category
 }
 
+func followupOwnerScope(source string) string {
+	if source == "" {
+		return ""
+	}
+	parts := strings.Split(source, "/")
+	if len(parts) < 2 {
+		return source
+	}
+	switch parts[0] {
+	case "src", "internal", "pkg", "lib", "app":
+		if len(parts) >= 3 {
+			return parts[0] + "/" + parts[1]
+		}
+		return parts[0]
+	case "tests", "test", "scripts", "schemas", "docs", "assets":
+		return parts[0]
+	case "projects":
+		if len(parts) >= 3 {
+			return parts[0] + "/" + parts[1]
+		}
+	}
+	return source
+}
+
 func followupSourceFile(location string) string {
 	location = strings.TrimSpace(strings.ToLower(location))
 	if location == "" {
@@ -129,6 +153,11 @@ func followupSourceFile(location string) string {
 		candidate = strings.Trim(strings.TrimSpace(candidate), "`\"' ")
 		for strings.HasPrefix(candidate, "./") {
 			candidate = strings.TrimPrefix(candidate, "./")
+		}
+		// Reviewers sometimes put prose such as "current-head browser captures"
+		// in Location. Do not turn that phrase into a fake source-file issue.
+		if strings.ContainsAny(candidate, " \t") || (!strings.Contains(candidate, ".") && !strings.HasPrefix(candidate, "src/") && !strings.HasPrefix(candidate, "internal/") && !strings.HasPrefix(candidate, "pkg/") && !strings.HasPrefix(candidate, "lib/") && !strings.HasPrefix(candidate, "app/") && !strings.HasPrefix(candidate, "tests/") && !strings.HasPrefix(candidate, "docs/") && !strings.HasPrefix(candidate, "projects/")) {
+			continue
 		}
 		candidate = strings.Map(func(r rune) rune {
 			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '/' || r == '.' || r == '_' || r == '-' {
