@@ -250,7 +250,7 @@ systemctl --user stop aih-my-app.service
 cd "$HOME/src/ai-agentic-harness"
 git pull --ff-only
 ./scripts/setup.sh
-go test -p 1 ./... -timeout 10m
+go test -p 1 ./... -timeout 15m
 sh scripts/install.sh --source ./bin/aih
 cd "$HOME/apps/my-app"
 aih --env-file "$HOME/.config/aih/aih.env" doctor

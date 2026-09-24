@@ -347,6 +347,31 @@ func Install(home string) (Machine, error) {
 	}
 	return m, ce
 }
+
+// MachineConfig reads optional machine capacity without registering or
+// initializing an AIH installation. Callers that only need shared resource
+// coordination use the conservative default when this machine has not been
+// installed yet.
+func MachineConfig(home string) (Machine, error) {
+	m := Machine{Platform: runtime.GOOS, MaxHeavyChecks: 1}
+	b, e := os.ReadFile(filepath.Join(home, "machine.yaml"))
+	if os.IsNotExist(e) {
+		return m, nil
+	}
+	if e != nil {
+		return m, e
+	}
+	if e = Decode(b, &m); e != nil {
+		return m, e
+	}
+	if m.MaxHeavyChecks == 0 {
+		m.MaxHeavyChecks = 1
+	}
+	if m.MaxHeavyChecks < 1 || m.MaxHeavyChecks > 8 {
+		return m, errors.New("machine max_heavy_checks must be 1..8")
+	}
+	return m, nil
+}
 func ProjectDir(home, id string) (string, error) {
 	if !validID.MatchString(id) {
 		return "", errors.New("invalid project identity")

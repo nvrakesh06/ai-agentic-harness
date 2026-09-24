@@ -37,7 +37,7 @@ During the earlier readiness phase, a concurrent run on the loaded Windows host
 exceeded its five-minute fixture deadline; subsequent native/serialized runs
 passed without relaxing assertions or timeouts. Release validation runs uncached
 tests. For a constrained development machine,
-use `go test -p 1 ./... -count=1 -timeout 10m` rather than running multiple suites
+use `go test -p 1 ./... -count=1 -timeout 15m` rather than running multiple suites
 and cross-builds at once. `GOMAXPROCS=2` was also used for the final serialized runs.
 
 The vulnerability scanner must itself use a sufficiently recent toolchain:
@@ -76,7 +76,7 @@ Exact core validation commands (with `GOMAXPROCS=2`, `GOFLAGS=-p=1`):
 ```sh
 go run ./cmd/checkfmt
 go run ./cmd/release  # invoked through each OS's release wrapper
-# release runs: go test -p=1 ./... -count=1 -timeout 10m; go vet ./...
+# release runs: go test -p=1 ./... -count=1 -timeout 15m; go vet ./...
 # and five CGO-disabled, trimmed-path cross-builds with SHA256SUMS
 go test -race -p 1 ./... -count=1 -timeout 10m  # Ubuntu with GCC
 GOTOOLCHAIN=go1.27.1 go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...

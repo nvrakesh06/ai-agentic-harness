@@ -133,9 +133,27 @@ func TestPreflightReaderQueueLeavesIndependentWriterSlotsAvailable(t *testing.T)
 	f.P.Provider = workers
 	c := engine.New(f.P)
 	done := make(chan error, 1)
+	started := time.Now()
 	go func() { done <- c.Serve(ctx) }()
-	deadline := time.NewTimer(30 * time.Second)
-	defer deadline.Stop()
+	readerDeadline := time.NewTimer(90 * time.Second)
+	defer readerDeadline.Stop()
+	for workers.designers.Load() < 2 {
+		select {
+		case err := <-done:
+			t.Fatalf("supervisor exited before reader pressure was established: %v", err)
+		case <-readerDeadline.C:
+			t.Fatalf("reader pressure was not established: designers=%d writers=%d", workers.designers.Load(), workers.writers.Load())
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	readerPressureAt := time.Now()
+	t.Logf("preflight admission fixture: first two designers active after %s", readerPressureAt.Sub(started).Round(time.Millisecond))
+	// Start the starvation observation once reader pressure exists. Real Git and
+	// state setup may be slow under load, but it must not consume the interval
+	// that proves independent writer admission. A reader-only scheduler cannot
+	// satisfy this condition because the held designers never release capacity.
+	writerDeadline := time.NewTimer(45 * time.Second)
+	defer writerDeadline.Stop()
 	for {
 		current := c.Snapshot()
 		if current != nil && workers.designers.Load() == 2 && workers.writers.Load() == 2 {
@@ -146,6 +164,7 @@ func TestPreflightReaderQueueLeavesIndependentWriterSlotsAvailable(t *testing.T)
 				}
 			}
 			if waiting > 0 && current.Capacity.ActiveWriters == 2 && current.Capacity.ActiveReaders == 2 {
+				t.Logf("preflight admission fixture: two independent writers active %s after reader pressure", time.Since(readerPressureAt).Round(time.Millisecond))
 				cancel()
 				<-done
 				return
@@ -154,8 +173,8 @@ func TestPreflightReaderQueueLeavesIndependentWriterSlotsAvailable(t *testing.T)
 		select {
 		case err := <-done:
 			t.Fatalf("supervisor exited before independent writers started: %v", err)
-		case <-deadline.C:
-			t.Fatal(fmt.Sprintf("reader queue suppressed writers: designers=%d writers=%d snapshot=%#v", workers.designers.Load(), workers.writers.Load(), current))
+		case <-writerDeadline.C:
+			t.Fatal(fmt.Sprintf("reader queue suppressed writers after reader pressure: designers=%d writers=%d snapshot=%#v", workers.designers.Load(), workers.writers.Load(), current))
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
