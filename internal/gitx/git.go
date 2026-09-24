@@ -10,6 +10,7 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -214,25 +215,104 @@ func (g Git) Publish(ctx context.Context, updates []Update) error {
 	}
 	args = append(args, "origin")
 	args = append(args, refs...)
-	_, e := g.Run(ctx, "", args...)
-	if e != nil {
-		// A transport can lose the acknowledgement after the server committed.
-		all := true
-		for _, u := range updates {
-			h, readErr := g.RemoteHead(ctx, u.Branch)
-			if u.Branch == "aih-state" && readErr == nil && h == u.New {
-				return nil
-			}
-			if readErr != nil || h != u.New {
-				all = false
-			}
+	deadline, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	return publishWithRetry(deadline, updates, args,
+		func(ctx context.Context, args []string) error { _, err := g.Run(ctx, "", args...); return err },
+		g.RemoteHead, waitForPublicationRetry, 20)
+}
+
+var transientGitTransportErrors = []string{
+	"could not resolve host", "could not resolve hostname", "temporary failure in name resolution",
+	"couldn't resolve host", "failed to connect", "could not connect to server",
+	"connection timed out", "connection reset by peer", "network is unreachable",
+}
+
+func transientGitTransport(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, fragment := range transientGitTransportErrors {
+		if strings.Contains(message, fragment) {
+			return true
 		}
-		if all {
+	}
+	return false
+}
+
+func waitForPublicationRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// publishWithRetry retains the exact push arguments, including every old-ref
+// lease. A transient transport failure may have committed remotely, so all
+// remote refs must be reconciled before a retry or a success acknowledgement.
+func publishWithRetry(ctx context.Context, updates []Update, args []string,
+	push func(context.Context, []string) error,
+	remoteHead func(context.Context, string) (string, error),
+	wait func(context.Context, time.Duration) error, attempts int) error {
+	if attempts < 1 {
+		return errors.New("atomic publication requires at least one attempt")
+	}
+	var last error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		last = push(ctx, args)
+		if last == nil {
 			return nil
 		}
-		return fmt.Errorf("atomic publication rejected or unconfirmed; reconcile before retry: %w", e)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		allNew, sawNew := true, false
+		for _, update := range updates {
+			head, err := remoteHead(ctx, update.Branch)
+			if err != nil {
+				allNew = false
+				if !transientGitTransport(err) {
+					return fmt.Errorf("atomic publication could not reconcile %s: %w", update.Branch, err)
+				}
+				continue
+			}
+			if head != update.New {
+				allNew = false
+			}
+			if head == update.New {
+				sawNew = true
+			}
+			if head != update.Old && head != update.New {
+				return fmt.Errorf("atomic publication ref %s diverged; reconcile before retry: %w", update.Branch, last)
+			}
+		}
+		if allNew {
+			return nil
+		}
+		if sawNew || !transientGitTransport(last) {
+			return fmt.Errorf("atomic publication rejected or unconfirmed; reconcile before retry: %w", last)
+		}
+		if attempt == attempts-1 {
+			break
+		}
+		delay := time.Duration(2<<min(attempt, 4)) * time.Second
+		if delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
+		log.Printf("AIH fenced publication transport retry %d/%d in %s: %s", attempt+2, attempts, delay, safety.Redact(last.Error()))
+		if err := wait(ctx, delay); err != nil {
+			return err
+		}
 	}
-	return nil
+	return fmt.Errorf("atomic publication transport retry exhausted after %d attempts; run aih attach then aih resume after connectivity recovers: %w", attempts, last)
 }
 func (g Git) Worktree(ctx context.Context, path, branch, from string) error {
 	if _, e := os.Stat(filepath.Join(path, ".git")); e == nil {
