@@ -96,10 +96,22 @@ func directFixFinding(finding model.Finding) bool {
 	}
 	reason := strings.ToLower(finding.Reason)
 	resolution := strings.ToLower(finding.Resolution)
-	if !containsAny(reason, "overlap", "overflow", "clip", "truncat", "non-breaking", "nbsp", "text-fit", "wrap", "line break", "spacing", "typograph") ||
+	if !containsAny(reason, "overlap", "overflow", "clip", "truncat", "non-breaking", "nbsp", "text-fit", "wrap", "line break") ||
 		!containsAny(resolution, "use ", "wrap", "replace", "apply", "add", "remove", "set ", "adjust", "ensure", "render", "measure", "validate", "test") ||
-		!containsAny(resolution, "text-fit", "wrap", "white-space", "nbsp", "non-breaking", "line-break", "overflow", "width", "caption", "layout", "typograph", "validation", "test") {
+		!containsAny(resolution, "text-fit", "wrap", "white-space", "nbsp", "non-breaking", "line-break", "overflow", "width", "caption", "validation", "test") {
 		return false
+	}
+	return true
+}
+
+func completedReviewRoster(evidence *model.Evidence) bool {
+	if evidence == nil || len(evidence.ReviewRoster) == 0 {
+		return false
+	}
+	for _, role := range evidence.ReviewRoster {
+		if strings.TrimSpace(evidence.Reviews[role]) == "" {
+			return false
+		}
 	}
 	return true
 }
@@ -138,7 +150,7 @@ func directFixFindings(t *model.Task) ([]model.Finding, bool) {
 // records only a completed built-in designer review of at most two exact visual repairs.
 func directFixWaiver(t *model.Task, effective config.Effective, required []roles.Role) *model.Preflight {
 	if t == nil || t.State != model.Review || t.Evidence == nil || t.Evidence.Base != effective.BaseSHA || t.Evidence.Head != t.HeadSHA ||
-		t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || len(t.Evidence.Checks) == 0 || t.Evidence.Reviews["designer"] == "" {
+		t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || len(t.Evidence.Checks) == 0 || !completedReviewRoster(t.Evidence) || t.Evidence.Reviews["designer"] == "" {
 		return nil
 	}
 	if !slices.Contains(t.Evidence.ReviewRoster, "designer") || !slices.ContainsFunc(required, func(role roles.Role) bool { return role.Name == "designer" && role.Stage == "review" }) {
@@ -156,7 +168,7 @@ func directFixWaiver(t *model.Task, effective config.Effective, required []roles
 
 func directFixWaiverMatches(p *model.Preflight, t *model.Task, effective config.Effective) bool {
 	if p == nil || p.DirectFix == nil || !preflightMatches(p, t, effective) || t == nil || t.Evidence == nil || t.Evidence.Base != effective.BaseSHA ||
-		t.Evidence.Head != t.HeadSHA || t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || len(t.Evidence.Checks) == 0 || t.Evidence.Reviews["designer"] == "" {
+		t.Evidence.Head != t.HeadSHA || t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || len(t.Evidence.Checks) == 0 || !completedReviewRoster(t.Evidence) || t.Evidence.Reviews["designer"] == "" {
 		return false
 	}
 	findings, ok := directFixFindings(t)

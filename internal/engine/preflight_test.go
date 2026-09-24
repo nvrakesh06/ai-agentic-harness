@@ -245,7 +245,7 @@ func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
 			{Role: "designer", Severity: "high", Category: "text-layout", Location: "src/labels.tsx:58", Reason: "Non-breaking-space labels bypass text-fit measurement and overflow.", Resolution: "Replace NBSP labels before the text-fit validation test."},
 		},
 	}
-	task.Evidence = &model.Evidence{Base: effective.BaseSHA, Head: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: []string{"native check passed"}, Reviews: map[string]string{"designer": "one bounded layout defect"}, ReviewRoster: []string{"designer"}}
+	task.Evidence = &model.Evidence{Base: effective.BaseSHA, Head: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: []string{"native check passed"}, Reviews: map[string]string{"designer": "two bounded layout defects", "reviewer": "completed", "qa": "completed", "security": "completed"}, ReviewRoster: []string{"designer", "reviewer", "qa", "security"}}
 	p := directFixWaiver(task, effective, required)
 	if p == nil || p.DirectFix == nil || p.DirectFix.Role != "designer" || p.Phase != "queued" {
 		t.Fatalf("eligible exact-head review did not produce a structured designer waiver: %+v", p)
@@ -262,6 +262,22 @@ func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
 	vague.Findings = []model.Finding{{Role: "designer", Severity: "high", Category: "text-layout", Location: "src/labels.tsx:58", Reason: "Label looks wrong", Resolution: "Make label better."}}
 	if directFixWaiver(vague, effective, required) != nil {
 		t.Fatal("vague visual finding bypassed the designer preflight")
+	}
+	generic := model.Clone(&model.Snapshot{Tasks: map[string]*model.Task{"ui": task}}).Tasks["ui"]
+	generic.State = model.Review
+	generic.Findings = []model.Finding{{Role: "designer", Severity: "high", Category: "layout", Location: "src/labels.tsx:58", Reason: "Spacing is wrong", Resolution: "Adjust layout"}}
+	if directFixWaiver(generic, effective, required) != nil {
+		t.Fatal("generic spacing/layout finding bypassed the designer preflight")
+	}
+	incompleteReview := model.Clone(&model.Snapshot{Tasks: map[string]*model.Task{"ui": task}}).Tasks["ui"]
+	incompleteReview.State = model.Review
+	delete(incompleteReview.Evidence.Reviews, "qa")
+	if directFixWaiver(incompleteReview, effective, required) != nil {
+		t.Fatal("missing QA review completion bypassed the designer preflight")
+	}
+	incompleteReview.State = model.Fix
+	if directFixWaiverMatches(p, incompleteReview, effective) {
+		t.Fatal("missing QA review completion was accepted on writer-admission replay")
 	}
 	for _, changed := range []struct {
 		name      string
