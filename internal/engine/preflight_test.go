@@ -233,3 +233,49 @@ func TestCompletedPreflightReusesOnlyBoundedUnchangedFixScope(t *testing.T) {
 		})
 	}
 }
+
+func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
+	effective := config.Effective{BaseSHA: strings.Repeat("a", 40), Hash: strings.Repeat("b", 64)}
+	required := []roles.Role{{Name: "designer", Stage: "review"}, {Name: "custom-ui", Stage: "pre-implementation"}}
+	task := &model.Task{
+		ID: "ui", State: model.Review, HeadSHA: strings.Repeat("c", 40), Objective: "Repair the caption layout", Acceptance: []string{"caption fits"},
+		Areas: []string{"ui"}, Domains: []string{"ui"}, Risk: "low", UI: true,
+		Findings: []model.Finding{{Role: "designer", Severity: "high", Category: "text-layout", Location: "src/caption.tsx:42", Reason: "Caption overlaps the coordinator label at narrow widths.", Resolution: "Wrap the caption in the existing text-fit component."}},
+	}
+	task.Evidence = &model.Evidence{Base: effective.BaseSHA, Head: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: []string{"native check passed"}, Reviews: map[string]string{"designer": "one bounded layout defect"}, ReviewRoster: []string{"designer"}}
+	p := directFixWaiver(task, effective, required)
+	if p == nil || p.DirectFix == nil || p.DirectFix.Role != "designer" || p.Phase != "queued" {
+		t.Fatalf("eligible exact-head review did not produce a structured designer waiver: %+v", p)
+	}
+	task.State = model.Fix
+	if !directFixWaiverMatches(p, task, effective) || !preflightRoleSatisfied(p, task, effective, required[0]) {
+		t.Fatal("valid direct FIX waiver was not accepted for the built-in designer")
+	}
+	if preflightRoleSatisfied(p, task, effective, required[1]) {
+		t.Fatal("direct FIX waiver completed a custom pre-implementation role")
+	}
+	for _, changed := range []struct {
+		name      string
+		edit      func(*model.Task)
+		effective config.Effective
+	}{
+		{"head", func(t *model.Task) { t.HeadSHA = strings.Repeat("d", 40) }, effective},
+		{"config", func(*model.Task) {}, config.Effective{BaseSHA: effective.BaseSHA, Hash: strings.Repeat("d", 64)}},
+		{"rules", func(*model.Task) {}, effective},
+		{"finding", func(t *model.Task) { t.Findings[0].Resolution = "Use a different component." }, effective},
+		{"security", func(t *model.Task) { t.Security = true }, effective},
+		{"schema sensitivity", func(t *model.Task) { t.Objective = "Repair the schema label layout" }, effective},
+	} {
+		t.Run(changed.name, func(t *testing.T) {
+			copy := model.Clone(&model.Snapshot{Tasks: map[string]*model.Task{"ui": task}}).Tasks["ui"]
+			changed.edit(copy)
+			if changed.name == "rules" {
+				p.DirectFix.Rules = strings.Repeat("d", 64)
+				defer func() { p.DirectFix.Rules = roles.Hash() }()
+			}
+			if directFixWaiverMatches(p, copy, changed.effective) {
+				t.Fatal("stale or sensitive direct FIX waiver was accepted")
+			}
+		})
+	}
+}

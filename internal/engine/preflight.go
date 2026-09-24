@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -52,6 +53,94 @@ func reusePreflightForFix(p *model.Preflight, t *model.Task, effective config.Ef
 	}
 	reusePreflight(p, t)
 	return true
+}
+
+func findingsFingerprint(findings []model.Finding) string {
+	copy := append([]model.Finding(nil), findings...)
+	sort.Slice(copy, func(i, j int) bool {
+		left, _ := json.Marshal(copy[i])
+		right, _ := json.Marshal(copy[j])
+		return string(left) < string(right)
+	})
+	b, _ := json.Marshal(copy)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+var directFixLocation = regexp.MustCompile(`^[A-Za-z0-9_./-]+\.(?:tsx|jsx|css|scss|html|vue|svelte):[1-9][0-9]*$`)
+
+func directFixSensitive(text string) bool {
+	text = strings.ToLower(text)
+	for _, marker := range []string{"schema", "migration", "security", "auth", "secret", "permission", "credential", "architecture", "policy", "dependency", "package", "lockfile", "api contract", "database", "serialize", "network", "subprocess"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func directFixFinding(t *model.Task) (model.Finding, bool) {
+	if t == nil || !t.UI || t.Security || t.Risk != "low" || len(t.Dependencies) != 0 || len(t.Findings) != 1 {
+		return model.Finding{}, false
+	}
+	finding := t.Findings[0]
+	category := strings.ToLower(strings.TrimSpace(finding.Category))
+	if finding.Role != "designer" || (category != "visual" && category != "layout" && category != "text-layout" && category != "text layout") ||
+		!directFixLocation.MatchString(strings.TrimSpace(finding.Location)) || len(strings.TrimSpace(finding.Resolution)) < 12 {
+		return model.Finding{}, false
+	}
+	detail := strings.ToLower(strings.Join([]string{finding.Category, finding.Location, finding.Reason, finding.Resolution}, " "))
+	if directFixSensitive(detail) || (!strings.Contains(detail, "text") && !strings.Contains(detail, "layout") && !strings.Contains(detail, "caption") && !strings.Contains(detail, "label") && !strings.Contains(detail, "overlap") && !strings.Contains(detail, "typograph")) {
+		return model.Finding{}, false
+	}
+	for _, ambiguous := range []string{"?", "maybe", "might", "consider", "investigate", "unclear", "unknown"} {
+		if strings.Contains(detail, ambiguous) {
+			return model.Finding{}, false
+		}
+	}
+	guidance := make([]string, 0, len(model.TaskGuidance(t)))
+	for _, item := range model.TaskGuidance(t) {
+		guidance = append(guidance, item.Text)
+	}
+	if directFixSensitive(strings.Join(append(append(append(append(append([]string{t.Objective}, t.Acceptance...), t.Areas...), t.Domains...), t.Roles...), guidance...), " ")) {
+		return model.Finding{}, false
+	}
+	return finding, true
+}
+
+// directFixWaiver is deliberately narrower than normal FIX guidance reuse. It
+// records only a completed built-in designer review of one exact visual repair.
+func directFixWaiver(t *model.Task, effective config.Effective, required []roles.Role) *model.Preflight {
+	if t == nil || t.State != model.Review || t.Evidence == nil || t.Evidence.Base != effective.BaseSHA || t.Evidence.Head != t.HeadSHA ||
+		t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || len(t.Evidence.Checks) == 0 || t.Evidence.Reviews["designer"] == "" {
+		return nil
+	}
+	if !slices.Contains(t.Evidence.ReviewRoster, "designer") || !slices.ContainsFunc(required, func(role roles.Role) bool { return role.Name == "designer" && role.Stage == "review" }) {
+		return nil
+	}
+	finding, ok := directFixFinding(t)
+	if !ok {
+		return nil
+	}
+	scope := preflightScope(t)
+	return &model.Preflight{Phase: "queued", BaseSHA: effective.BaseSHA, HeadSHA: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Scope: scope,
+		ReuseReason: "direct FIX route: waived built-in designer preflight after exact-head native checks and one located text-layout review finding",
+		DirectFix:   &model.DirectFixWaiver{Role: "designer", Disposition: "waived", Reason: "completed exact-head designer review identified one specific visual/text-layout repair", BaseSHA: effective.BaseSHA, HeadSHA: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Scope: scope, Findings: findingsFingerprint([]model.Finding{finding})}}
+}
+
+func directFixWaiverMatches(p *model.Preflight, t *model.Task, effective config.Effective) bool {
+	if p == nil || p.DirectFix == nil || !preflightMatches(p, t, effective) || t == nil || t.Evidence == nil || t.Evidence.Base != effective.BaseSHA ||
+		t.Evidence.Head != t.HeadSHA || t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || len(t.Evidence.Checks) == 0 || t.Evidence.Reviews["designer"] == "" {
+		return false
+	}
+	finding, ok := directFixFinding(t)
+	w := p.DirectFix
+	return ok && w.Role == "designer" && w.Disposition == "waived" && w.BaseSHA == effective.BaseSHA && w.HeadSHA == t.HeadSHA &&
+		w.Config == effective.Hash && w.Rules == roles.Hash() && w.Scope == preflightScope(t) && w.Findings == findingsFingerprint([]model.Finding{finding})
+}
+
+func preflightRoleSatisfied(p *model.Preflight, t *model.Task, effective config.Effective, role roles.Role) bool {
+	return slices.Contains(p.Completed, role.Name) || (role.Name == "designer" && role.Stage == "review" && directFixWaiverMatches(p, t, effective))
 }
 
 type preflightScopeInput struct {
@@ -208,7 +297,7 @@ func (c *Controller) preflight(id string) {
 		if t == nil || !preflightMatches(t.Preflight, t, effective) {
 			return
 		}
-		if slices.Contains(t.Preflight.Completed, r.Name) {
+		if preflightRoleSatisfied(t.Preflight, t, effective, r) {
 			continue
 		}
 		if err = c.mutate(func(s *model.Snapshot) error {
@@ -291,7 +380,7 @@ func (c *Controller) admitWriter(id string, active map[string]bool) (bool, error
 		return false, err
 	}
 	for _, role := range pre {
-		if !slices.Contains(t.Preflight.Completed, role.Name) {
+		if !preflightRoleSatisfied(t.Preflight, t, effective, role) {
 			return false, c.mutate(func(s *model.Snapshot) error { s.Tasks[id].Preflight = nil; return nil })
 		}
 	}
@@ -319,10 +408,24 @@ func (c *Controller) admitWriter(id string, active map[string]bool) (bool, error
 	if count >= c.P.Config.Project.MaxWriters {
 		return false, nil
 	}
-	return true, c.mutate(func(s *model.Snapshot) error {
+	admitted := true
+	err = c.mutate(func(s *model.Snapshot) error {
 		task := s.Tasks[id]
 		if task == nil || task.Preflight == nil || task.Preflight.Phase != "ready" {
-			return errors.New("preflight changed during writer admission")
+			admitted = false
+			return nil
+		}
+		if !preflightMatches(task.Preflight, task, effective) {
+			task.Preflight = nil
+			admitted = false
+			return nil
+		}
+		for _, role := range pre {
+			if !preflightRoleSatisfied(task.Preflight, task, effective, role) {
+				task.Preflight = nil
+				admitted = false
+				return nil
+			}
 		}
 		if err := model.Transition(task, model.Running); err != nil {
 			return err
@@ -330,4 +433,5 @@ func (c *Controller) admitWriter(id string, active map[string]bool) (bool, error
 		task.Preflight.Phase = "writing"
 		return nil
 	})
+	return admitted, err
 }
