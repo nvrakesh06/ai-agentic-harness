@@ -41,6 +41,25 @@ func reusablePreflightForFix(p *model.Preflight, t *model.Task, effective config
 	return true
 }
 
+// reusablePreflightForContinuation keeps a completed specialist pass with the
+// same task contract when its implementer publishes an in-progress checkpoint.
+// Unlike a retry after a failed check or review, this is the same writer slice:
+// no new finding or task input is introduced. The exact-head record is advanced
+// only after the supervisor has durably checkpointed the writer's edits.
+func reusablePreflightForContinuation(p *model.Preflight, t *model.Task, effective config.Effective, required []roles.Role) bool {
+	if p == nil || t == nil || (t.State != model.Ready && t.State != model.Fix) || p.Phase != "writing" || p.HeadSHA == t.HeadSHA ||
+		p.BaseSHA != effective.BaseSHA || p.Config != effective.Hash || p.Rules != roles.Hash() ||
+		p.Scope == "" || p.Scope != preflightScope(t, effective) || p.ReuseCount >= effective.Policy.ImplementationRetries {
+		return false
+	}
+	for _, role := range required {
+		if !slices.Contains(p.Completed, role.Name) {
+			return false
+		}
+	}
+	return true
+}
+
 func reusePreflight(p *model.Preflight, t *model.Task) {
 	p.HeadSHA = t.HeadSHA
 	p.Phase = "ready"
@@ -54,6 +73,32 @@ func reusePreflightForFix(p *model.Preflight, t *model.Task, effective config.Ef
 	}
 	reusePreflight(p, t)
 	return true
+}
+
+func reusePreflightForContinuation(p *model.Preflight, t *model.Task, effective config.Effective, required []roles.Role) bool {
+	if !reusablePreflightForContinuation(p, t, effective, required) {
+		return false
+	}
+	reusePreflight(p, t)
+	p.ReuseReason = "resumed implementer checkpoint with completed pre-implementation guidance: scope, base, policy, and role rules unchanged"
+	return true
+}
+
+// humanContinuationEvidence is deliberately strict. A free-form answer can
+// alter a product decision without changing a schema field, so it cannot reuse
+// specialist advice. The sole exception is an answer that identifies the
+// current durable checkpoint and does not ask for a new decision or specialist
+// direction.
+func humanContinuationEvidence(t *model.Task, answer string) bool {
+	if t == nil || len(t.HeadSHA) < 7 {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(answer))
+	head := strings.ToLower(t.HeadSHA)
+	if !strings.Contains(text, head) && !strings.Contains(text, head[:7]) {
+		return false
+	}
+	return !containsAny(text, "architecture", "security", "ambigu", "product decision", "new requirement", "change the objective", "design advice", "specialist advice", "threat model", "authorize")
 }
 
 func findingsFingerprint(findings []model.Finding) string {

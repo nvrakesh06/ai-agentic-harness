@@ -284,6 +284,55 @@ func TestCompletedPreflightReusesOnlyBoundedUnchangedFixScope(t *testing.T) {
 	}
 }
 
+func TestCompletedPreflightReusesUnchangedImplementerCheckpointOnly(t *testing.T) {
+	effective := config.Effective{BaseSHA: "base", Hash: "config", Policy: config.Policy{ImplementationRetries: 2}}
+	required := []roles.Role{{Name: "designer", Stage: "pre-implementation"}}
+	newTask := func() *model.Task {
+		return &model.Task{State: model.Ready, HeadSHA: "new-head", Objective: "repair the UI", Acceptance: []string{"works"}, Areas: []string{"ui"}, Domains: []string{"ui"}, UI: true}
+	}
+	newPreflight := func(task *model.Task) *model.Preflight {
+		return &model.Preflight{Phase: "writing", BaseSHA: "base", HeadSHA: "old-head", Config: "config", Rules: roles.Hash(), Scope: preflightScope(task, effective), Completed: []string{"designer"}}
+	}
+	task := newTask()
+	p := newPreflight(task)
+	if !reusePreflightForContinuation(p, task, effective, required) || p.Phase != "ready" || p.HeadSHA != task.HeadSHA || !strings.Contains(p.ReuseReason, "checkpoint") {
+		t.Fatalf("unchanged checkpoint did not retain writer-ready guidance: %+v", p)
+	}
+	for _, change := range []struct {
+		name   string
+		update func(*model.Preflight, *model.Task, *config.Effective)
+	}{
+		{"incomplete role", func(p *model.Preflight, _ *model.Task, _ *config.Effective) { p.Completed = nil }},
+		{"scope", func(_ *model.Preflight, task *model.Task, _ *config.Effective) { task.Objective = "redesign the UI" }},
+		{"policy", func(_ *model.Preflight, _ *model.Task, effective *config.Effective) { effective.Hash = "changed" }},
+		{"wrong phase", func(p *model.Preflight, _ *model.Task, _ *config.Effective) { p.Phase = "ready" }},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			task, effective := newTask(), effective
+			p := newPreflight(task)
+			change.update(p, task, &effective)
+			if reusePreflightForContinuation(p, task, effective, required) {
+				t.Fatal("stale checkpoint reused specialist guidance")
+			}
+		})
+	}
+}
+
+func TestHumanContinuationEvidenceRequiresExactCheckpointAndNoNewDecision(t *testing.T) {
+	task := &model.Task{HeadSHA: strings.Repeat("a", 40)}
+	if !humanContinuationEvidence(task, "The concrete browser fix is verified at checkpoint aaaaaaa on the task branch.") {
+		t.Fatal("exact checkpoint evidence was rejected")
+	}
+	for _, answer := range []string{
+		"The concrete browser fix is verified on the task branch.",
+		"Checkpoint aaaaaaa needs architecture advice before continuing.",
+	} {
+		if humanContinuationEvidence(task, answer) {
+			t.Fatalf("unsafe human answer reused guidance: %q", answer)
+		}
+	}
+}
+
 func TestDirectFixWaiverRequiresExactReviewedTextLayoutRepair(t *testing.T) {
 	effective := config.Effective{BaseSHA: strings.Repeat("a", 40), Hash: strings.Repeat("b", 64), Files: map[string]string{
 		".aih/roles/animation-architecture.yaml": "name: animation-architecture\nextends: reviewer\nstage: review\n",

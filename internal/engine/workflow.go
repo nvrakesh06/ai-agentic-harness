@@ -749,6 +749,8 @@ func (c *Controller) implement(id string) bool {
 		c.block(id, r.Question, r.Summary, model.Ready)
 		return false
 	case "in_progress":
+		preflightRoles, preflightErr := requiredPreflightRoles(effective, c.Snapshot().Tasks[id])
+		resumed := false
 		_ = c.mutate(func(s *model.Snapshot) error {
 			t := s.Tasks[id]
 			t.Rotations++
@@ -757,8 +759,21 @@ func (c *Controller) implement(id string) bool {
 				return nil
 			}
 			t.Decisions = append(t.Decisions, "Checkpoint: "+r.Summary)
-			return model.Transition(t, model.Ready)
+			if err := model.Transition(t, model.Ready); err != nil {
+				return err
+			}
+			if preflightErr == nil && !preflightHumanDecision(r) {
+				resumed = reusePreflightForContinuation(t.Preflight, t, effective, preflightRoles)
+			}
+			if resumed {
+				t.Decisions = append(t.Decisions, "Checkpoint continuation: reused completed pre-implementation guidance at "+t.HeadSHA+".")
+			}
+			return nil
 		})
+		if resumed {
+			current := c.Snapshot().Tasks[id]
+			_ = c.P.DB.Event(id, current.RunID, "implementer", effective.Project.Provider, "checkpoint_continuation_admitted", "checkpoint="+current.HeadSHA+"; prior guidance reused without another preflight")
+		}
 		return false
 	case "failed":
 		c.retry(id, "implementation", r.Summary)
