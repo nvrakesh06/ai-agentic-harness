@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/buildinfo"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/demo"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/engine"
@@ -428,6 +429,9 @@ func background(cmd *cobra.Command, p *engine.Project) error {
 	if e = p.DB.Set("pid", ""); e != nil {
 		return e
 	}
+	if e = p.DB.Set(engine.LocalSupervisorBuildKey, ""); e != nil {
+		return e
+	}
 	if e = p.DB.Set("last_error", ""); e != nil {
 		return e
 	}
@@ -485,6 +489,19 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 	if s.Capacity.MaxLightChecks == 0 {
 		s.Capacity.MaxLightChecks = p.Config.Project.Resources.MaxLightChecks
 	}
+	localActive := active(p)
+	invokedBuild := buildinfo.Current()
+	var supervisorBuild *buildinfo.Identity
+	if localActive {
+		var recorded buildinfo.Identity
+		if json.Unmarshal([]byte(p.DB.Get(engine.LocalSupervisorBuildKey)), &recorded) == nil && recorded.Version != "" {
+			supervisorBuild = &recorded
+		}
+	}
+	buildsDiffer := supervisorBuild != nil && (supervisorBuild.Version != invokedBuild.Version ||
+		supervisorBuild.StateSchema != invokedBuild.StateSchema ||
+		(supervisorBuild.Commit != "" && invokedBuild.Commit != "" &&
+			(supervisorBuild.Commit != invokedBuild.Commit || supervisorBuild.Dirty != invokedBuild.Dirty)))
 	if asJSON {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -494,12 +511,15 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		}
 		return enc.Encode(struct {
 			*model.Snapshot
-			MachineMaxHeavyChecks int `json:"machine_max_heavy_checks"`
-		}{s, machineHeavy})
+			MachineMaxHeavyChecks int                 `json:"machine_max_heavy_checks"`
+			ActiveSupervisorBuild *buildinfo.Identity `json:"active_supervisor_build,omitempty"`
+			InvokedBinaryBuild    buildinfo.Identity  `json:"invoked_binary_build"`
+			BuildsDiffer          bool                `json:"builds_differ"`
+		}{s, machineHeavy, supervisorBuild, invokedBuild, buildsDiffer})
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Project %s · durable revision %d (%s)\n", s.Project, s.Revision, shortSHA(h))
 	fmt.Fprintf(cmd.OutOrStdout(), "Controller: %s · durable heartbeat %s · lease expires %s\n", s.Controller.Machine, s.Controller.Heartbeat.Format(time.RFC3339), s.Controller.Expires.Format(time.RFC3339))
-	if active(p) {
+	if localActive {
 		local := p.DB.Get(engine.LocalLeaseHeartbeatKey)
 		if heartbeat, err := time.Parse(time.RFC3339Nano, local); err == nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "Local supervisor: active · local heartbeat %s (durable renewals are coalesced)\n", heartbeat.Format(time.RFC3339))
@@ -508,6 +528,15 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		}
 	} else {
 		fmt.Fprintln(cmd.OutOrStdout(), "Local supervisor: stopped")
+	}
+	if supervisorBuild != nil {
+		fmt.Fprintln(cmd.OutOrStdout(), "Active supervisor build:", supervisorBuild.Label())
+	} else if localActive {
+		fmt.Fprintln(cmd.OutOrStdout(), "Active supervisor build: unavailable (older supervisor)")
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "Invoked binary build:", invokedBuild.Label())
+	if buildsDiffer {
+		fmt.Fprintln(cmd.OutOrStdout(), "Build mismatch: the active supervisor differs from this command binary; a controlled handoff is required to activate this binary.")
 	}
 	if message := p.DB.Get("last_error"); message != "" {
 		fmt.Fprintln(cmd.OutOrStdout(), "Last supervisor error:", message)

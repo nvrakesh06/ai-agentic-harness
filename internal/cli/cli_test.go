@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nvrakesh06/ai-agentic-harness/internal/buildinfo"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/engine"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
@@ -288,6 +290,62 @@ func TestStatusDistinguishesLocalAndDurableLeaseHeartbeats(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("status omitted %q: %s", want, out.String())
 		}
+	}
+}
+
+func TestStatusShowsActiveBuildAndInvokingBinaryMismatch(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err = db.Save(strings.Repeat("a", 40), model.NewSnapshot("project123")); err != nil {
+		t.Fatal(err)
+	}
+	invoked := buildinfo.Current()
+	other := buildinfo.Identity{Version: invoked.Version, StateSchema: invoked.StateSchema + 1, Commit: strings.Repeat("f", 40)}
+	if other.Commit == invoked.Commit {
+		other.Commit = strings.Repeat("e", 40)
+	}
+	recorded, err := json.Marshal(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Set(engine.LocalSupervisorBuildKey, string(recorded)); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := platform.Acquire(filepath.Join(dir, "supervisor.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	cmd := New()
+	var human bytes.Buffer
+	cmd.SetOut(&human)
+	if err = showStatus(cmd, &engine.Project{Dir: dir, DB: db}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Active supervisor build: " + other.Label(), "Invoked binary build:", "Build mismatch:", "controlled handoff"} {
+		if !strings.Contains(human.String(), want) {
+			t.Fatalf("human status omitted %q: %s", want, human.String())
+		}
+	}
+	var machine bytes.Buffer
+	cmd.SetOut(&machine)
+	if err = showStatus(cmd, &engine.Project{Dir: dir, DB: db}, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		ActiveSupervisorBuild *buildinfo.Identity `json:"active_supervisor_build"`
+		InvokedBinaryBuild    buildinfo.Identity  `json:"invoked_binary_build"`
+		BuildsDiffer          bool                `json:"builds_differ"`
+	}
+	if err = json.Unmarshal(machine.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ActiveSupervisorBuild == nil || result.ActiveSupervisorBuild.Commit != other.Commit || result.InvokedBinaryBuild != invoked || !result.BuildsDiffer {
+		t.Fatalf("wrong machine build status: %+v", result)
 	}
 }
 
