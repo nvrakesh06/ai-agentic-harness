@@ -75,7 +75,7 @@ func TestEligibleOperatorGuidanceInvalidatesPreflightButStalePolicyDoesNot(t *te
 	task := &model.Task{ID: "ui", State: model.Running, HeadSHA: head}
 	baseline := preflightScope(task, effective)
 	p := &model.Preflight{Phase: "ready", BaseSHA: head, HeadSHA: head, Config: configHash, Rules: rules, Scope: baseline}
-	if err := model.QueueOperatorGuidance(task, "operator", head, configHash, rules, "Use the owned endpoint."); err != nil {
+	if err := model.QueueOperatorGuidance(task, "operator", head, head, configHash, rules, "Use the owned endpoint."); err != nil {
 		t.Fatal(err)
 	}
 	if preflightMatches(p, task, effective) {

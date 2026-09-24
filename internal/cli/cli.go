@@ -191,6 +191,13 @@ func New() *cobra.Command {
 		defer p.DB.Close()
 		payload := map[string]any{"source_task": guidanceSource, "text": string(contents)}
 		if operatorGuidance {
+			if err = p.Git.Fetch(cmd.Context()); err != nil {
+				return err
+			}
+			effective, err := engine.Canonical(cmd.Context(), p.Git)
+			if err != nil {
+				return err
+			}
 			snapshot, _, loadErr := p.DB.Load()
 			if loadErr != nil {
 				return loadErr
@@ -205,10 +212,11 @@ func New() *cobra.Command {
 				scopeHead = target.BaseSHA
 			}
 			payload["head"] = scopeHead
-			payload["config"] = p.Config.Hash
+			payload["base"] = effective.BaseSHA
+			payload["config"] = effective.Hash
 			payload["rules"] = roles.Hash()
 			probe := *target
-			if err := model.QueueOperatorGuidance(&probe, "local-preflight", scopeHead, p.Config.Hash, roles.Hash(), string(contents)); err != nil {
+			if err := model.QueueOperatorGuidance(&probe, "local-preflight", scopeHead, effective.BaseSHA, effective.Hash, roles.Hash(), string(contents)); err != nil {
 				return err
 			}
 		}

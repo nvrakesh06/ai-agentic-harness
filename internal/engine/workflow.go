@@ -273,6 +273,15 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 	}
 	runtimeDir := filepath.Join(c.P.Dir, "sessions", id)
 	prompt := roles.Compile(e, r, runtime.GOOS, t, objective, diff, evidence)
+	if r.Name == "implementer" && t != nil {
+		guidance := model.EligibleGuidance(t, e.BaseSHA, e.Hash, roles.Hash())
+		if err := c.mutate(func(s *model.Snapshot) error {
+			model.MarkOperatorGuidanceDelivered(s.Tasks[t.ID], guidance)
+			return nil
+		}); err != nil {
+			return provider.Result{}, err
+		}
+	}
 	var err error
 	scratch := ""
 	if t != nil {
@@ -744,6 +753,7 @@ func completeNativeOnlyImplementation(task *model.Task, guidanceAtStart int, gua
 
 func replayLateGuidance(task *model.Task, guidanceAtStart int) (bool, error) {
 	if len(model.TaskGuidance(task)) > guidanceAtStart {
+		model.CarryLateOperatorGuidance(task, guidanceAtStart)
 		task.Decisions = append(task.Decisions, "Checkpoint: task guidance arrived while this implementer invocation was running; next bounded pass must reconcile it.")
 		return true, model.Transition(task, model.Ready)
 	}
