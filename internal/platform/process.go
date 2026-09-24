@@ -77,6 +77,10 @@ type ManagedProcess struct {
 	Stdout io.ReadCloser
 	cmd    *exec.Cmd
 	done   chan error
+	wait   chan struct{}
+	mu     sync.Mutex
+	err    error
+	stderr *limitedBuffer
 	stop   func()
 	kill   func() error
 	clean  func()
@@ -118,13 +122,41 @@ func StartManaged(ctx context.Context, dir string, env []string, name string, ar
 		lifeline()
 		return nil, err
 	}
-	p := &ManagedProcess{Stdout: stdout, cmd: cmd, done: make(chan error, 1), kill: kill}
+	p := &ManagedProcess{Stdout: stdout, cmd: cmd, done: make(chan error, 1), wait: make(chan struct{}), kill: kill, stderr: &stderr}
 	p.stop = func() {
 		_ = stopProcess(p.done, kill, cmd.Process.Kill)
 	}
 	p.clean = func() { cleanup(); lifeline() }
-	go func() { p.done <- cmd.Wait() }()
+	go func() {
+		err := cmd.Wait()
+		p.mu.Lock()
+		p.err = err
+		p.mu.Unlock()
+		close(p.wait)
+		p.done <- err
+	}()
 	return p, nil
+}
+
+// Wait returns the child exit result without consuming the termination signal
+// that Close uses to prove an owned process tree has stopped.
+func (p *ManagedProcess) Wait() error {
+	if p == nil {
+		return nil
+	}
+	<-p.wait
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.err
+}
+
+// Stderr returns diagnostics captured from the managed child.
+func (p *ManagedProcess) Stderr() string {
+	if p == nil || p.stderr == nil {
+		return ""
+	}
+	text, _ := p.stderr.snapshot()
+	return text
 }
 
 // Close kills the owned child tree and waits for it before releasing ownership.
