@@ -37,6 +37,24 @@ func TestPublishRetriesTransientTransportWithSameLeases(t *testing.T) {
 	}
 }
 
+func TestPublishRetriesRemoteInternalServerErrorWithSameLease(t *testing.T) {
+	update := Update{Branch: "aih-state", Old: strings.Repeat("a", 40), New: strings.Repeat("b", 40)}
+	pushes := 0
+	err := publishWithRetry(context.Background(), []Update{update}, []string{"fenced"},
+		func(context.Context, []string) error {
+			pushes++
+			if pushes == 1 {
+				return errors.New("! ref [remote rejected] (Internal Server Error)\nremote: Internal Server Error")
+			}
+			return nil
+		},
+		func(context.Context, string) (string, error) { return update.Old, nil },
+		func(context.Context, time.Duration) error { return nil }, 3)
+	if err != nil || pushes != 2 {
+		t.Fatalf("transient GitHub 500 stopped fenced publication: pushes=%d err=%v", pushes, err)
+	}
+}
+
 func TestPublishLostAcknowledgementRequiresAllAtomicRefs(t *testing.T) {
 	updates := []Update{
 		{Branch: "main", Old: strings.Repeat("a", 40), New: strings.Repeat("b", 40)},
