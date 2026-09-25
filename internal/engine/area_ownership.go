@@ -241,8 +241,38 @@ func trustedBaselineFinding(origin *model.Task, paths []string, finding model.Fi
 
 func reviewFindingBlocksOrigin(origin *model.Task, paths []string, required []roles.Role) func(model.Finding) bool {
 	return func(finding model.Finding) bool {
+		finding = normalizedReviewFinding(finding)
+		// Relevance is a causal claim, not a severity downgrade. A reviewer
+		// that cannot establish it must keep the origin open for repair even
+		// when its normal severity threshold would not do so.
+		if finding.Relevance == model.FindingUnknown {
+			return true
+		}
+		// Security's review contract says every concern remains blocking. Keep
+		// that rule separate from its critical/high default severity threshold.
+		for _, role := range required {
+			if role.Name == finding.Role && (role.Name == "security" || role.Extends == "security") {
+				return true
+			}
+		}
 		return findingBlocks(required, finding) && !trustedBaselineFinding(origin, paths, finding)
 	}
+}
+
+// routableReviewFindings limits cross-task handoffs to findings that the
+// reviewer attributes to the change. Baseline claims need supervisor proof and
+// unknown relevance needs origin repair, so both stay local for follow-up.
+func routableReviewFindings(findings []model.Finding) (routed, local []model.Finding) {
+	for _, finding := range findings {
+		finding = normalizedReviewFinding(finding)
+		switch finding.Relevance {
+		case model.FindingChanged, model.FindingCausal:
+			routed = append(routed, finding)
+		default:
+			local = append(local, finding)
+		}
+	}
+	return routed, local
 }
 
 func scopeError(err error) bool { var target *gitx.ScopeError; return errors.As(err, &target) }

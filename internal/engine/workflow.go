@@ -1588,8 +1588,17 @@ func (c *Controller) verifyReview(id string) error {
 	if e = c.publishReviewProgress(id, evidence); e != nil {
 		return e
 	}
-	if e = c.reviewFollowups(t, assessment.findings); e != nil {
+	routed, local := routableReviewFindings(assessment.findings)
+	route, routeErr := c.routeCrossTaskFindings(id, routed, reviewFindingBlocksOrigin(t, paths, activeRequired))
+	if routeErr != nil {
+		return routeErr
+	}
+	route.local = append(route.local, local...)
+	if e = c.reviewFollowups(t, route.local); e != nil {
 		return e
+	}
+	if route.gated {
+		return c.refreshDraftPR(id)
 	}
 	if assessment.blocking >= 0 {
 		role := activeRequired[assessment.blocking]
@@ -1665,8 +1674,17 @@ func (c *Controller) verifyReview(id string) error {
 		if e = c.publishReviewProgress(id, evidence); e != nil {
 			return e
 		}
-		if e = c.reviewFollowups(t, refreshAssessment.findings); e != nil {
+		refreshedRouted, refreshedLocal := routableReviewFindings(refreshAssessment.findings)
+		refreshRoute, routeErr := c.routeCrossTaskFindings(id, refreshedRouted, reviewFindingBlocksOrigin(t, paths, refreshRoles))
+		if routeErr != nil {
+			return routeErr
+		}
+		refreshRoute.local = append(refreshRoute.local, refreshedLocal...)
+		if e = c.reviewFollowups(t, refreshRoute.local); e != nil {
 			return e
+		}
+		if refreshRoute.gated {
+			return c.refreshDraftPR(id)
 		}
 		if refreshAssessment.blocking >= 0 {
 			role := refreshRoles[refreshAssessment.blocking]
