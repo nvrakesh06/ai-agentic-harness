@@ -157,7 +157,8 @@ func TestRecoveryReusesEarlyDraftPR(t *testing.T) {
 	// This fixture deliberately blocks a real managed check while it records and
 	// recovers a draft PR. Keep its short admission deadline independent from
 	// sibling lifecycle fixtures in ordinary package test runs.
-	ctx := contextWithTimeout(t, 90*time.Second)
+	ctx := context.Background()
+	firstCtx := contextWithTimeout(t, 90*time.Second)
 	tmp := t.TempDir()
 	marker := filepath.Join(tmp, "check-started")
 	release := filepath.Join(tmp, "check-release")
@@ -173,9 +174,9 @@ func TestRecoveryReusesEarlyDraftPR(t *testing.T) {
 	defer f.P.DB.Close()
 	seedReadyTask(t, ctx, f, "recover-draft")
 	firstDone := make(chan error, 1)
-	go func() { firstDone <- engine.New(f.P).Serve(ctx) }()
+	go func() { firstDone <- engine.New(f.P).Serve(firstCtx) }()
 	waitForPR(t, contextWithTimeout(t, 30*time.Second), f, func(updates []demo.PullUpdate) bool { return len(updates) > 0 })
-	if err = waitForMarker(ctx, marker, firstDone); err != nil {
+	if err = waitForMarker(firstCtx, marker, firstDone); err != nil {
 		t.Fatal(err)
 	}
 	pulls, _ := f.Hub.Pulls()
@@ -194,8 +195,7 @@ func TestRecoveryReusesEarlyDraftPR(t *testing.T) {
 	if err = os.WriteFile(release, []byte("continue"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	secondCtx, secondCancel := context.WithTimeout(ctx, 90*time.Second)
-	defer secondCancel()
+	secondCtx := contextWithTimeout(t, 90*time.Second)
 	secondDone := make(chan error, 1)
 	go func() { secondDone <- engine.New(f.P).Serve(secondCtx) }()
 	waitForPR(t, secondCtx, f, func(updates []demo.PullUpdate) bool {
