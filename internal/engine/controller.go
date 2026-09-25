@@ -112,6 +112,17 @@ func leaseRenewalDue(lease model.Lease, now time.Time, duration time.Duration) b
 	return !lease.Expires.After(now.Add(duration / 2))
 }
 
+// leasePublicationContext fences mutating retries at either the currently
+// durable expiry or the proposed acquisition expiry. A failed acquisition is
+// never allowed to publish after the lease it proposes has already expired.
+func (c *Controller) leasePublicationContext(ctx context.Context, expires time.Time) (context.Context, context.CancelFunc, error) {
+	if !expires.After(c.nowUTC()) {
+		return nil, nil, ErrLease
+	}
+	publishCtx, cancel := context.WithDeadline(ctx, expires)
+	return publishCtx, cancel, nil
+}
+
 func (c *Controller) acquire(ctx context.Context) error {
 	s, h, e := c.P.Git.Load(ctx)
 	if e != nil {
@@ -135,7 +146,12 @@ func (c *Controller) acquire(ctx context.Context) error {
 		return e
 	}
 	c.traceStage("acquire: publishing controller lease")
-	if e = c.publishUpdates(ctx, []gitx.Update{{Branch: "aih-state", Old: h, New: next}}); e != nil {
+	publishCtx, publishCancel, contextErr := c.leasePublicationContext(ctx, s.Controller.Expires)
+	if contextErr != nil {
+		return contextErr
+	}
+	defer publishCancel()
+	if e = c.publishUpdates(publishCtx, []gitx.Update{{Branch: "aih-state", Old: h, New: next}}); e != nil {
 		return e
 	}
 	c.s = s
@@ -249,7 +265,12 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 	}
 	all := append([]gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}, updates...)
 	c.traceStage("persist: publishing state")
-	if e = c.publishUpdates(ctx, all); e != nil {
+	publishCtx, publishCancel, contextErr := c.leasePublicationContext(ctx, c.s.Controller.Expires)
+	if contextErr != nil {
+		return false, contextErr
+	}
+	defer publishCancel()
+	if e = c.publishUpdates(publishCtx, all); e != nil {
 		return false, e
 	}
 	for id, task := range next.Tasks {
@@ -285,7 +306,12 @@ func (c *Controller) renewLeaseLocked(ctx context.Context, now time.Time) (bool,
 		return false, e
 	}
 	c.traceStage("lease: publishing renewal")
-	if e = c.publishUpdates(ctx, []gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}); e != nil {
+	publishCtx, publishCancel, contextErr := c.leasePublicationContext(ctx, c.s.Controller.Expires)
+	if contextErr != nil {
+		return false, contextErr
+	}
+	defer publishCancel()
+	if e = c.publishUpdates(publishCtx, []gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}); e != nil {
 		return false, e
 	}
 	c.s = next

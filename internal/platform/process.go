@@ -15,7 +15,13 @@ import (
 
 var ErrLocked = errors.New("lock held by another process")
 
-var errProcessTerminationTimeout = errors.New("process termination did not complete within the bounded fallback")
+// ErrProcessTerminationUncertain means cancellation could not prove that the
+// owned child tree stopped. Callers must not repeat a mutating command because
+// the original process may still be executing it.
+var ErrProcessTerminationUncertain = errors.New("process termination did not complete within the bounded fallback")
+
+// Kept as an internal alias for existing process tests and diagnostics.
+var errProcessTerminationTimeout = ErrProcessTerminationUncertain
 
 const processTerminationGrace = 500 * time.Millisecond
 
@@ -296,7 +302,7 @@ func stopProcess(done <-chan error, terminate, fallback func() error) error {
 	if processStopped(done, processTerminationGrace) {
 		return errors.Join(terminateErr, fallbackErr)
 	}
-	return errors.Join(terminateErr, fallbackErr, errProcessTerminationTimeout)
+	return errors.Join(terminateErr, fallbackErr, ErrProcessTerminationUncertain)
 }
 
 func processStopped(done <-chan error, within time.Duration) bool {

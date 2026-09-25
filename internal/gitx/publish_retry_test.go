@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
 )
 
 func TestPublishRetriesTransientTransportWithSameLeases(t *testing.T) {
@@ -116,7 +118,7 @@ func TestPublishConfirmsLostAcknowledgementAfterTransportRecovers(t *testing.T) 
 			return update.New, nil
 		},
 		func(context.Context, time.Duration) error { return nil }, 3)
-	if err != nil || pushes != 2 || reads != 2 {
+	if err != nil || pushes != 1 || reads != 2 {
 		t.Fatalf("lost acknowledgement was not confirmed: pushes=%d reads=%d err=%v", pushes, reads, err)
 	}
 }
@@ -130,10 +132,109 @@ func TestPublishReportsExhaustedTransportRetries(t *testing.T) {
 			return errors.New("Could not resolve host: github.com")
 		},
 		func(context.Context, string) (string, error) {
-			return "", errors.New("Could not resolve host: github.com")
+			return update.Old, nil
 		},
 		func(context.Context, time.Duration) error { return nil }, 3)
 	if err == nil || pushes != 3 || !strings.Contains(err.Error(), "aih attach then aih resume") {
 		t.Fatalf("exhausted retry needs actionable recovery: pushes=%d err=%v", pushes, err)
+	}
+}
+
+func TestPublishRetriesConfirmedPushDeadlineAfterOldRefReconciliation(t *testing.T) {
+	update := Update{Branch: "aih-state", Old: strings.Repeat("a", 40), New: strings.Repeat("b", 40)}
+	pushes := 0
+	err := publishWithRetry(context.Background(), []Update{update}, []string{"fenced"},
+		func(context.Context, []string) error {
+			pushes++
+			if pushes == 1 {
+				return context.DeadlineExceeded
+			}
+			return nil
+		},
+		func(context.Context, string) (string, error) { return update.Old, nil },
+		func(context.Context, time.Duration) error { return nil }, 2)
+	if err != nil || pushes != 2 {
+		t.Fatalf("confirmed deadline was not retried safely: pushes=%d err=%v", pushes, err)
+	}
+}
+
+func TestPublishReconcilesAfterProductionShapedAttemptDeadline(t *testing.T) {
+	oldTimeout := publicationAttemptTimeout
+	publicationAttemptTimeout = time.Millisecond
+	defer func() { publicationAttemptTimeout = oldTimeout }()
+	update := Update{Branch: "aih-state", Old: strings.Repeat("a", 40), New: strings.Repeat("b", 40)}
+	pushes, reads := 0, 0
+	err := publishWithRetry(context.Background(), []Update{update}, []string{"fenced"},
+		func(ctx context.Context, _ []string) error {
+			pushes++
+			if pushes == 1 {
+				<-ctx.Done() // the bounded child deadline used by Git.Publish
+				return ctx.Err()
+			}
+			return nil
+		},
+		func(context.Context, string) (string, error) { reads++; return update.Old, nil },
+		func(context.Context, time.Duration) error { return nil }, 2)
+	if err != nil || pushes != 2 || reads != 1 {
+		t.Fatalf("attempt deadline did not reconcile under live transaction: pushes=%d reads=%d err=%v", pushes, reads, err)
+	}
+}
+
+func TestPublishNeverRetriesUnconfirmedPushTermination(t *testing.T) {
+	update := Update{Branch: "aih-state", Old: strings.Repeat("a", 40), New: strings.Repeat("b", 40)}
+	pushes := 0
+	err := publishWithRetry(context.Background(), []Update{update}, []string{"fenced"},
+		func(context.Context, []string) error {
+			pushes++
+			return errors.Join(context.DeadlineExceeded, platform.ErrProcessTerminationUncertain)
+		},
+		func(context.Context, string) (string, error) { return update.Old, nil },
+		func(context.Context, time.Duration) error { t.Fatal("unconfirmed push retried"); return nil }, 2)
+	if err == nil || pushes != 1 || !strings.Contains(err.Error(), "unconfirmed") {
+		t.Fatalf("unconfirmed termination did not fail closed: pushes=%d err=%v", pushes, err)
+	}
+}
+
+func TestPublishReadOnlyReconcileRetriesBeforeMutatingAgain(t *testing.T) {
+	update := Update{Branch: "aih-state", Old: strings.Repeat("a", 40), New: strings.Repeat("b", 40)}
+	pushes, reads := 0, 0
+	err := publishWithRetry(context.Background(), []Update{update}, []string{"fenced"},
+		func(context.Context, []string) error { pushes++; return errors.New("could not resolve host") },
+		func(context.Context, string) (string, error) {
+			reads++
+			if reads == 1 {
+				return "", errors.New("could not resolve host")
+			}
+			return update.New, nil
+		},
+		func(context.Context, time.Duration) error {
+			t.Fatal("reconciliation should acknowledge before retry")
+			return nil
+		}, 2)
+	if err != nil || pushes != 1 || reads != 2 {
+		t.Fatalf("bounded read-only reconciliation failed: pushes=%d reads=%d err=%v", pushes, reads, err)
+	}
+}
+
+func TestPublicationBudgetRetainsUncertainTerminationDiagnostic(t *testing.T) {
+	uncertain := errors.Join(context.DeadlineExceeded, platform.ErrProcessTerminationUncertain)
+	err := publicationBudgetError(uncertain, context.DeadlineExceeded)
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, platform.ErrProcessTerminationUncertain) {
+		t.Fatalf("outer budget expiry dropped process-termination uncertainty: %v", err)
+	}
+}
+
+func TestPublishNeverRetriesWhenRemoteRefCannotBeReconciled(t *testing.T) {
+	update := Update{Branch: "aih-state", Old: strings.Repeat("a", 40), New: strings.Repeat("b", 40)}
+	pushes, reads := 0, 0
+	err := publishWithRetry(context.Background(), []Update{update}, []string{"fenced"},
+		func(context.Context, []string) error { pushes++; return context.DeadlineExceeded },
+		func(context.Context, string) (string, error) { reads++; return "", context.DeadlineExceeded },
+		func(context.Context, time.Duration) error {
+			t.Fatal("unresolved ref retried mutating push")
+			return nil
+		}, 2)
+	if err == nil || pushes != 1 || reads != 3 || !strings.Contains(err.Error(), "unconfirmed") {
+		t.Fatalf("unresolved remote ref did not fail closed: pushes=%d reads=%d err=%v", pushes, reads, err)
 	}
 }
