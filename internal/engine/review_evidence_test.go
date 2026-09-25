@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -12,12 +13,17 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 )
 
+func mustPassedCheckEvidence(t *testing.T, check config.Check, output string) string {
+	t.Helper()
+	return passedCheckEvidence(check, output)
+}
+
 func TestPassedCheckEvidenceDoesNotPublishOutputOrArguments(t *testing.T) {
 	secret := "ghp_" + strings.Repeat("a", 30)
 	privateFixture := "customer-email@example.invalid"
 	output := secret + "\n" + privateFixture + "\n"
-	evidence := passedCheckEvidence(config.Check{Name: "verified vertical slice", Command: []string{"powershell", "-File", "private-fixture.ps1"}}, output)
-	for _, want := range []string{`check="verified vertical slice"`, `command="powershell"`, "exit=0", "stdout=captured", "stdout_bytes=", "stdout_lines=2"} {
+	evidence := mustPassedCheckEvidence(t, config.Check{Name: "verified vertical slice", Command: []string{"powershell", "-File", "private-fixture.ps1"}}, output)
+	for _, want := range []string{"stage=native", `check="verified vertical slice"`, `command="powershell"`, "command_id=", "exit=0", `pass_counts="none"`, "stdout=captured", "stdout_bytes=", "stdout_lines=2"} {
 		if !strings.Contains(evidence, want) {
 			t.Fatalf("check evidence omitted %q: %s", want, evidence)
 		}
@@ -26,6 +32,53 @@ func TestPassedCheckEvidenceDoesNotPublishOutputOrArguments(t *testing.T) {
 		if strings.Contains(evidence, forbidden) {
 			t.Fatalf("check evidence published private output or arguments %q: %s", forbidden, evidence)
 		}
+	}
+}
+
+func TestPassedCheckEvidencePublishesOnlyBoundedPassCounts(t *testing.T) {
+	secret := "ghp_" + strings.Repeat("a", 30)
+	output := "Test Files  9 passed (9)\nTests  173 passed\n6 passed (32.6s)\n" + secret + " customer-email@example.invalid\n"
+	evidence := mustPassedCheckEvidence(t, config.Check{Name: "native validation", Command: []string{"powershell", "-File", "scripts/verify.ps1"}}, output)
+	for _, want := range []string{"stage=native", `command="powershell"`, "command_id=", `pass_counts="test_files=9_passed,tests=173_passed,passed=6"`, "exit=0"} {
+		if !strings.Contains(evidence, want) {
+			t.Fatalf("check evidence omitted %q: %s", want, evidence)
+		}
+	}
+	for _, forbidden := range []string{secret, "customer-email@example.invalid", "scripts/verify.ps1", "6 passed"} {
+		if strings.Contains(evidence, forbidden) {
+			t.Fatalf("check evidence published unsafe output %q: %s", forbidden, evidence)
+		}
+	}
+}
+
+func TestPassedCheckEvidencePublishesBareRunnerPassCount(t *testing.T) {
+	evidence := mustPassedCheckEvidence(t, config.Check{Name: "browser", Command: []string{"npx", "playwright", "test"}}, "6 passed (32.6s)\n")
+	if !strings.Contains(evidence, `pass_counts="passed=6"`) {
+		t.Fatalf("check evidence omitted bare runner pass count: %s", evidence)
+	}
+}
+
+func TestPassedCheckEvidenceBoundsOutputAndPassCountItems(t *testing.T) {
+	output := strings.Repeat("x", maxVerificationEvidenceScan+1) + "\nTest Files 9 passed\nTests 173 passed\n6 passed\n"
+	evidence := mustPassedCheckEvidence(t, config.Check{Name: "bounded", Command: []string{"go", "test"}}, output)
+	if !strings.Contains(evidence, "test_files=9_passed") || !strings.Contains(evidence, "tests=173_passed") || !strings.Contains(evidence, "passed=6") {
+		t.Fatalf("pass-count scan was not bounded to the final output window: %s", evidence)
+	}
+	if got := strings.Count(strings.Split(strings.Split(evidence, `pass_counts="`)[1], `"`)[0], ",") + 1; got > maxVerificationPassCountItems {
+		t.Fatalf("pass-count item cap exceeded: %d in %s", got, evidence)
+	}
+	tooManyDigits := mustPassedCheckEvidence(t, config.Check{Name: "digits", Command: []string{"go", "test"}}, "Tests 1234567890 passed\n")
+	if !strings.Contains(tooManyDigits, `pass_counts="none"`) {
+		t.Fatalf("pass count accepted more than nine digits: %s", tooManyDigits)
+	}
+	items := make([]string, 0, maxVerificationPassCountItems+4)
+	for count := 1; count <= cap(items); count++ {
+		items = append(items, fmt.Sprintf("%d passed", count))
+	}
+	itemCapped := mustPassedCheckEvidence(t, config.Check{Name: "items", Command: []string{"go", "test"}}, strings.Join(items, "\n"))
+	values := strings.Split(strings.Split(itemCapped, `pass_counts="`)[1], `"`)[0]
+	if got := strings.Count(values, ",") + 1; got != maxVerificationPassCountItems || strings.Contains(values, "passed=9") {
+		t.Fatalf("pass-count item cap failed: %s", itemCapped)
 	}
 }
 
@@ -101,7 +154,7 @@ func TestCompletedReviewDoesNotPublishSupervisorEvidenceOnlyFinding(t *testing.T
 func TestReviewEvidencePayloadIsExactHeadAndPeerFree(t *testing.T) {
 	evidence := &model.Evidence{
 		Base: "base", Head: strings.Repeat("a", 40), Config: "config", Rules: "rules",
-		Checks:  []string{`check="native" command="go" exit=0 stdout="ok"`},
+		Checks:  []string{mustPassedCheckEvidence(t, config.Check{Name: "native validation", Command: []string{"powershell", "-File", "scripts/verify.ps1"}}, "Test Files 9 passed\nTests 173 passed\n6 passed\n")},
 		Reviews: map[string]string{"security": "must not leak to a concurrent peer"}, At: time.Now().UTC(),
 	}
 	var payload struct {
@@ -116,5 +169,16 @@ func TestReviewEvidencePayloadIsExactHeadAndPeerFree(t *testing.T) {
 	}
 	if payload.Head != evidence.Head || payload.Attempt != 2 || len(payload.Checks) != 1 || len(payload.Reviews) != 0 || !strings.Contains(payload.Policy, "concurrent and independent") {
 		t.Fatalf("review evidence payload is not exact-head and peer-independent: %#v", payload)
+	}
+	for _, want := range []string{"stage=native", `command="powershell"`, "command_id=", `pass_counts="test_files=9_passed,tests=173_passed,passed=6"`, "exit=0"} {
+		if !strings.Contains(payload.Checks[0], want) {
+			t.Fatalf("reviewer payload omitted bounded native detail %q: %s", want, payload.Checks[0])
+		}
+	}
+	prompt := roles.Compile(config.Effective{Files: map[string]string{}}, roles.Builtins()["reviewer"], "windows", &model.Task{ID: "fixture", Areas: []string{"src"}}, "review", "diff", reviewEvidencePayload(evidence, 2))
+	for _, want := range []string{"VERIFICATION EVIDENCE", "stage=native", `command=\"powershell\"`, "test_files=9_passed", "tests=173_passed", "passed=6"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("reviewer prompt omitted native verification detail %q", want)
+		}
 	}
 }
