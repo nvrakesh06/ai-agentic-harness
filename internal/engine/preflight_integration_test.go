@@ -16,6 +16,7 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
 )
 
 type heldPreflightProvider struct {
@@ -266,6 +267,81 @@ func TestRecoveredCompletedDesignerIsNotRunAgain(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+func TestHumanExactHeadCheckpointContinuationReusesPreflightOnlyForStructuredAcknowledgement(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		answer          func(string) string
+		wantDesigners   int32
+		wantWriters     int32
+		wantReuseReason string
+		blockerOrigin   string
+		resume          model.State
+	}{
+		{"exact verification acknowledgement", func(head string) string { return "AIH-CONTINUE CHECKPOINT " + head }, 0, 1, "human checkpoint", model.BlockerOriginVerificationOnly, model.SyncRequired},
+		{"freeform verification answer", func(string) string { return "The verification environment is repaired; recheck." }, 1, 0, "", model.BlockerOriginVerificationOnly, model.Ready},
+		{"exact acknowledgement cannot bypass implementer decision", func(head string) string { return "AIH-CONTINUE CHECKPOINT " + head }, 1, 0, "", model.BlockerOriginImplementerDecision, model.Ready},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.P.DB.Close()
+			s, old, err := f.P.Git.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			effective, err := engine.Canonical(ctx, f.P.Git)
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := effective.BaseSHA
+			task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, AssignedAreas: []string{"src/labels.tsx"}, AssignedAreaKinds: map[string]string{"src/labels.tsx": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Blocked, Branch: "aih/ui", BaseSHA: base, HeadSHA: base,
+				Blocker: &model.Blocker{Question: "Confirm the verification-only unblock.", Reason: "Native verification was interrupted.", Resume: test.resume, Origin: test.blockerOrigin}}
+			task.Preflight = &model.Preflight{Phase: "writing", BaseSHA: base, HeadSHA: base, Config: effective.Hash, Rules: roles.Hash(), Scope: engine.PreflightScopeForTest(task, effective), Completed: []string{"designer"}}
+			s.Tasks[task.ID] = task
+			if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, base); err != nil {
+				t.Fatal(err)
+			}
+			next, err := f.P.Git.StateCommit(ctx, old, s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: old, New: next}}); err != nil {
+				t.Fatal(err)
+			}
+			workers := &heldPreflightProvider{}
+			f.P.Provider = workers
+			c := engine.New(f.P)
+			done := make(chan error, 1)
+			go func() { done <- c.Serve(ctx) }()
+			if err = f.P.DB.Submit(store.Command{ID: model.ID(), Kind: "answer", Target: task.ID, Payload: test.answer(base)}); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.NewTimer(30 * time.Second)
+			defer deadline.Stop()
+			for workers.designers.Load() < test.wantDesigners || workers.writers.Load() < test.wantWriters {
+				select {
+				case err := <-done:
+					t.Fatalf("supervisor exited before resumed work: %v", err)
+				case <-deadline.C:
+					current := c.Snapshot().Tasks[task.ID]
+					t.Fatalf("human unblock did not take the expected route: designers=%d writers=%d task=%#v", workers.designers.Load(), workers.writers.Load(), current)
+				case <-time.After(25 * time.Millisecond):
+				}
+			}
+			current := c.Snapshot().Tasks[task.ID]
+			if workers.designers.Load() != test.wantDesigners || workers.writers.Load() != test.wantWriters || (test.wantReuseReason != "" && (current.Preflight == nil || !strings.Contains(current.Preflight.ReuseReason, test.wantReuseReason))) {
+				t.Fatalf("human unblock did not preserve the intended preflight policy: designers=%d writers=%d task=%#v", workers.designers.Load(), workers.writers.Load(), current)
+			}
+			cancel()
+			<-done
+		})
+	}
 }
 
 func TestImplementerCheckpointContinuesWithoutRepeatingPreflight(t *testing.T) {

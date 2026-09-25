@@ -221,6 +221,24 @@ func TestAssignedAreaKindsRejectIncompleteCurrentState(t *testing.T) {
 	}
 }
 
+func TestSchemaSevenBlockerOriginMigratesFailClosed(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Schema = 7
+	s.Tasks["task"] = &Task{ID: "task", State: Blocked, Blocker: &Blocker{Question: "Repair native verification.", Reason: "missing tool", Impact: "task waits", Resume: SyncRequired, Origin: BlockerOriginVerificationOnly}}
+	b, _ := json.Marshal(s)
+	migrated, changed, err := Decode(b)
+	if err != nil || !changed || migrated.Schema != StateSchema || migrated.Tasks["task"].Blocker.Origin != "" {
+		t.Fatalf("schema 7 blocker origin did not migrate fail closed: %#v changed=%t err=%v", migrated.Tasks["task"].Blocker, changed, err)
+	}
+	current := NewSnapshot("project123")
+	current.Tasks["task"] = &Task{ID: "task", State: Blocked, Blocker: &Blocker{Question: "Repair native verification.", Reason: "missing tool", Impact: "task waits", Resume: SyncRequired, Origin: BlockerOriginVerificationOnly}}
+	b, _ = json.Marshal(current)
+	roundTrip, changed, err := Decode(b)
+	if err != nil || changed || roundTrip.Tasks["task"].Blocker.Origin != BlockerOriginVerificationOnly {
+		t.Fatalf("schema 8 blocker origin did not round-trip: %#v changed=%t err=%v", roundTrip.Tasks["task"].Blocker, changed, err)
+	}
+}
+
 func TestSchemaOneMigratesAuthorizedBacklogAndCapacityRoundTrips(t *testing.T) {
 	s := NewSnapshot("project123")
 	s.Schema = 1

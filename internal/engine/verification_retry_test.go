@@ -122,11 +122,108 @@ func TestMissingNativeCapabilityBlocksWithoutImplementerRetry(t *testing.T) {
 	if got := f.Provider.ImplementationCount("missing-tool"); got != 1 {
 		t.Fatalf("implementer ran %d times after a missing native tool", got)
 	}
-	if task.Blocker == nil || task.Blocker.Resume != model.SyncRequired || task.Verification == nil || !task.Verification.NativeOnly {
+	if task.Blocker == nil || task.Blocker.Origin != model.BlockerOriginVerificationOnly || task.Blocker.Resume != model.SyncRequired || task.Verification == nil || !task.Verification.NativeOnly {
 		t.Fatalf("missing capability was not durably routed to native verification: %+v", task)
 	}
 	if got := eventCount(t, f, "retry_suppressed"); got != 1 {
 		t.Fatalf("suppressed retry events = %d, want 1", got)
+	}
+	if err = f.P.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recoveredProject, err := f.Open(ctx, filepath.Join(f.Root, "machine-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recoveredProject.DB.Close()
+	if err = recoveredProject.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered, _, err := recoveredProject.DB.Load()
+	if err != nil || recovered.Tasks["missing-tool"].Blocker == nil || recovered.Tasks["missing-tool"].Blocker.Origin != model.BlockerOriginVerificationOnly {
+		t.Fatalf("cross-machine recovery lost verification-only blocker provenance: %#v err=%v", recovered.Tasks["missing-tool"], err)
+	}
+}
+
+func TestWriterCheckpointMakesPreflightExactForMissingCapabilityContinuation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	f, err := demo.New(ctx, t.TempDir(), []string{"aih-command-that-does-not-exist"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	seedReadyTask(t, ctx, f, "writer-checkpoint")
+	snapshot, head, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Tasks["writer-checkpoint"].UI = true
+	snapshot.Tasks["writer-checkpoint"].Areas = []string{"feature-writer-checkpoint.txt"}
+	task := snapshot.Tasks["writer-checkpoint"]
+	task.BaseSHA = head
+	task.AssignedAreas = []string{"feature-writer-checkpoint.txt"}
+	task.AssignedAreaKinds = map[string]string{"feature-writer-checkpoint.txt": model.AreaFile}
+	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, "refs/remotes/origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(f.P.TaskPath(task), "feature-writer-checkpoint.txt"), []byte("prior checkpoint\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	prior, err := f.P.Git.Checkpoint(ctx, f.P.TaskPath(task), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: task.Branch, New: prior}}); err != nil {
+		t.Fatal(err)
+	}
+	task.HeadSHA = prior
+	next, err := f.P.Git.StateCommit(ctx, head, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: head, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	blocked := runUntilTaskState(t, ctx, f, "writer-checkpoint", model.Blocked)
+	if blocked.Blocker == nil || blocked.Blocker.Origin != model.BlockerOriginVerificationOnly || blocked.Preflight == nil || blocked.Preflight.HeadSHA != blocked.HeadSHA {
+		t.Fatalf("normal writer checkpoint did not preserve exact preflight identity for verification recovery: blocker=%#v task=%#v", blocked.Blocker, blocked)
+	}
+	if err = f.P.DB.Submit(store.Command{ID: model.ID(), Kind: "answer", Target: "writer-checkpoint", Payload: "AIH-CONTINUE CHECKPOINT " + blocked.HeadSHA}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- engine.New(f.P).Serve(ctx) }()
+	var resumed *model.Task
+	deadline := time.NewTimer(75 * time.Second)
+	defer deadline.Stop()
+	for resumed == nil {
+		current, _, loadErr := f.P.DB.Load()
+		if loadErr == nil {
+			task := current.Tasks["writer-checkpoint"]
+			if task != nil && f.Provider.ImplementationCount("writer-checkpoint") == 2 && task.State == model.Blocked {
+				resumed = task
+			}
+		}
+		select {
+		case serveErr := <-done:
+			t.Fatalf("supervisor stopped before exact checkpoint writer admission: %v", serveErr)
+		case <-deadline.C:
+			t.Fatal("exact checkpoint continuation did not reach its retained-guidance writer pass")
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	if got := f.Provider.ImplementationCount("writer-checkpoint"); got != 2 {
+		t.Fatalf("exact checkpoint continuation ran implementer %d times, want the initial writer plus one retained-guidance pass", got)
+	}
+	if resumed.Preflight == nil || resumed.Preflight.ReuseCount != 1 || !strings.Contains(resumed.Preflight.ReuseReason, "human checkpoint") {
+		t.Fatalf("normal writer checkpoint lost retained guidance after exact verification unblock: %#v", resumed.Preflight)
+	}
+	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

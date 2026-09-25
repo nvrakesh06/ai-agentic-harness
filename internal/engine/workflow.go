@@ -779,11 +779,15 @@ func (c *Controller) mirrorWith(ctx context.Context, id string) {
 	}
 }
 func (c *Controller) block(id, question, reason string, resume model.State) {
+	c.blockWithOrigin(id, question, reason, resume, "")
+}
+
+func (c *Controller) blockWithOrigin(id, question, reason string, resume model.State, origin string) {
 	if c.ctx.Err() != nil {
 		return
 	}
 	if c.mutate(func(s *model.Snapshot) error {
-		model.Block(s.Tasks[id], c.portable(question), c.portable(reason), resume)
+		model.BlockWithOrigin(s.Tasks[id], c.portable(question), c.portable(reason), resume, origin)
 		return nil
 	}) == nil {
 		c.mirror(id)
@@ -1070,7 +1074,7 @@ func (c *Controller) implement(id string) bool {
 			_ = c.P.DB.Event(id, c.Snapshot().Tasks[id].RunID, "implementer", effective.Project.Provider, "verification_rerouted", source+" -> "+native)
 			return true
 		}
-		c.block(id, r.Question, r.Summary, model.Ready)
+		c.blockWithOrigin(id, r.Question, r.Summary, model.Ready, model.BlockerOriginImplementerDecision)
 		return false
 	case "in_progress":
 		preflightRoles, preflightErr := requiredPreflightRoles(effective, c.Snapshot().Tasks[id])
@@ -1140,6 +1144,16 @@ func completeNativeOnlyImplementation(task *model.Task, guidanceAtStart int, gua
 	return false, model.Transition(task, model.Implemented)
 }
 
+// advancePreflightHead binds completed pre-implementation guidance to the
+// durable writer checkpoint only after the supervisor has identified a
+// verification-only human blocker. Ordinary check failures keep their old
+// preflight identity and continue through bounded FIX reuse semantics.
+func advancePreflightHead(task *model.Task) {
+	if task != nil && task.Preflight != nil && task.Preflight.Phase == "writing" {
+		task.Preflight.HeadSHA = task.HeadSHA
+	}
+}
+
 func replayLateGuidance(task *model.Task, guidanceAtStart int) (bool, error) {
 	if len(model.TaskGuidance(task)) > guidanceAtStart {
 		model.CarryLateOperatorGuidance(task, guidanceAtStart)
@@ -1203,7 +1217,12 @@ func (c *Controller) verificationFailure(id string, failure *checkFailure) {
 		if c.mutate(func(s *model.Snapshot) error {
 			t := s.Tasks[id]
 			t.Verification = next
-			model.Block(t, question, reason, resume)
+			origin := ""
+			if capabilityMissing {
+				origin = model.BlockerOriginVerificationOnly
+				advancePreflightHead(t)
+			}
+			model.BlockWithOrigin(t, question, reason, resume, origin)
 			return nil
 		}) == nil {
 			_ = c.P.DB.Event(id, task.RunID, "verification", "native", "retry_suppressed", environment+" head="+task.HeadSHA)
