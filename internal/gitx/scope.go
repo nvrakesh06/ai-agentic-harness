@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -163,6 +165,44 @@ func (g Git) ValidateFullCheckpointScope(ctx context.Context, worktree, immutabl
 		return err
 	}
 	return g.ValidateCheckpointScope(ctx, worktree, areas)
+}
+
+// ValidatePendingMergeScope stages a resolved merge and checks its prospective
+// tree against the merge target. The ordinary full-checkpoint gate cannot be
+// used here because HEAD is still the pre-merge task checkpoint and does not
+// descend from base until Checkpoint creates the merge commit.
+func (g Git) ValidatePendingMergeScope(ctx context.Context, worktree, base string, areas []Area) error {
+	w := Git{Dir: worktree}
+	pending, err := w.SHA(ctx, "MERGE_HEAD")
+	if err != nil {
+		return errors.New("task worktree has no pending merge")
+	}
+	if pending != base {
+		return errors.New("pending merge target does not match durable synchronization target")
+	}
+	if unresolved, err := w.Run(ctx, "", "diff", "--name-only", "--diff-filter=U"); err != nil || unresolved != "" {
+		if err != nil {
+			return err
+		}
+		for _, path := range strings.Fields(unresolved) {
+			content, readErr := os.ReadFile(filepath.Join(worktree, path))
+			if readErr != nil || strings.Contains(string(content), "<<<<<<<") || strings.Contains(string(content), ">>>>>>>") {
+				return errors.New("pending merge still has unresolved paths")
+			}
+		}
+	}
+	if _, err = w.Run(ctx, "", "add", "--all"); err != nil {
+		return err
+	}
+	tree, err := w.Run(ctx, "", "write-tree")
+	if err != nil {
+		return err
+	}
+	paths, err := g.Run(ctx, "", "diff", "--no-renames", "--name-only", "-z", base, tree)
+	if err != nil {
+		return err
+	}
+	return ValidateScopePaths(areas, splitGitPaths(paths))
 }
 
 // ValidateCommitScope verifies an imported checkpoint against the immutable

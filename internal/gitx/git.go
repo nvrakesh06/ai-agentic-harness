@@ -392,8 +392,58 @@ func (g Git) Checkpoint(ctx context.Context, path, task string) (string, error) 
 	return w.SHA(ctx, "HEAD")
 }
 
-// After an aborted rebase, prepare a merge with main for the disposable writer
-// to resolve. SyncBase in durable state recreates this on a replacement machine.
+// PrepareTaskMerge begins a current-main merge from the exact durable task
+// checkpoint. It never rewrites or replays task history. A conflict is left in
+// place for the owning writer, while every other merge failure is aborted so a
+// replacement supervisor starts from the recorded checkpoint.
+func (g Git) PrepareTaskMerge(ctx context.Context, dir, expectedHead, base string) (conflict bool, err error) {
+	w := Git{dir}
+	status, err := w.Run(ctx, "", "status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	if status != "" {
+		return false, errors.New("cannot merge main into a dirty task worktree")
+	}
+	head, err := w.SHA(ctx, "HEAD")
+	if err != nil {
+		return false, err
+	}
+	if head != expectedHead {
+		return false, errors.New("task worktree head does not match durable checkpoint")
+	}
+	if g.Ancestor(ctx, base, head) {
+		return false, nil
+	}
+	if _, err = w.Run(ctx, "", "merge", "--no-ff", "--no-commit", base); err == nil {
+		return false, nil
+	}
+	unmerged, unmergedErr := w.Run(ctx, "", "diff", "--name-only", "--diff-filter=U")
+	if unmergedErr == nil && unmerged != "" {
+		return true, nil
+	}
+	_, abortErr := w.Run(context.Background(), "", "merge", "--abort")
+	if abortErr != nil {
+		return false, errors.Join(err, abortErr)
+	}
+	return false, err
+}
+
+// RestoreTaskHead removes an uncommitted or unpublished non-conflict merge.
+// The caller must have already proved expectedHead is the durable checkpoint.
+func (g Git) RestoreTaskHead(ctx context.Context, dir, expectedHead string) error {
+	w := Git{dir}
+	if pending, err := w.SHA(ctx, "MERGE_HEAD"); err == nil && pending != "" {
+		_, err = w.Run(ctx, "", "merge", "--abort")
+		return err
+	}
+	_, err := w.Run(ctx, "", "reset", "--hard", expectedHead)
+	return err
+}
+
+// After a persisted sync conflict, prepare a merge with main for the
+// disposable writer to resolve. SyncBase recreates this on a replacement
+// machine.
 func (g Git) PrepareMerge(ctx context.Context, dir, base string) error {
 	w := Git{dir}
 	if pending, e := w.SHA(ctx, "MERGE_HEAD"); e == nil {
