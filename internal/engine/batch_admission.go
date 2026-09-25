@@ -39,6 +39,10 @@ func (c *Controller) selectBatchAdmission(ctx context.Context, effective config.
 		if err != nil {
 			return nil, err
 		}
+		if !c.batchValidationCurrent(ctx, effective, task, changed) {
+			task.State = model.SyncRequired
+			continue
+		}
 		paths[task.ID] = changed
 	}
 	return model.SelectIntegrationBatch(eligible, paths), nil
@@ -97,12 +101,19 @@ func (c *Controller) batchReservationCurrent(ctx context.Context, effective conf
 		if !sameBatchPaths(member.Paths, paths) {
 			return false, nil
 		}
-		plan, err := c.taskValidationPlan(ctx, effective, task, c.P.TaskPath(task), paths)
-		if err != nil || !validationPlanMatchesEvidence(plan, task.Evidence) {
+		if !c.batchValidationCurrent(ctx, effective, task, paths) {
 			return false, nil
 		}
 	}
 	return true, nil
+}
+
+// batchValidationCurrent recomputes the policy-derived plan at the exact task
+// head. It is shared by fresh admission and durable-reservation recovery so a
+// changed toolchain, configuration, or gate never reaches batch selection.
+func (c *Controller) batchValidationCurrent(ctx context.Context, effective config.Effective, task *model.Task, paths []string) bool {
+	plan, err := c.taskValidationPlan(ctx, effective, task, c.P.TaskPath(task), paths)
+	return err == nil && validationPlanMatchesEvidence(plan, task.Evidence)
 }
 
 func validationPlanMatchesEvidence(plan validationPlan, evidence *model.Evidence) bool {
