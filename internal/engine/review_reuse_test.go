@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 )
@@ -49,6 +50,21 @@ func TestReviewReuseThreeHeadPolicyFailsClosed(t *testing.T) {
 	}
 }
 
+func TestReviewPromptTaskIncludesNestedInstructionsForActualChangedPath(t *testing.T) {
+	task := &model.Task{ID: "review", Areas: []string{"docs"}}
+	promptTask := reviewPromptTask(task, []string{"src/service/handler.go"})
+	if len(task.Areas) != 1 || task.Areas[0] != "docs" {
+		t.Fatalf("review prompt copy mutated canonical task areas: %#v", task.Areas)
+	}
+	prompt := roles.Compile(config.Effective{Files: map[string]string{
+		"AGENTS.md":             "root instruction",
+		"src/service/AGENTS.md": "service instruction",
+	}}, roles.Builtins()["reviewer"], "windows", promptTask, "review", "diff", "evidence")
+	if !strings.Contains(prompt, "CANONICAL src/service/AGENTS.md\nservice instruction") {
+		t.Fatalf("actual changed-path nested instructions missing from review prompt: %s", prompt)
+	}
+}
+
 func TestReviewReuseScopeInvalidatesChangedTaskContract(t *testing.T) {
 	task := &model.Task{Title: "Explain ownership", Objective: "Show the reassignment", Acceptance: []string{"Show the timeout"}, Areas: []string{"fixtures/review-data/**"}, Security: true, Risk: "low"}
 	paths := []string{"fixtures/review-data/dashboard.txt"}
@@ -70,6 +86,41 @@ func TestReviewReuseScopeInvalidatesChangedTaskContract(t *testing.T) {
 	}
 	if reviewScope(task, paths, roster) != original {
 		t.Fatal("unchanged task contract did not retain deterministic scope")
+	}
+}
+
+func TestReviewScopeRejectsLegacyEphemeralChangedPathDuplicate(t *testing.T) {
+	task := &model.Task{Title: "Windows fixture", Objective: "verify immediate shutdown", Areas: []string{"tests\\studio-core.test.ts"}, Risk: "low"}
+	paths := []string{"tests/studio-core.test.ts"}
+	roster := []string{"qa", "reviewer", "security"}
+	expected := reviewScope(task, paths, roster)
+	if !acceptedReviewScope(task, paths, roster, expected) {
+		t.Fatal("current exact-head review scope was rejected")
+	}
+
+	// verifyReview used to append the Git path to its local Task copy. That
+	// copy was not persisted, so final integration rebuilt a different scope
+	// and discarded valid MERGE_READY approvals.
+	ephemeral := *task
+	ephemeral.Areas = append(ephemeral.Areas, paths[0])
+	legacyScope := reviewScope(&ephemeral, paths, roster)
+	if legacyScope == expected || acceptedReviewScope(task, paths, roster, legacyScope) {
+		t.Fatal("legacy scope without a historical durable task contract was accepted")
+	}
+
+	changedContract := *task
+	changedContract.Areas = append(changedContract.Areas, "scripts/release.ps1")
+	if acceptedReviewScope(task, paths, roster, reviewScope(&changedContract, paths, roster)) {
+		t.Fatal("an unrelated task-area contract change retained prior review scope")
+	}
+
+	// The previous task contract had an additional path matching the diff, but
+	// the current task was narrowed. The old fingerprint remains rejected.
+	oldContract := &model.Task{Title: task.Title, Objective: task.Objective, Areas: []string{"scripts/release.ps1", paths[0]}, Risk: task.Risk}
+	oldScope := reviewScope(oldContract, paths, roster)
+	narrowed := &model.Task{Title: task.Title, Objective: task.Objective, Areas: []string{"scripts/release.ps1"}, Risk: task.Risk}
+	if acceptedReviewScope(narrowed, paths, roster, oldScope) {
+		t.Fatal("narrowed task areas retained an old review scope through legacy compatibility")
 	}
 }
 
