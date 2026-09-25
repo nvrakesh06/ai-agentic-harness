@@ -798,6 +798,9 @@ func (c *Controller) portable(text string) string {
 }
 func (c *Controller) checkpoint(ctx context.Context, id string) error {
 	t := c.Snapshot().Tasks[id]
+	if t.SyncBase != "" {
+		return c.checkpointAtBase(ctx, id, t.SyncBase)
+	}
 	return c.checkpointAtBase(ctx, id, t.BaseSHA)
 }
 
@@ -825,6 +828,10 @@ func (c *Controller) checkpointAtBase(ctx context.Context, id, immutableBase str
 		task := s.Tasks[id]
 		task.HeadSHA = sha
 		task.BaseSHA = immutableBase
+		if task.SyncBase == immutableBase {
+			task.SyncBase = ""
+		}
+		task.Evidence = nil
 		if task.VisualRequired != nil {
 			task.VisualRequired.Head = sha
 		}
@@ -1327,23 +1334,55 @@ func (c *Controller) syncTask(ctx context.Context, id string) (config.Effective,
 	}
 	base := effective.BaseSHA
 	t := c.Snapshot().Tasks[id]
-	if e = c.P.Git.Rebase(ctx, c.P.TaskPath(t), base); e != nil {
-		if ctx.Err() == nil {
-			if pe := c.P.Git.PrepareMerge(ctx, c.P.TaskPath(t), base); pe == nil {
-				_ = c.mutate(func(s *model.Snapshot) error { s.Tasks[id].SyncBase = base; return nil })
-			}
+	if t == nil || t.BaseSHA == "" || t.HeadSHA == "" || !c.P.Git.Ancestor(ctx, t.BaseSHA, t.HeadSHA) || !c.P.Git.Ancestor(ctx, t.BaseSHA, base) {
+		return effective, errors.New("task synchronization ancestry does not match durable state")
+	}
+	if t.SyncBase != "" && t.SyncBase != base {
+		return effective, errors.New("task has an unresolved synchronization target")
+	}
+	// Publish the recovery target before touching the worktree. A replacement
+	// supervisor can then recreate a real conflict for its owning writer.
+	if t.SyncBase == "" {
+		if e = c.mutate(func(s *model.Snapshot) error { s.Tasks[id].SyncBase = base; return nil }); e != nil {
+			return effective, e
 		}
-		return effective, e
 	}
-	if e = c.checkpointAtBase(ctx, id, base); e != nil {
-		return effective, e
-	}
-	head, e := (gitx.Git{Dir: c.P.TaskPath(t)}).SHA(ctx, "HEAD")
+	conflict, e := c.P.Git.PrepareTaskMerge(ctx, c.P.TaskPath(t), t.HeadSHA, base)
 	if e != nil {
 		return effective, e
 	}
-	e = c.mutate(func(s *model.Snapshot) error {
+	if conflict {
+		return effective, errors.New("current-main merge requires owning writer resolution")
+	}
+	// Commit the merge locally, validate only the task delta relative to the
+	// target main, then publish its ref and all durable state in one transaction.
+	head, e := c.P.Git.Checkpoint(ctx, c.P.TaskPath(t), id)
+	if e != nil {
+		_ = c.P.Git.RestoreTaskHead(context.Background(), c.P.TaskPath(t), t.HeadSHA)
+		return effective, e
+	}
+	areas, ok := immutableScope(t)
+	if !ok {
+		if head != t.HeadSHA {
+			_ = c.P.Git.RestoreTaskHead(context.Background(), c.P.TaskPath(t), t.HeadSHA)
+		}
+		return effective, &gitx.ScopeError{}
+	}
+	if e = c.P.Git.ValidateCommitScope(ctx, base, head, areas); e != nil {
+		if head != t.HeadSHA {
+			_ = c.P.Git.RestoreTaskHead(context.Background(), c.P.TaskPath(t), t.HeadSHA)
+		}
+		return effective, e
+	}
+	updates := []gitx.Update{}
+	if head != t.HeadSHA {
+		updates = append(updates, gitx.Update{Branch: t.Branch, Old: t.HeadSHA, New: head})
+	}
+	e = c.save(ctx, func(s *model.Snapshot) error {
 		task := s.Tasks[id]
+		if task.HeadSHA != t.HeadSHA || task.SyncBase != base {
+			return errors.New("task changed during synchronization")
+		}
 		task.BaseSHA = base
 		task.SyncBase = ""
 		task.HeadSHA = head
@@ -1356,7 +1395,7 @@ func (c *Controller) syncTask(ctx context.Context, id string) (config.Effective,
 		task.State = model.Verifying
 		task.Evidence = nil
 		return nil
-	})
+	}, updates...)
 	return effective, e
 }
 func cleanEnvironment() []string {
