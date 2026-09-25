@@ -1,0 +1,176 @@
+package gitx_test
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/nvrakesh06/ai-agentic-harness/internal/demo"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
+)
+
+func TestClassifyAreasAtRefMakesBaseTreeIntentImmutable(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	source := gitx.Git{Dir: f.Source}
+	if err := os.MkdirAll(filepath.Join(f.Source, "docs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.Source, "docs", "guide.md"), []byte("guide\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Run(ctx, "", "add", "docs/guide.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Run(ctx, "", "commit", "-m", "add docs directory"); err != nil {
+		t.Fatal(err)
+	}
+	areas, err := source.ClassifyAreasAtRef(ctx, "HEAD", []string{"README.md", "planned.md", "docs", "assets/**", `windows\\path/`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []gitx.Area{
+		{Pattern: "README.md", Kind: gitx.AreaTrackedFile},
+		{Pattern: "planned.md", Kind: gitx.AreaExplicitFile},
+		{Pattern: "docs", Kind: gitx.AreaDirectory},
+		{Pattern: "assets", Kind: gitx.AreaDirectory},
+		{Pattern: "windows/path", Kind: gitx.AreaDirectory},
+	}
+	if !reflect.DeepEqual(areas, want) {
+		t.Fatalf("classification = %#v, want %#v", areas, want)
+	}
+
+	// A task owns the tracked README file, not a directory a later worker might
+	// create at that name. A classified directory does include newly-created files.
+	if err := gitx.ValidateScopePaths(areas, []string{"README.md", "planned.md", "docs/new.md", "assets/new.svg", "windows/path/new.txt"}); err != nil {
+		t.Fatalf("allowed paths rejected: %v", err)
+	}
+	err = gitx.ValidateScopePaths(areas, []string{"README.md/child", "other.txt", "docs/new.md", "other.txt"})
+	var scopeErr *gitx.ScopeError
+	if !errors.As(err, &scopeErr) || !reflect.DeepEqual(scopeErr.Paths, []string{"README.md/child", "other.txt"}) {
+		t.Fatalf("unexpected rejection: %#v", err)
+	}
+}
+
+func TestClassifyAreasAtRefRejectsAmbiguousPatterns(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	g := gitx.Git{Dir: f.Source}
+	for _, areas := range [][]string{
+		{},
+		{"src/*.go"},
+		{"src/**/file.go"},
+		{"../outside"},
+		{"C:\\work"},
+		{"README.md/"},
+		{"docs/", "docs/**"},
+	} {
+		_, err := g.ClassifyAreasAtRef(ctx, "HEAD", areas)
+		var areaErr *gitx.AreaError
+		if !errors.As(err, &areaErr) {
+			t.Fatalf("areas %q accepted or wrong error: %v", areas, err)
+		}
+	}
+	if _, err := g.ClassifyAreasAtRef(ctx, "does-not-exist", []string{"README.md"}); err == nil {
+		t.Fatal("unknown base ref was accepted")
+	}
+	if err := gitx.ValidateScopePaths([]gitx.Area{{Pattern: "src", Kind: "unknown"}}, nil); err == nil {
+		t.Fatal("unknown durable kind was accepted without changed paths")
+	}
+	if err := gitx.ValidateScopePaths([]gitx.Area{{Pattern: "src/", Kind: gitx.AreaDirectory}}, nil); err == nil {
+		t.Fatal("non-canonical durable pattern was accepted")
+	}
+}
+
+func TestValidateCheckpointScopeIncludesUntrackedAndRenameSides(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	dir := filepath.Join(f.P.Dir, "worktrees", "scope")
+	if err := f.P.Git.Worktree(ctx, dir, "aih/scope", "refs/remotes/origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	areas, err := f.P.Git.ClassifyAreasAtRef(ctx, "refs/remotes/origin/main", []string{"generated/**"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "generated"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "generated", "new.txt"), []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "outside.txt"), []byte("outside\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = f.P.Git.ValidateCheckpointScope(ctx, dir, areas)
+	var scopeErr *gitx.ScopeError
+	if !errors.As(err, &scopeErr) || !reflect.DeepEqual(scopeErr.Paths, []string{"outside.txt"}) {
+		t.Fatalf("untracked out-of-scope file evaded check: %#v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "outside.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.P.Git.ValidateCheckpointScope(ctx, dir, areas); err != nil {
+		t.Fatalf("new in-directory file rejected: %v", err)
+	}
+	if _, err := (gitx.Git{Dir: dir}).Run(ctx, "", "mv", "README.md", "generated/README.md"); err != nil {
+		t.Fatal(err)
+	}
+	err = f.P.Git.ValidateCheckpointScope(ctx, dir, areas)
+	if !errors.As(err, &scopeErr) || !strings.Contains(strings.Join(scopeErr.Paths, ","), "README.md") {
+		t.Fatalf("rename source escaped scope check: %#v", err)
+	}
+}
+
+func TestValidateCommitScopeRejectsOutOfAreaCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	dir := filepath.Join(f.P.Dir, "worktrees", "imported")
+	if err := f.P.Git.Worktree(ctx, dir, "aih/imported", "refs/remotes/origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	base, err := (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	areas, err := f.P.Git.ClassifyAreasAtRef(ctx, base, []string{"allowed/**"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "allowed"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "allowed", "good.txt"), []byte("good\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "outside.txt"), []byte("outside\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	head, err := f.P.Git.Checkpoint(ctx, dir, "imported")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.P.Git.ValidateCommitScope(ctx, base, head, areas); err == nil {
+		t.Fatal("out-of-area imported checkpoint was accepted")
+	}
+}
