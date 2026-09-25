@@ -184,7 +184,10 @@ func hydrateQueuedLegacyOwnership(ctx context.Context, p *Project, s *model.Snap
 		if err != nil {
 			return fmt.Errorf("classify legacy task %s ownership: %w", task.ID, err)
 		}
-		task.BaseSHA, task.HeadSHA = base, base
+		// BaseSHA fixes the classified ownership boundary. HeadSHA remains empty
+		// until ensureWorktree creates and publishes the task branch; Attach uses
+		// a nonempty head as proof that such a durable branch already exists.
+		task.BaseSHA = base
 		task.AssignedAreas = canonicalAssignedAreas(classified)
 		task.AssignedAreaKinds = normalizeAreaKinds(classified)
 	}
