@@ -57,6 +57,24 @@ func TestTaskValidationPlanFallsBackToFullForDeletedFinalPackage(t *testing.T) {
 	}
 }
 
+func TestPostVerifyValidationReasonNamesRepairedRecoveryTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		recovering            bool
+		target, merge, reason string
+	}{
+		{"integrated merge", false, "merge", "merge", "exact integrated merge-train head"},
+		{"same recovery target", true, "merge", "merge", "exact integrated merge-train head"},
+		{"repaired recovery target", true, "repaired", "merge", "exact repaired main recovery target"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := postVerifyValidationReason(tc.recovering, tc.target, tc.merge); got != tc.reason {
+				t.Fatalf("postVerifyValidationReason(%t, %q, %q) = %q, want %q", tc.recovering, tc.target, tc.merge, got, tc.reason)
+			}
+		})
+	}
+}
+
 func TestTaskValidationPlanFocusesLowRiskPackageAndKeepsHigherRiskFull(t *testing.T) {
 	ctx := context.Background()
 	head, err := (gitx.Git{Dir: "."}).SHA(ctx, "HEAD")
@@ -82,6 +100,20 @@ func TestTaskValidationPlanFocusesLowRiskPackageAndKeepsHigherRiskFull(t *testin
 	for _, check := range low.Checks {
 		if strings.Join(check.Command, " ") == "go run ./cmd/release" || !strings.Contains(strings.Join(check.Command, " "), "./internal/demo") {
 			t.Fatalf("unexpected focused check: %v", check.Command)
+		}
+	}
+	for _, check := range effective.Project.Checks[:2] {
+		if !strings.Contains(strings.Join(check.Command, " "), "./...") {
+			t.Fatalf("focused plan mutated configured check: %v", check.Command)
+		}
+	}
+	refresh, err := fullValidationPlan(ctx, effective, projectDir, head, "reviewer requested source evidence refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range refresh.Checks[:2] {
+		if !strings.Contains(strings.Join(check.Command, " "), "./...") {
+			t.Fatalf("source evidence refresh lost full command universe: %v", check.Command)
 		}
 	}
 	high, err := (&Controller{}).taskValidationPlan(ctx, effective, &model.Task{Risk: "high", HeadSHA: head}, projectDir, []string{"internal/demo/demo.go"})

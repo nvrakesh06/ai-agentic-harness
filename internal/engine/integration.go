@@ -193,7 +193,8 @@ func (c *Controller) postVerify(id string) {
 		}
 		target = effective.BaseSHA
 	}
-	plan, planErr := fullValidationPlan(c.ctx, effective, c.P.Root, target, "exact integrated merge-train head")
+	reason := postVerifyValidationReason(recovering, target, t.MergeSHA)
+	plan, planErr := fullValidationPlan(c.ctx, effective, c.P.Root, target, reason)
 	reused := planErr == nil && !recovering && effective.BaseSHA == target && t.Evidence != nil &&
 		t.Evidence.IntegrationSHA == target && t.Evidence.IntegrationOwner == c.owner &&
 		t.Evidence.Config == effective.Hash && t.Evidence.Rules == roles.Hash() && t.Evidence.ValidationGate == "full" && t.Evidence.ValidationInput == plan.Input && len(t.Evidence.Checks) > 0
@@ -203,7 +204,7 @@ func (c *Controller) postVerify(id string) {
 			return
 		}
 		defer c.P.Git.RemoveWorktree(context.Background(), dir)
-		plan, e = fullValidationPlan(c.ctx, effective, dir, target, "exact integrated merge-train head")
+		plan, e = fullValidationPlan(c.ctx, effective, dir, target, reason)
 		var checks []string
 		if e == nil {
 			checks, e = c.checksForPlan(c.ctx, dir, id, plan)

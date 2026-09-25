@@ -31,6 +31,13 @@ func fullValidationPlan(ctx context.Context, e config.Effective, dir, head, reas
 	return makeValidationPlan(ctx, e, dir, head, "full", reason, "", e.Project.Checks)
 }
 
+func postVerifyValidationReason(recovering bool, target, merge string) string {
+	if recovering && target != merge {
+		return "exact repaired main recovery target"
+	}
+	return "exact integrated merge-train head"
+}
+
 func (c *Controller) taskValidationPlan(ctx context.Context, e config.Effective, t *model.Task, dir string, paths []string) (validationPlan, error) {
 	if t.Risk != "low" {
 		return fullValidationPlan(ctx, e, dir, t.HeadSHA, "task risk is not low")
@@ -116,6 +123,7 @@ func focusedGoCheck(check config.Check, pkg string) (config.Check, bool) {
 		return config.Check{}, false
 	}
 	copy := check
+	copy.Command = append([]string(nil), check.Command...)
 	found := false
 	for i, arg := range copy.Command {
 		if arg == "./..." {
