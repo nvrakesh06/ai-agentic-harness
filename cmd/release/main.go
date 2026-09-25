@@ -208,6 +208,9 @@ func releaseMachinePermit(ctx context.Context) (func(), config.Machine, string, 
 	fmt.Fprintf(os.Stderr, "waiting up to %s for AIH machine heavy-check capacity (%d slot(s)); interrupt to cancel\n", releasePermitWait, machine.MaxHeavyChecks)
 	dir := filepath.Join(home, "verification")
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, config.Machine{}, "", fmt.Errorf("release gate resource contention: AIH machine heavy-check capacity was unavailable within %s: %w", releasePermitWait, err)
+		}
 		waiting, err := platform.HasPriorityWaiter(dir, "heavy")
 		if err != nil {
 			return nil, config.Machine{}, "", err
