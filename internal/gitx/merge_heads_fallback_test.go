@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestMergeHeadsFallbackUsesTemporaryIndexWithoutRefs(t *testing.T) {
+func TestMergeHeadsFallbackUsesTemporaryWorktreeWithoutRefs(t *testing.T) {
 	ctx := context.Background()
 	t.Run("two heads", func(t *testing.T) {
 		g, base := fallbackRepository(t, ctx)
@@ -80,6 +80,28 @@ func TestMergeHeadsFallbackUsesTemporaryIndexWithoutRefs(t *testing.T) {
 		}
 		assertFallbackWorktreeCleaned(t, ctx, g)
 	})
+}
+
+func TestCleanupTemporaryWorktreePrunesInterruptedAdd(t *testing.T) {
+	ctx := context.Background()
+	g, base := fallbackRepository(t, ctx)
+	path := filepath.Join(t.TempDir(), "interrupted-worktree")
+	if _, err := g.Run(ctx, "", "worktree", "add", "--detach", path, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.cleanupTemporaryWorktree(path, filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
+	worktrees, err := g.Run(ctx, "", "worktree", "list", "--porcelain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(worktrees, path) {
+		t.Fatalf("interrupted worktree metadata remains: %s", worktrees)
+	}
 }
 
 func fallbackRepository(t *testing.T, ctx context.Context) (Git, string) {

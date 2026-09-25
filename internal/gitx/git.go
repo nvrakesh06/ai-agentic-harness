@@ -557,13 +557,15 @@ func (g Git) mergedTree(ctx context.Context, current, head string, writeTree boo
 	defer os.RemoveAll(root)
 	path := filepath.Join(root, "checkout")
 	if _, err = g.Run(ctx, "", "worktree", "add", "--detach", path, current); err != nil {
+		if cleanupErr := g.cleanupTemporaryWorktree(path, root); cleanupErr != nil {
+			return "", errors.Join(err, cleanupErr)
+		}
 		return "", err
 	}
 	worktree := Git{Dir: path}
 	cleanup := func() error {
 		_, _ = worktree.Run(context.Background(), "", "merge", "--abort")
-		_, err := g.Run(context.Background(), "", "worktree", "remove", "--force", path)
-		return err
+		return g.cleanupTemporaryWorktree(path, root)
 	}
 	if _, err = worktree.Run(ctx, "", "merge", "--no-commit", "--no-ff", head); err != nil {
 		if cleanupErr := cleanup(); cleanupErr != nil {
@@ -582,4 +584,24 @@ func (g Git) mergedTree(ctx context.Context, current, head string, writeTree boo
 		return "", err
 	}
 	return tree, nil
+}
+
+// cleanupTemporaryWorktree removes a disposable merge worktree even if an
+// interrupted add registered its metadata before returning an error. If Git
+// cannot remove that registration itself, remove only our generated temporary
+// root before pruning its now-stale administrative data.
+func (g Git) cleanupTemporaryWorktree(path, root string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, removeErr := g.Run(ctx, "", "worktree", "remove", "--force", path)
+	if removeErr != nil {
+		rootErr := os.RemoveAll(root)
+		_, pruneErr := g.Run(ctx, "", "worktree", "prune")
+		if rootErr != nil || pruneErr != nil {
+			return errors.Join(removeErr, rootErr, pruneErr)
+		}
+		return nil
+	}
+	_, pruneErr := g.Run(ctx, "", "worktree", "prune")
+	return pruneErr
 }
