@@ -593,7 +593,7 @@ func (g Git) mergedTree(ctx context.Context, current, head string, writeTree boo
 func (g Git) cleanupTemporaryWorktree(path, root string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, removeErr := g.Run(ctx, "", "worktree", "remove", "--force", path)
+	_, removeErr := g.Run(ctx, "", "worktree", "remove", "--force", "--force", path)
 	if removeErr != nil {
 		rootErr := os.RemoveAll(root)
 		_, pruneErr := g.Run(ctx, "", "worktree", "prune")

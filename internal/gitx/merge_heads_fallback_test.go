@@ -89,6 +89,9 @@ func TestCleanupTemporaryWorktreePrunesInterruptedAdd(t *testing.T) {
 	if _, err := g.Run(ctx, "", "worktree", "add", "--detach", path, base); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := g.Run(ctx, "", "worktree", "lock", "--reason", "initializing", path); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.RemoveAll(path); err != nil {
 		t.Fatal(err)
 	}
