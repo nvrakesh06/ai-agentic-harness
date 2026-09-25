@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
@@ -68,7 +69,8 @@ func release() error {
 	if e != nil {
 		return e
 	}
-	defer releaseMachine()
+	releasePermit := sync.OnceFunc(releaseMachine)
+	defer releasePermit()
 	ctx, cancel := releaseYieldContext(verificationDir, machine)
 	defer cancel()
 	// Serialize package workers: the suite intentionally exercises real Git and
@@ -118,7 +120,9 @@ func release() error {
 	if *publish {
 		// The verification gate is complete. Publishing has its own external
 		// atomicity rules and must not be interrupted by a later local waiter.
+		// Publishing does not need the heavy-check slot.
 		cancel()
+		releasePermit()
 		args := append([]string{"release", "create", "v" + model.Version}, assets...)
 		args = append(args, "--repo", *repo, "--verify-tag", "--title", "AIH v"+model.Version, "--notes-file", "docs/RELEASE_NOTES.md")
 		return run(context.Background(), nil, "gh", args...)
@@ -209,10 +213,34 @@ func releaseMachinePermit(ctx context.Context) (func(), config.Machine, string, 
 			return nil, config.Machine{}, "", err
 		}
 		if !waiting {
-			release, err := platform.AcquireSlot(ctx, dir, "heavy", machine.MaxHeavyChecks)
-			if err == nil {
-				fmt.Fprintln(os.Stderr, "acquired AIH machine heavy-check capacity")
-				return release, machine, dir, nil
+			release, acquired, err := platform.TryAcquireSlot(dir, "heavy", machine.MaxHeavyChecks)
+			if err != nil {
+				return nil, config.Machine{}, "", err
+			}
+			if acquired {
+				// A supervisor may have registered after the first check.
+				// Return the slot if it has no spare capacity for that waiter.
+				waiting, err = platform.HasPriorityWaiter(dir, "heavy")
+				if err != nil {
+					release()
+					return nil, config.Machine{}, "", err
+				}
+				if waiting {
+					spare, spareErr := platform.HasAvailableSlot(dir, "heavy", machine.MaxHeavyChecks)
+					if spareErr != nil {
+						release()
+						return nil, config.Machine{}, "", spareErr
+					}
+					if !spare {
+						release()
+					} else {
+						fmt.Fprintln(os.Stderr, "acquired AIH machine heavy-check capacity")
+						return release, machine, dir, nil
+					}
+				} else {
+					fmt.Fprintln(os.Stderr, "acquired AIH machine heavy-check capacity")
+					return release, machine, dir, nil
+				}
 			}
 		}
 		timer := time.NewTimer(50 * time.Millisecond)

@@ -180,6 +180,45 @@ func TestReleaseMachinePermitDefersToExistingPriorityWaiter(t *testing.T) {
 	}
 }
 
+func TestQueuedReleaseDefersToNewPriorityWaiter(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AIH_HOME", home)
+	dir := filepath.Join(home, "verification")
+	held, err := platform.AcquireSlot(context.Background(), dir, "heavy", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		release, _, _, err := releaseMachinePermit(ctx)
+		if err == nil {
+			release()
+		}
+		result <- err
+	}()
+	// Let the manual release reach the occupied slot before priority demand
+	// appears. It must not remain blocked inside a non-priority acquisition.
+	time.Sleep(100 * time.Millisecond)
+	clear, err := platform.RegisterPriorityWaiter(context.Background(), dir, "heavy")
+	if err != nil {
+		held()
+		t.Fatal(err)
+	}
+	held()
+	select {
+	case err := <-result:
+		clear()
+		t.Fatalf("queued release bypassed later priority waiter: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	clear()
+	if err := <-result; err != nil {
+		t.Fatalf("release did not acquire after priority waiter cleared: %v", err)
+	}
+}
+
 func TestReleaseYieldStopsOwnedTree(t *testing.T) {
 	if os.Getenv("GO_WANT_RELEASE_YIELD_HELPER") == "root" {
 		for {
