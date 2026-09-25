@@ -279,7 +279,7 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 	result := provider.Result{Schema: 1, Status: "completed", Summary: "Deterministic independent fixture check passed."}
 	if r.Role == "orchestrator" {
 		for _, key := range []string{"alpha", "beta", "human", "dependent"} {
-			p := model.PlanTask{Key: key, Title: key, Objective: "Create " + key + " fixture", Acceptance: []string{"feature-" + key + ".txt contains implemented"}, Areas: []string{key}, Domains: []string{key}, Risk: "low"}
+			p := model.PlanTask{Key: key, Title: key, Objective: "Create " + key + " fixture", Acceptance: []string{"feature-" + key + ".txt contains implemented"}, Areas: []string{"feature-" + key + ".txt"}, Domains: []string{key}, Risk: "low"}
 			if key == "dependent" {
 				p.Dependencies = []string{"alpha"}
 			}

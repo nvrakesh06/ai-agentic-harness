@@ -5,6 +5,7 @@ import (
 	"context"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,26 @@ func init() {
 		os.Exit(0)
 	}
 }
+
+func TestPlannerAreasMatchGeneratedFixtureFiles(t *testing.T) {
+	result, err := (&Worker{}).Run(context.Background(), provider.Request{Role: "orchestrator"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Plan) == 0 {
+		t.Fatal("planner returned no fixture tasks")
+	}
+	for _, task := range result.Plan {
+		want := "feature-" + task.Key + ".txt"
+		if len(task.Areas) != 1 || task.Areas[0] != want {
+			t.Fatalf("planner areas for %q = %v, want [%q]", task.Key, task.Areas, want)
+		}
+		if len(task.Domains) != 1 || task.Domains[0] != task.Key {
+			t.Fatalf("planner domains for %q = %v, want [%q]", task.Key, task.Domains, task.Key)
+		}
+	}
+}
+
 func TestEndToEndRecovery(t *testing.T) {
 	t.Setenv("AIH_DEMO_HELPER", "1")
 	countFile := filepath.Join(t.TempDir(), "check-count.txt")
