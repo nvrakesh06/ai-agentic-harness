@@ -188,6 +188,59 @@ func TestAttachMigratesSchemaSixAreaOwnershipWithoutWideningStartedTasks(t *test
 	}
 }
 
+func TestSchemaSixQueuedTaskHydratesOnResumeWhileStartedTaskBlocks(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	s, stateHead, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Schema = 6
+	s.Tasks["queued"] = &model.Task{ID: "queued", Title: "queued", Objective: "resume queued fixture", State: model.Ready, Areas: []string{"feature-queued.txt"}, Branch: "aih/queued", FixCycles: map[string]int{}}
+	s.Tasks["started"] = &model.Task{ID: "started", Title: "started", Objective: "do not widen started fixture", State: model.Running, Areas: []string{"feature-started.txt"}, Branch: "aih/started", FixCycles: map[string]int{}}
+	legacyHead, err := f.P.Git.StateCommit(ctx, stateHead, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateHead, New: legacyHead}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- engine.New(f.P).Serve(ctx) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		current, _, loadErr := f.P.DB.Load()
+		if loadErr == nil && current.Tasks["queued"].AssignedAreaKinds["feature-queued.txt"] == model.AreaFile && current.Tasks["queued"].BaseSHA != "" && current.Tasks["started"].State == model.Blocked {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	current, _, err := f.P.DB.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued := current.Tasks["queued"]; queued.AssignedAreaKinds["feature-queued.txt"] != model.AreaFile || queued.BaseSHA == "" {
+		t.Fatalf("queued task did not hydrate from durable base: %#v", queued)
+	}
+	if started := current.Tasks["started"]; started.State != model.Blocked || started.Blocker == nil {
+		t.Fatalf("started task was widened or resumed: %#v", started)
+	}
+	if err = f.P.DB.Submit(store.Command{ID: "handoff-schema6", Kind: "handoff"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; err != nil && ctx.Err() == nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDeadlineCheckpointAndHandoffRecoverTogetherAfterMachineLoss(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
