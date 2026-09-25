@@ -54,6 +54,13 @@ head. A guard records
 only portable environment/command classes,
 the source revision, a normalized fingerprint and attempt count; it contains no
 machine paths or provider conversation state.
+
+Schema 9 also permits one optional portable integration-batch reservation. It is
+strictly an admission manifest for two or three already `MERGE_READY`, low-risk,
+independent tasks. It records the shared base/configuration/rules and review roster,
+plus each task's exact reviewed head, review scope, and changed paths. A reservation is not an
+integration transition or publishing authority; the ordinary fenced integration and
+full verification protocol remains authoritative.
 No SQLite files or provider sessions are pushed.
 
 Accepted cross-task guidance uses a bounded, versioned record in the existing
@@ -113,23 +120,22 @@ environment and recheck without starting another implementer.
 
 ## Schema compatibility and migrations
 
-V1 uses remote schema 3, role schema 1, rules version 1, and local schema 1.
-Unknown newer schemas fail closed before writes. Legacy schema 0 snapshots gain
-version metadata and missing maps; schema 1 snapshots deterministically reconstruct
-the authorized objective backlog from existing objectives. Both then undergo
-validation. The first subsequent
-state commit keeps the original remote commit as its parent, preserving the
-pre-migration backup in Git history. No automatic major-version migration exists.
+The current runtime uses remote schema 9, role schema 1, rules version 1, and
+local schema 1. Unknown newer schemas fail closed before writes. Legacy schema 0
+gains version metadata and missing maps; schema 1 reconstructs the authorized
+objective backlog deterministically. Schema 2 drops unowned verification-resource
+records for reconstruction from canonical policy on attach. Schema 7 makes
+plan-time area ownership durable, but only unstarted tasks can recover it and all
+historical classifications begin as `unknown`. Schema 8 makes historical review
+finding relevance and blocker origin fail closed. Schema 9 adds the optional batch
+reservation; migrated snapshots always clear it rather than infer a batch from
+historical task state.
 
-Schema 2 snapshots migrate to schema 3 with empty verification ownership and
-the configured resource limits. Preflight progress is absent until the new
-supervisor records it. An interrupted controller's task states still follow the
-normal recovery route before checks start again.
-
-Publishing schema 3 is a one-way deployment boundary: older runtimes reject
-the newer snapshot. Upgrade every machine that may attach, resume, or take over
-before allowing a schema-3 supervisor to acquire and publish state. Do not hand
-control back to a schema-2 installation after that first schema-3 save.
+All migrated snapshots then undergo current validation. The first subsequent state
+commit keeps the original remote commit as its parent, preserving the pre-migration
+backup in Git history. Publishing schema 9 is a one-way deployment boundary: older
+runtimes reject it. Upgrade every machine that may attach, resume, or take over
+before the first schema-9 save. No automatic major-version migration exists.
 
 Remote task identities and branches are constrained before use as filesystem or
 Git targets. Schema changes require tests for old fixtures and new-runtime refusal.

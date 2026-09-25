@@ -4,10 +4,12 @@ package model
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	pathpkg "path"
 	"regexp"
 	"sort"
 	"strings"
@@ -16,7 +18,7 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 8
+const StateSchema = 9
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
@@ -539,6 +541,31 @@ type Snapshot struct {
 	Applied            map[string]bool       `json:"applied_commands"`
 	Improvements       []string              `json:"improvement_candidates,omitempty"`
 	IntegrationBlocked string                `json:"integration_blocked,omitempty"`
+	IntegrationBatch   *IntegrationBatch     `json:"integration_batch,omitempty"`
+}
+
+// IntegrationBatch is a portable reservation for the deliberately small first
+// batch integration mode. It records admission inputs only; it neither changes
+// task lifecycle state nor authorizes publishing. A later orchestrator must
+// still construct, verify, and publish the integrated tree under the usual
+// fence.
+type IntegrationBatch struct {
+	ID           string                 `json:"id"`
+	BaseSHA      string                 `json:"base_sha"`
+	Config       string                 `json:"config"`
+	Rules        string                 `json:"rules"`
+	ReviewRoster []string               `json:"review_roster"`
+	Tasks        []IntegrationBatchTask `json:"tasks"`
+}
+
+// IntegrationBatchTask keeps every member's exact reviewed head and scope.
+// Review scopes are intentionally per-task: disjoint changes cannot share one
+// scope fingerprint, even when they share the selected review roster.
+type IntegrationBatchTask struct {
+	ID          string   `json:"id"`
+	HeadSHA     string   `json:"head_sha"`
+	ReviewScope string   `json:"review_scope"`
+	Paths       []string `json:"paths"`
 }
 
 func NewSnapshot(project string) *Snapshot {
@@ -689,6 +716,13 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 				task.Blocker.Origin = ""
 			}
 		}
+	}
+	if s.Schema <= 8 {
+		// Schema 9 adds an optional batch reservation. Historical snapshots
+		// cannot safely infer one from independently reviewed tasks: selection
+		// depends on current immutable scopes and exact changed paths. Leave it
+		// empty so the next supervisor makes a fresh, deterministic decision.
+		s.IntegrationBatch = nil
 	}
 	if migrated {
 		s.Schema = StateSchema
@@ -866,7 +900,326 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			}
 		}
 	}
+	if s.IntegrationBatch != nil {
+		if err := ValidateIntegrationBatch(&s, s.IntegrationBatch); err != nil {
+			return nil, false, err
+		}
+	}
 	return &s, migrated, nil
+}
+
+const (
+	MinIntegrationBatchTasks = 2
+	MaxIntegrationBatchTasks = 3
+)
+
+type integrationBatchCandidate struct {
+	task  *Task
+	paths []string
+}
+
+// SelectIntegrationBatch returns the first deterministic pair or triple that
+// is safe to reserve. It does not wait for another task to become ready: a
+// pair is sufficient, while a singleton deliberately falls back to serial
+// integration. changedPaths must be the exact base..head path list for each
+// candidate; missing or malformed paths make that candidate ineligible.
+func SelectIntegrationBatch(s *Snapshot, changedPaths map[string][]string) *IntegrationBatch {
+	if s == nil || s.IntegrationBatch != nil {
+		return nil
+	}
+	var candidates []integrationBatchCandidate
+	for _, task := range Ordered(s) {
+		paths := canonicalBatchPaths(changedPaths[task.ID])
+		if !batchTaskEligible(s, task, paths) {
+			continue
+		}
+		candidates = append(candidates, integrationBatchCandidate{task: task, paths: paths})
+	}
+	// Prefer the lexically first valid triple. If none exists, return the
+	// lexically first valid pair immediately; an incompatible early task cannot
+	// anchor and suppress a later independent pair.
+	for size := MaxIntegrationBatchTasks; size >= MinIntegrationBatchTasks; size-- {
+		for i := 0; i < len(candidates); i++ {
+			selected := findBatchSelection(candidates, i+1, size, []integrationBatchCandidate{candidates[i]})
+			if selected != nil {
+				return newIntegrationBatch(s, selected)
+			}
+		}
+	}
+	return nil
+}
+
+func findBatchSelection(candidates []integrationBatchCandidate, start, size int, selected []integrationBatchCandidate) []integrationBatchCandidate {
+	if len(selected) == size {
+		return selected
+	}
+	for i := start; i < len(candidates); i++ {
+		if !batchCandidateCompatible(selected, candidates[i]) {
+			continue
+		}
+		if match := findBatchSelection(candidates, i+1, size, append(selected, candidates[i])); match != nil {
+			return match
+		}
+	}
+	return nil
+}
+
+func batchCandidateCompatible(selected []integrationBatchCandidate, candidate integrationBatchCandidate) bool {
+	first := selected[0].task
+	if candidate.task.BaseSHA != first.BaseSHA || candidate.task.Evidence.Config != first.Evidence.Config || candidate.task.Evidence.Rules != first.Evidence.Rules || !sameStrings(candidate.task.Evidence.ReviewRoster, first.Evidence.ReviewRoster) {
+		return false
+	}
+	for _, member := range selected {
+		if batchScopesConflict(batchAreas(member.task), batchAreas(candidate.task)) || anyStringUsed(stringsToSet(member.task.Domains), candidate.task.Domains) || anyStringUsed(stringsToSet(member.paths), candidate.paths) {
+			return false
+		}
+	}
+	return true
+}
+
+func newIntegrationBatch(s *Snapshot, selected []integrationBatchCandidate) *IntegrationBatch {
+	first := selected[0].task
+	batch := &IntegrationBatch{BaseSHA: first.BaseSHA, Config: first.Evidence.Config, Rules: first.Evidence.Rules, ReviewRoster: append([]string(nil), first.Evidence.ReviewRoster...)}
+	for _, candidate := range selected {
+		task := candidate.task
+		batch.Tasks = append(batch.Tasks, IntegrationBatchTask{ID: task.ID, HeadSHA: task.HeadSHA, ReviewScope: task.Evidence.ReviewScope, Paths: append([]string(nil), candidate.paths...)})
+	}
+	batch.ID = integrationBatchID(batch)
+	if ValidateIntegrationBatch(s, batch) != nil {
+		return nil
+	}
+	return batch
+}
+
+// ReserveIntegrationBatch validates a newly selected manifest before making it
+// durable. A stale or concurrent reservation is rejected rather than replaced.
+func ReserveIntegrationBatch(s *Snapshot, batch *IntegrationBatch) error {
+	if s == nil || s.IntegrationBatch != nil {
+		return errors.New("integration batch already reserved or snapshot unavailable")
+	}
+	if err := ValidateIntegrationBatch(s, batch); err != nil {
+		return err
+	}
+	s.IntegrationBatch = cloneIntegrationBatch(batch)
+	return nil
+}
+
+// ValidateIntegrationBatch checks portable reservation identity. It cannot
+// recompute Git path overlap, so callers must use SelectIntegrationBatch (or
+// an equivalently strict engine selector) before reserving it.
+func ValidateIntegrationBatch(s *Snapshot, batch *IntegrationBatch) error {
+	if s == nil || batch == nil || len(batch.Tasks) < MinIntegrationBatchTasks || len(batch.Tasks) > MaxIntegrationBatchTasks ||
+		!validSHA(batch.BaseSHA) || !validHash(batch.Config) || !validHash(batch.Rules) || !validRoleRoster(batch.ReviewRoster) {
+		return errors.New("invalid integration batch manifest")
+	}
+	if batch.ID != integrationBatchID(batch) {
+		return errors.New("invalid integration batch identity")
+	}
+	previous := ""
+	usedDomains := map[string]bool{}
+	usedAreas := []immutableBatchArea{}
+	usedPaths := map[string]bool{}
+	for _, member := range batch.Tasks {
+		paths := canonicalBatchPaths(member.Paths)
+		if member.ID <= previous || !validSHA(member.HeadSHA) || !validHash(member.ReviewScope) || paths == nil {
+			return errors.New("invalid integration batch member")
+		}
+		previous = member.ID
+		task := s.Tasks[member.ID]
+		if task == nil || !batchTaskEligible(s, task, paths) || task.BaseSHA != batch.BaseSHA || task.HeadSHA != member.HeadSHA ||
+			task.Evidence.Config != batch.Config || task.Evidence.Rules != batch.Rules || !sameStrings(task.Evidence.ReviewRoster, batch.ReviewRoster) || task.Evidence.ReviewScope != member.ReviewScope {
+			return errors.New("integration batch member is no longer eligible")
+		}
+		areas := batchAreas(task)
+		if batchScopesConflict(usedAreas, areas) || anyStringUsed(usedDomains, task.Domains) || anyStringUsed(usedPaths, paths) {
+			return errors.New("integration batch members overlap")
+		}
+		usedAreas = append(usedAreas, areas...)
+		markStrings(usedDomains, task.Domains)
+		markStrings(usedPaths, paths)
+	}
+	return nil
+}
+
+type immutableBatchArea struct{ path, kind string }
+
+func batchTaskEligible(s *Snapshot, task *Task, paths []string) bool {
+	if task == nil || task.State != MergeReady || task.Risk != "low" || task.Evidence == nil || task.BaseSHA == "" || task.HeadSHA == "" ||
+		task.Evidence.Base != task.BaseSHA || task.Evidence.Head != task.HeadSHA || !validHash(task.Evidence.Config) || !validHash(task.Evidence.Rules) ||
+		!validRoleRoster(task.Evidence.ReviewRoster) || !validHash(task.Evidence.ReviewScope) || !batchValidationAccepted(task.Evidence) || !completedDependencies(s, task) {
+		return false
+	}
+	if len(task.Evidence.ReviewDispositions) != len(task.Evidence.ReviewRoster) {
+		return false
+	}
+	for _, role := range task.Evidence.ReviewRoster {
+		disposition, ok := task.Evidence.ReviewDispositions[role]
+		if !ok || disposition.Disposition != "completed" || disposition.SourceHead != task.HeadSHA || strings.TrimSpace(disposition.Runtime) == "" {
+			return false
+		}
+	}
+	areas := batchAreas(task)
+	if len(areas) == 0 || len(task.Domains) == 0 || hasDuplicateOrBlank(task.Domains) {
+		return false
+	}
+	if len(paths) == 0 || !batchPathsWithinAreas(paths, areas) {
+		return false
+	}
+	return true
+}
+
+func batchValidationAccepted(evidence *Evidence) bool {
+	if evidence == nil || (evidence.ValidationGate != "focused" && evidence.ValidationGate != "full") || !validHash(evidence.ValidationInput) || strings.TrimSpace(evidence.Toolchain) == "" || !validSHA(evidence.TestInputs) || len(evidence.Checks) == 0 {
+		return false
+	}
+	for _, check := range evidence.Checks {
+		if !passedNativeCheckRecord.MatchString(check) {
+			return false
+		}
+	}
+	return true
+}
+
+// Passed native checks are recorded by engine.passedCheckEvidence. Batch
+// admission parses that closed record shape rather than trusting arbitrary
+// strings that merely claim an exit result.
+var passedNativeCheckRecord = regexp.MustCompile(`^stage=native check="(?:[^"\\]|\\.)+" command="(?:[^"\\]|\\.)+" command_id=[a-f0-9]{12} exit=0 pass_counts="(?:[^"\\]|\\.)+" stdout=(captured|empty) stdout_bytes=(0|[1-9][0-9]*) stdout_lines=(0|[1-9][0-9]*)$`)
+
+func completedDependencies(s *Snapshot, task *Task) bool {
+	for _, id := range task.Dependencies {
+		if s.Tasks[id] == nil || s.Tasks[id].State != Done {
+			return false
+		}
+	}
+	return true
+}
+
+func batchAreas(task *Task) []immutableBatchArea {
+	areas, ok := ImmutableAreas(task)
+	if !ok || len(areas) == 0 {
+		return nil
+	}
+	kinds := ImmutableAreaKinds(task)
+	if len(kinds) != len(areas) {
+		return nil
+	}
+	out := make([]immutableBatchArea, 0, len(areas))
+	for _, path := range areas {
+		kind := kinds[path]
+		if kind != AreaFile && kind != AreaDirectory || strings.TrimSpace(path) == "" {
+			return nil
+		}
+		out = append(out, immutableBatchArea{path, kind})
+	}
+	return out
+}
+
+func batchScopesConflict(a, b []immutableBatchArea) bool {
+	for _, left := range a {
+		for _, right := range b {
+			if left.path == right.path || (left.kind == AreaDirectory && strings.HasPrefix(right.path, left.path+"/")) || (right.kind == AreaDirectory && strings.HasPrefix(left.path, right.path+"/")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func canonicalBatchPaths(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	out := append([]string(nil), paths...)
+	sort.Strings(out)
+	for i, path := range out {
+		if path == "" || path != strings.TrimSpace(path) || strings.HasPrefix(path, "/") || strings.Contains(path, "\\") || pathpkg.Clean(path) != path || path == "." || path == ".." || strings.HasPrefix(path, "../") || (i > 0 && path == out[i-1]) {
+			return nil
+		}
+	}
+	return out
+}
+
+func batchPathsWithinAreas(paths []string, areas []immutableBatchArea) bool {
+	for _, path := range paths {
+		matched := false
+		for _, area := range areas {
+			matched = path == area.path || (area.kind == AreaDirectory && strings.HasPrefix(path, area.path+"/"))
+			if matched {
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func anyStringUsed(used map[string]bool, values []string) bool {
+	for _, value := range values {
+		if used[value] || strings.TrimSpace(value) == "" {
+			return true
+		}
+	}
+	return false
+}
+func markStrings(used map[string]bool, values []string) {
+	for _, value := range values {
+		used[value] = true
+	}
+}
+func stringsToSet(values []string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	markStrings(set, values)
+	return set
+}
+func hasDuplicateOrBlank(values []string) bool {
+	seen := map[string]bool{}
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" || seen[value] {
+			return true
+		}
+		seen[value] = true
+	}
+	return false
+}
+func sameStrings(a, b []string) bool {
+	return len(a) == len(b) && strings.Join(a, "\x00") == strings.Join(b, "\x00")
+}
+func validSHA(value string) bool {
+	return regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(value)
+}
+func validHash(value string) bool { return regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(value) }
+func validRoleRoster(roster []string) bool {
+	if len(roster) == 0 || hasDuplicateOrBlank(roster) {
+		return false
+	}
+	for _, role := range roster {
+		if !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(role) {
+			return false
+		}
+	}
+	return true
+}
+
+func integrationBatchID(batch *IntegrationBatch) string {
+	payload, _ := json.Marshal(struct {
+		Base, Config, Rules string
+		Roster              []string
+		Tasks               []IntegrationBatchTask
+	}{batch.BaseSHA, batch.Config, batch.Rules, batch.ReviewRoster, batch.Tasks})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+func cloneIntegrationBatch(batch *IntegrationBatch) *IntegrationBatch {
+	copy := *batch
+	copy.ReviewRoster = append([]string(nil), batch.ReviewRoster...)
+	copy.Tasks = append([]IntegrationBatchTask(nil), batch.Tasks...)
+	for i := range copy.Tasks {
+		copy.Tasks[i].Paths = append([]string(nil), batch.Tasks[i].Paths...)
+	}
+	return &copy
 }
 
 func validReviewProvenance(role string, provenance ReviewProvenance) error {

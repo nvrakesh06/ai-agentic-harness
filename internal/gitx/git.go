@@ -521,3 +521,137 @@ func (g Git) MergeCommit(ctx context.Context, base, head, message string) (strin
 	}
 	return g.Run(ctx, message+"\n", "commit-tree", tree, "-p", base, "-p", head)
 }
+
+// MergeHeads builds a caller-ordered chain of two or three merge commits without
+// advancing a ref. Every head must independently descend from, and share, base.
+// Git computes each merged tree and rejects a content conflict instead of choosing
+// one head's version. The returned commit has every supplied head as an ancestor.
+func (g Git) MergeHeads(ctx context.Context, base string, heads []string, message string) (string, error) {
+	return g.mergeHeads(ctx, base, heads, message, g.mergeTreeWriteTreeSupported(ctx))
+}
+
+func (g Git) mergeHeads(ctx context.Context, base string, heads []string, message string, writeTree bool) (string, error) {
+	if len(heads) < 2 || len(heads) > 3 {
+		return "", errors.New("batch merge requires two or three task heads")
+	}
+	baseSHA, e := g.SHA(ctx, base)
+	if e != nil {
+		return "", e
+	}
+	resolved := make([]string, len(heads))
+	seen := make(map[string]bool, len(heads))
+	for i, head := range heads {
+		resolved[i], e = g.SHA(ctx, head)
+		if e != nil {
+			return "", fmt.Errorf("batch merge head %d: %w", i+1, e)
+		}
+		if resolved[i] == baseSHA || seen[resolved[i]] {
+			return "", errors.New("batch merge heads must be distinct descendants of the verified base")
+		}
+		seen[resolved[i]] = true
+		mergeBase, err := g.Run(ctx, "", "merge-base", baseSHA, resolved[i])
+		if err != nil || mergeBase != baseSHA {
+			return "", fmt.Errorf("batch merge head %d is not synchronized to the verified base", i+1)
+		}
+	}
+	for i := 0; i < len(resolved); i++ {
+		for j := i + 1; j < len(resolved); j++ {
+			mergeBase, err := g.Run(ctx, "", "merge-base", resolved[i], resolved[j])
+			if err != nil || mergeBase != baseSHA {
+				return "", errors.New("batch merge heads do not share the verified base")
+			}
+		}
+	}
+
+	current := baseSHA
+	for i, head := range resolved {
+		tree, err := g.mergedTree(ctx, current, head, writeTree)
+		if err != nil {
+			return "", fmt.Errorf("batch merge head %d conflicts with the preceding integration tree: %w", i+1, err)
+		}
+		if !shaPattern.MatchString(tree) {
+			return "", fmt.Errorf("batch merge head %d produced an invalid tree", i+1)
+		}
+		current, err = g.Run(ctx, message+"\n", "commit-tree", tree, "-p", current, "-p", head)
+		if err != nil {
+			return "", err
+		}
+	}
+	return current, nil
+}
+
+func (g Git) mergeTreeWriteTreeSupported(ctx context.Context) bool {
+	version, err := g.Run(ctx, "", "version")
+	if err != nil {
+		return false
+	}
+	parts := strings.Fields(version)
+	if len(parts) < 3 {
+		return false
+	}
+	var major, minor int
+	if _, err = fmt.Sscanf(parts[2], "%d.%d", &major, &minor); err != nil {
+		return false
+	}
+	return major > 2 || major == 2 && minor >= 38
+}
+
+func (g Git) mergedTree(ctx context.Context, current, head string, writeTree bool) (string, error) {
+	if writeTree {
+		return g.Run(ctx, "", "merge-tree", "--write-tree", current, head)
+	}
+	root, err := os.MkdirTemp("", "aih-merge-worktree-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(root)
+	path := filepath.Join(root, "checkout")
+	if _, err = g.Run(ctx, "", "worktree", "add", "--detach", path, current); err != nil {
+		if cleanupErr := g.cleanupTemporaryWorktree(path, root); cleanupErr != nil {
+			return "", errors.Join(err, cleanupErr)
+		}
+		return "", err
+	}
+	worktree := Git{Dir: path}
+	cleanup := func() error {
+		_, _ = worktree.Run(context.Background(), "", "merge", "--abort")
+		return g.cleanupTemporaryWorktree(path, root)
+	}
+	if _, err = worktree.Run(ctx, "", "merge", "--no-commit", "--no-ff", head); err != nil {
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			return "", errors.Join(err, cleanupErr)
+		}
+		return "", err
+	}
+	tree, err := worktree.Run(ctx, "", "write-tree")
+	if err != nil {
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			return "", errors.Join(err, cleanupErr)
+		}
+		return "", err
+	}
+	if err = cleanup(); err != nil {
+		return "", err
+	}
+	return tree, nil
+}
+
+// cleanupTemporaryWorktree removes a disposable merge worktree even if an
+// interrupted add registered its metadata before returning an error. If Git
+// cannot remove that registration itself, remove only our generated temporary
+// root before pruning its now-stale administrative data.
+func (g Git) cleanupTemporaryWorktree(path, root string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, removeErr := g.Run(ctx, "", "worktree", "remove", "--force", "--force", path)
+	if removeErr != nil {
+		rootErr := os.RemoveAll(root)
+		_, pruneErr := g.Run(ctx, "", "worktree", "prune")
+		if rootErr != nil || pruneErr != nil {
+			return errors.Join(removeErr, rootErr, pruneErr)
+		}
+		return nil
+	}
+	_, pruneErr := g.Run(ctx, "", "worktree", "prune")
+	return pruneErr
+}

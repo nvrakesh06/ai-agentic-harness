@@ -11,6 +11,7 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
 	"gopkg.in/yaml.v3"
 	"os"
@@ -407,8 +408,25 @@ func TestPostVerifyHoldAndHumanRetry(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	effective, e := engine.Canonical(ctx, f.P.Git)
+	if e != nil {
+		t.Fatal(e)
+	}
+	testInputs, e := f.P.Git.Run(ctx, "", "rev-parse", "--verify", base+"^{tree}")
+	if e != nil {
+		t.Fatal(e)
+	}
 	s.Objectives["objective"] = &model.Objective{ID: "objective", Planned: true}
-	s.Tasks["task"] = &model.Task{ID: "task", ObjectiveID: "objective", State: model.PostVerify, MergeSHA: base, HeadSHA: base, Branch: "aih/task", FixCycles: map[string]int{}}
+	// POST_VERIFY is published only after integration has recorded native
+	// evidence. Keep the fixture on that production contract so the retry proves
+	// that recovery refreshes evidence rather than attempting to create it from
+	// an impossible evidence-free integrated state.
+	s.Tasks["task"] = &model.Task{ID: "task", ObjectiveID: "objective", State: model.PostVerify, MergeSHA: base, HeadSHA: base, Branch: "aih/task", FixCycles: map[string]int{}, Evidence: &model.Evidence{
+		Base: base, Head: base, Config: effective.Hash, Rules: roles.Hash(),
+		Checks: []string{"check=prior integration exit=0"}, ValidationGate: "full", ValidationReason: "exact integrated merge-train head",
+		ValidationInput: strings.Repeat("0", 64), Toolchain: "fixture-toolchain", TestInputs: testInputs,
+		IntegrationSHA: base, IntegrationOwner: "prior-controller",
+	}}
 	next, e := f.P.Git.StateCommit(ctx, h, s)
 	if e != nil {
 		t.Fatal(e)
@@ -460,6 +478,10 @@ func TestPostVerifyHoldAndHumanRetry(t *testing.T) {
 	}
 	if s.IntegrationBlocked != "" {
 		t.Fatal("hold not cleared")
+	}
+	evidence := s.Tasks["task"].Evidence
+	if evidence == nil || evidence.IntegrationSHA != base || evidence.ValidationGate != "full" || evidence.ValidationInput == strings.Repeat("0", 64) || len(evidence.Checks) == 0 || evidence.Checks[0] == "check=prior integration exit=0" {
+		t.Fatalf("human retry did not retain integration provenance and refresh native evidence: %#v", evidence)
 	}
 	_ = f.P.DB.Submit(store.Command{ID: model.ID(), Kind: "handoff"})
 	if e = <-done; e != nil {
