@@ -231,9 +231,22 @@ var transientGitTransportErrors = []string{
 	"the requested url returned error: 504", "bad gateway", "service unavailable", "gateway timeout",
 }
 
+// publicationAttemptTimeout bounds one mutating git child. The enclosing
+// publication context stays live after this expires so its exact refs can be
+// reconciled read-only before another fenced push is considered.
+var publicationAttemptTimeout = 2 * time.Minute
+
 func transientGitTransport(err error) bool {
 	if err == nil {
 		return false
+	}
+	// A deadline is retryable only when platform proved the local child exited.
+	// Retrying an un-reaped push could race the original atomic transaction.
+	if errors.Is(err, platform.ErrProcessTerminationUncertain) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
 	}
 	message := strings.ToLower(err.Error())
 	for _, fragment := range transientGitTransportErrors {
@@ -242,6 +255,29 @@ func transientGitTransport(err error) bool {
 		}
 	}
 	return false
+}
+
+// reconcileRemoteHead is read-only and deliberately short. A lost push
+// acknowledgement must be resolved from every exact remote ref before another
+// fenced push is allowed; transient lookup failure gets two bounded retries.
+func reconcileRemoteHead(ctx context.Context, remoteHead func(context.Context, string) (string, error), branch string) (string, error) {
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		readCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		head, err := remoteHead(readCtx, branch)
+		cancel()
+		if err == nil {
+			return head, nil
+		}
+		last = err
+		if !transientGitTransport(err) {
+			return "", err
+		}
+	}
+	return "", last
 }
 
 func waitForPublicationRetry(ctx context.Context, delay time.Duration) error {
@@ -253,6 +289,13 @@ func waitForPublicationRetry(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func publicationBudgetError(last error, budget error) error {
+	if last == nil {
+		return budget
+	}
+	return fmt.Errorf("atomic publication budget expired before another mutation: %w", errors.Join(last, budget))
 }
 
 // publishWithRetry retains the exact push arguments, including every old-ref
@@ -268,23 +311,26 @@ func publishWithRetry(ctx context.Context, updates []Update, args []string,
 	var last error
 	for attempt := 0; attempt < attempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return err
+			return publicationBudgetError(last, err)
 		}
-		last = push(ctx, args)
+		attemptCtx, cancel := context.WithTimeout(ctx, publicationAttemptTimeout)
+		last = push(attemptCtx, args)
+		cancel()
 		if last == nil {
 			return nil
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return publicationBudgetError(last, err)
 		}
-		allNew, sawNew := true, false
+		allNew, sawNew, unresolved := true, false, false
 		for _, update := range updates {
-			head, err := remoteHead(ctx, update.Branch)
+			head, err := reconcileRemoteHead(ctx, remoteHead, update.Branch)
 			if err != nil {
 				allNew = false
 				if !transientGitTransport(err) {
 					return fmt.Errorf("atomic publication could not reconcile %s: %w", update.Branch, err)
 				}
+				unresolved = true
 				continue
 			}
 			if head != update.New {
@@ -300,7 +346,7 @@ func publishWithRetry(ctx context.Context, updates []Update, args []string,
 		if allNew {
 			return nil
 		}
-		if sawNew || !transientGitTransport(last) {
+		if unresolved || sawNew || !transientGitTransport(last) {
 			return fmt.Errorf("atomic publication rejected or unconfirmed; reconcile before retry: %w", last)
 		}
 		if attempt == attempts-1 {
@@ -312,7 +358,7 @@ func publishWithRetry(ctx context.Context, updates []Update, args []string,
 		}
 		log.Printf("AIH fenced publication transport retry %d/%d in %s: %s", attempt+2, attempts, delay, safety.Redact(last.Error()))
 		if err := wait(ctx, delay); err != nil {
-			return err
+			return publicationBudgetError(last, err)
 		}
 	}
 	return fmt.Errorf("atomic publication transport retry exhausted after %d attempts; run aih attach then aih resume after connectivity recovers: %w", attempts, last)
