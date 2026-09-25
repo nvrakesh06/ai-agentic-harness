@@ -293,6 +293,60 @@ func TestStatusDistinguishesLocalAndDurableLeaseHeartbeats(t *testing.T) {
 	}
 }
 
+func TestStatusReportsStalledSupervisorWhenHeartbeatAttemptOutrunsProgress(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Now().UTC()
+	snapshot := model.NewSnapshot("project123")
+	snapshot.Controller = model.Lease{Machine: "machine-a", Heartbeat: now.Add(-2 * time.Minute), Expires: now.Add(time.Minute)}
+	if err = db.Save(strings.Repeat("a", 40), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Set(engine.LocalLeaseHeartbeatKey, now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Set(engine.LocalSupervisorProgressKey, now.Add(-engine.SupervisorHealthWindow(3*time.Minute)-time.Second).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Set(engine.LocalSupervisorStageKey, "persist: publishing state"); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := platform.Acquire(filepath.Join(dir, "supervisor.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	var human bytes.Buffer
+	cmd := New()
+	cmd.SetOut(&human)
+	if err = showStatus(cmd, &engine.Project{Dir: dir, DB: db}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Local supervisor health: STALLED", "no completed local lease pulse", "persist: publishing state"} {
+		if !strings.Contains(human.String(), want) {
+			t.Fatalf("status omitted %q: %s", want, human.String())
+		}
+	}
+	var machine bytes.Buffer
+	cmd.SetOut(&machine)
+	if err = showStatus(cmd, &engine.Project{Dir: dir, DB: db}, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Health *engine.SupervisorHealth `json:"local_supervisor_health"`
+	}
+	if err = json.Unmarshal(machine.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Health == nil || result.Health.State != "stalled" || result.Health.Stage != "persist: publishing state" {
+		t.Fatalf("wrong machine-readable health: %#v", result.Health)
+	}
+}
+
 func TestStatusShowsActiveBuildAndInvokingBinaryMismatch(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "state.db"))
