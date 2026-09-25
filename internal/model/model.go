@@ -16,7 +16,7 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 6
+const StateSchema = 7
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
@@ -55,45 +55,52 @@ var edges = map[State][]State{
 }
 
 type Task struct {
-	ID               string                      `json:"id"`
-	ObjectiveID      string                      `json:"objective_id"`
-	Issue            int                         `json:"issue"`
-	PR               int                         `json:"pr,omitempty"`
-	Title            string                      `json:"title"`
-	Objective        string                      `json:"objective"`
-	Acceptance       []string                    `json:"acceptance"`
-	Dependencies     []string                    `json:"dependencies"`
-	Areas            []string                    `json:"areas"`
-	Domains          []string                    `json:"conflict_domains"`
-	Risk             string                      `json:"risk"`
-	UI               bool                        `json:"ui"`
-	Security         bool                        `json:"security"`
-	Roles            []string                    `json:"roles"`
-	State            State                       `json:"state"`
-	Branch           string                      `json:"branch"`
-	BaseSHA          string                      `json:"base_sha,omitempty"`
-	HeadSHA          string                      `json:"head_sha,omitempty"`
-	MergeSHA         string                      `json:"merge_sha,omitempty"`
-	PostVerifySHA    string                      `json:"post_verify_sha,omitempty"`
-	RecoveryRequired bool                        `json:"recovery_required,omitempty"`
-	SyncBase         string                      `json:"conflict_base,omitempty"`
-	Attempts         int                         `json:"attempts"`
-	Rotations        int                         `json:"checkpoint_rotations"`
-	FixCycles        map[string]int              `json:"fix_cycles"`
-	AdvisorUsed      bool                        `json:"advisor_used"`
-	RunID            string                      `json:"run_id,omitempty"`
-	Preflight        *Preflight                  `json:"preflight,omitempty"`
-	Findings         []Finding                   `json:"findings,omitempty"`
-	Summary          string                      `json:"implementation_summary,omitempty"`
-	ReportedTests    []string                    `json:"reported_tests,omitempty"`
-	Risks            []string                    `json:"remaining_risks,omitempty"`
-	Decisions        []string                    `json:"decisions,omitempty"`
-	Blocker          *Blocker                    `json:"blocker,omitempty"`
-	Verification     *Verification               `json:"verification_retry_guard,omitempty"`
-	Evidence         *Evidence                   `json:"evidence,omitempty"`
-	ReviewProvenance map[string]ReviewProvenance `json:"review_provenance,omitempty"`
-	VisualRequired   *VisualRequirement          `json:"visual_required,omitempty"`
-	Updated          time.Time                   `json:"updated"`
+	ID           string   `json:"id"`
+	ObjectiveID  string   `json:"objective_id"`
+	Issue        int      `json:"issue"`
+	PR           int      `json:"pr,omitempty"`
+	Title        string   `json:"title"`
+	Objective    string   `json:"objective"`
+	Acceptance   []string `json:"acceptance"`
+	Dependencies []string `json:"dependencies"`
+	Areas        []string `json:"areas"`
+	// AssignedAreas is the immutable plan-time ownership boundary. Areas is
+	// retained as the human-readable plan scope and may be widened by legacy
+	// runtimes, so routing must eventually use AssignedAreas instead.
+	AssignedAreas []string `json:"assigned_areas,omitempty"`
+	// AssignedAreaKinds captures each AssignedAreas entry as it existed in the
+	// base tree. Unknown is an explicit, fail-closed classification.
+	AssignedAreaKinds map[string]string           `json:"assigned_area_kinds,omitempty"`
+	Domains           []string                    `json:"conflict_domains"`
+	Risk              string                      `json:"risk"`
+	UI                bool                        `json:"ui"`
+	Security          bool                        `json:"security"`
+	Roles             []string                    `json:"roles"`
+	State             State                       `json:"state"`
+	Branch            string                      `json:"branch"`
+	BaseSHA           string                      `json:"base_sha,omitempty"`
+	HeadSHA           string                      `json:"head_sha,omitempty"`
+	MergeSHA          string                      `json:"merge_sha,omitempty"`
+	PostVerifySHA     string                      `json:"post_verify_sha,omitempty"`
+	RecoveryRequired  bool                        `json:"recovery_required,omitempty"`
+	SyncBase          string                      `json:"conflict_base,omitempty"`
+	Attempts          int                         `json:"attempts"`
+	Rotations         int                         `json:"checkpoint_rotations"`
+	FixCycles         map[string]int              `json:"fix_cycles"`
+	AdvisorUsed       bool                        `json:"advisor_used"`
+	RunID             string                      `json:"run_id,omitempty"`
+	Preflight         *Preflight                  `json:"preflight,omitempty"`
+	Findings          []Finding                   `json:"findings,omitempty"`
+	Summary           string                      `json:"implementation_summary,omitempty"`
+	ReportedTests     []string                    `json:"reported_tests,omitempty"`
+	Risks             []string                    `json:"remaining_risks,omitempty"`
+	Decisions         []string                    `json:"decisions,omitempty"`
+	Blocker           *Blocker                    `json:"blocker,omitempty"`
+	Verification      *Verification               `json:"verification_retry_guard,omitempty"`
+	Evidence          *Evidence                   `json:"evidence,omitempty"`
+	ReviewProvenance  map[string]ReviewProvenance `json:"review_provenance,omitempty"`
+	VisualRequired    *VisualRequirement          `json:"visual_required,omitempty"`
+	Updated           time.Time                   `json:"updated"`
 }
 
 // VisualRequirement is a durable exact-head gate created when a preflight
@@ -477,6 +484,69 @@ func NewSnapshot(project string) *Snapshot {
 	return &Snapshot{Schema: StateSchema, CreatedBy: Version, Project: project,
 		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}}
 }
+
+const (
+	AreaFile      = "file"
+	AreaDirectory = "directory"
+	AreaUnknown   = "unknown"
+)
+
+// ImmutableAreas returns a copy of the plan-time ownership boundary. Legacy
+// state may be reconstructed only before a task has started, because older
+// runtimes could append changed paths to Areas after a checkpoint.
+func ImmutableAreas(t *Task) ([]string, bool) {
+	if t != nil && len(t.AssignedAreas) != 0 {
+		return append([]string(nil), t.AssignedAreas...), true
+	}
+	if t != nil && t.HeadSHA == "" && (t.State == Planned || t.State == Ready) && len(t.Areas) != 0 {
+		return append([]string(nil), t.Areas...), true
+	}
+	return nil, false
+}
+
+// ImmutableAreaKinds returns a complete copy of the classifications for an
+// immutable assignment. Missing or invalid values are represented as unknown
+// so callers fail closed until the planner supplies base-tree evidence.
+func ImmutableAreaKinds(t *Task) map[string]string {
+	if t == nil || len(t.AssignedAreas) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(t.AssignedAreas))
+	for _, area := range t.AssignedAreas {
+		kind := t.AssignedAreaKinds[area]
+		if kind != AreaFile && kind != AreaDirectory && kind != AreaUnknown {
+			kind = AreaUnknown
+		}
+		out[area] = kind
+	}
+	return out
+}
+
+func validateAssignedAreas(t *Task) error {
+	if len(t.AssignedAreas) == 0 {
+		if len(t.AssignedAreaKinds) != 0 {
+			return errors.New("assigned area kinds without assigned areas")
+		}
+		return nil
+	}
+	seen := make(map[string]bool, len(t.AssignedAreas))
+	for _, area := range t.AssignedAreas {
+		if strings.TrimSpace(area) == "" || seen[area] {
+			return errors.New("invalid assigned area")
+		}
+		seen[area] = true
+		kind, ok := t.AssignedAreaKinds[area]
+		if !ok || (kind != AreaFile && kind != AreaDirectory && kind != AreaUnknown) {
+			return errors.New("invalid assigned area kind")
+		}
+	}
+	for area := range t.AssignedAreaKinds {
+		if !seen[area] {
+			return errors.New("assigned area kind outside assigned areas")
+		}
+	}
+	return nil
+}
 func ID() string {
 	var b [12]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -511,6 +581,34 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		s.Capacity.MaxLightChecks = 0
 		s.Capacity.Verification = nil
 	}
+	if s.Schema <= 6 {
+		// Version 7 makes the original task boundary durable. It can only be
+		// reconstructed from Areas for work that has not started; after a
+		// checkpoint Areas might contain legacy verification output. Historical
+		// state has no portable base-tree metadata, so every recovered kind is
+		// explicitly unknown rather than guessed from path spelling.
+		for _, task := range s.Tasks {
+			if task == nil {
+				continue
+			}
+			if len(task.AssignedAreas) == 0 {
+				areas, ok := ImmutableAreas(task)
+				if !ok {
+					continue
+				}
+				task.AssignedAreas = areas
+			}
+			if task.AssignedAreaKinds == nil {
+				task.AssignedAreaKinds = make(map[string]string, len(task.AssignedAreas))
+			}
+			for _, area := range task.AssignedAreas {
+				kind := task.AssignedAreaKinds[area]
+				if kind != AreaFile && kind != AreaDirectory && kind != AreaUnknown {
+					task.AssignedAreaKinds[area] = AreaUnknown
+				}
+			}
+		}
+	}
 	if migrated {
 		s.Schema = StateSchema
 	}
@@ -543,6 +641,9 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			if sha != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(sha) {
 				return nil, false, errors.New("invalid task revision")
 			}
+		}
+		if err := validateAssignedAreas(t); err != nil {
+			return nil, false, err
 		}
 		if t.State == Blocked && (t.Blocker == nil || t.Blocker.Question == "") {
 			return nil, false, errors.New("blocked task has no question")

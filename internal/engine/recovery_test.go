@@ -142,6 +142,52 @@ func TestPartialGraphRecoversWithoutLocalProject(t *testing.T) {
 	}
 }
 
+func TestAttachMigratesSchemaSixAreaOwnershipWithoutWideningStartedTasks(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+
+	state, oldStateHead, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Schema = 6
+	state.Tasks["unstarted"] = &model.Task{ID: "unstarted", State: model.Ready, Areas: []string{"src/engine", "README.md"}}
+	state.Tasks["started"] = &model.Task{ID: "started", State: model.Running, Areas: []string{"legacy-verification-output.txt"}}
+	legacyStateHead, err := f.P.Git.StateCommit(ctx, oldStateHead, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: oldStateHead, New: legacyStateHead}}); err != nil {
+		t.Fatal(err)
+	}
+
+	attached, err := f.Open(ctx, filepath.Join(f.Root, "machine-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer attached.DB.Close()
+	if err = attached.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered, _, err := attached.DB.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Schema != model.StateSchema {
+		t.Fatalf("attach did not upgrade schema: %d", recovered.Schema)
+	}
+	if task := recovered.Tasks["unstarted"]; strings.Join(task.AssignedAreas, ",") != "src/engine,README.md" || task.AssignedAreaKinds["src/engine"] != model.AreaUnknown || task.AssignedAreaKinds["README.md"] != model.AreaUnknown {
+		t.Fatalf("attach did not recover fail-closed immutable ownership: %#v", task)
+	}
+	if task := recovered.Tasks["started"]; len(task.AssignedAreas) != 0 || len(task.AssignedAreaKinds) != 0 || task.State != model.Running {
+		t.Fatalf("attach widened or changed a started legacy task: %#v", task)
+	}
+}
+
 func TestDeadlineCheckpointAndHandoffRecoverTogetherAfterMachineLoss(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
