@@ -64,7 +64,8 @@ func (g Git) ClassifyAreasAtRef(ctx context.Context, ref string, areas []string)
 	if len(areas) == 0 {
 		return nil, &AreaError{Reason: "at least one area is required"}
 	}
-	if _, err := g.SHA(ctx, ref); err != nil {
+	base, err := g.SHA(ctx, ref)
+	if err != nil {
 		return nil, fmt.Errorf("resolve task-area base %q: %w", ref, err)
 	}
 	classified := make([]Area, 0, len(areas))
@@ -80,14 +81,17 @@ func (g Git) ClassifyAreasAtRef(ctx context.Context, ref string, areas []string)
 		seen[pattern] = struct{}{}
 
 		kind := AreaExplicitFile
-		objectType, objectErr := g.Run(ctx, "", "cat-file", "-t", ref+":"+pattern)
+		objectType, exists, err := g.baseTreeObjectType(ctx, base, pattern)
+		if err != nil {
+			return nil, &AreaError{Area: raw, Reason: "read base tree: " + err.Error()}
+		}
 		if explicitDirectory {
-			if objectErr == nil && strings.TrimSpace(objectType) == "blob" {
+			if exists && objectType == "blob" {
 				return nil, &AreaError{Area: raw, Reason: "explicit directory conflicts with a tracked file"}
 			}
 			kind = AreaDirectory
-		} else if objectErr == nil {
-			switch strings.TrimSpace(objectType) {
+		} else if exists {
+			switch objectType {
 			case "blob":
 				kind = AreaTrackedFile
 			case "tree":
@@ -149,20 +153,57 @@ func (g Git) ValidateCheckpointScope(ctx context.Context, worktree string, areas
 	return ValidateScopePaths(areas, paths)
 }
 
+// ValidateFullCheckpointScope is the checkpoint admission API. In addition to
+// current dirty paths, it validates every committed change from immutableBase
+// through the worktree's current HEAD. Call this immediately before Checkpoint:
+// checking only the dirty worktree would miss an earlier out-of-area commit.
+func (g Git) ValidateFullCheckpointScope(ctx context.Context, worktree, immutableBase string, areas []Area) error {
+	w := Git{Dir: worktree}
+	if err := w.ValidateCommitScope(ctx, immutableBase, "HEAD", areas); err != nil {
+		return err
+	}
+	return g.ValidateCheckpointScope(ctx, worktree, areas)
+}
+
 // ValidateCommitScope verifies an imported checkpoint against the immutable
 // base-tree classification. It is intended for an eventual integration gate.
 func (g Git) ValidateCommitScope(ctx context.Context, base, head string, areas []Area) error {
-	if _, err := g.SHA(ctx, base); err != nil {
+	baseSHA, err := g.SHA(ctx, base)
+	if err != nil {
 		return fmt.Errorf("resolve scope base %q: %w", base, err)
 	}
-	if _, err := g.SHA(ctx, head); err != nil {
+	headSHA, err := g.SHA(ctx, head)
+	if err != nil {
 		return fmt.Errorf("resolve scope head %q: %w", head, err)
 	}
-	out, err := g.Run(ctx, "", "diff", "--no-renames", "--name-only", "-z", base+"..."+head)
+	if !g.Ancestor(ctx, baseSHA, headSHA) {
+		return fmt.Errorf("scope head %s does not descend from immutable base %s", headSHA, baseSHA)
+	}
+	out, err := g.Run(ctx, "", "diff", "--no-renames", "--name-only", "-z", baseSHA+".."+headSHA)
 	if err != nil {
 		return err
 	}
 	return ValidateScopePaths(areas, splitGitPaths(out))
+}
+
+func (g Git) baseTreeObjectType(ctx context.Context, base, pattern string) (string, bool, error) {
+	out, err := g.Run(ctx, "", "ls-tree", "-z", base, "--", pattern)
+	if err != nil {
+		return "", false, err
+	}
+	if out == "" {
+		return "", false, nil
+	}
+	entry := strings.SplitN(out, "\x00", 2)[0]
+	parts := strings.SplitN(entry, "\t", 2)
+	if len(parts) != 2 || parts[1] != pattern {
+		return "", false, errors.New("ambiguous base-tree entry")
+	}
+	fields := strings.Fields(parts[0])
+	if len(fields) != 3 {
+		return "", false, errors.New("malformed base-tree entry")
+	}
+	return fields[1], true, nil
 }
 
 func changedWorktreePaths(ctx context.Context, g Git) ([]string, error) {

@@ -50,7 +50,7 @@ func TestClassifyAreasAtRefMakesBaseTreeIntentImmutable(t *testing.T) {
 
 	// A task owns the tracked README file, not a directory a later worker might
 	// create at that name. A classified directory does include newly-created files.
-	if err := gitx.ValidateScopePaths(areas, []string{"README.md", "planned.md", "docs/new.md", "assets/new.svg", "windows/path/new.txt"}); err != nil {
+	if err := gitx.ValidateScopePaths(areas, []string{"README.md", "planned.md", `docs\new.md`, "assets/new.svg", "windows/path/new.txt"}); err != nil {
 		t.Fatalf("allowed paths rejected: %v", err)
 	}
 	err = gitx.ValidateScopePaths(areas, []string{"README.md/child", "other.txt", "docs/new.md", "other.txt"})
@@ -172,5 +172,124 @@ func TestValidateCommitScopeRejectsOutOfAreaCheckpoint(t *testing.T) {
 	}
 	if err := f.P.Git.ValidateCommitScope(ctx, base, head, areas); err == nil {
 		t.Fatal("out-of-area imported checkpoint was accepted")
+	}
+}
+
+func TestValidateFullCheckpointScopeIncludesEarlierCommits(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	dir := filepath.Join(f.P.Dir, "worktrees", "full-scope")
+	if err := f.P.Git.Worktree(ctx, dir, "aih/full-scope", "refs/remotes/origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	base, err := (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	areas, err := f.P.Git.ClassifyAreasAtRef(ctx, base, []string{"allowed/**"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "outside.txt"), []byte("first checkpoint\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.P.Git.Checkpoint(ctx, dir, "full-scope"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "allowed"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "allowed", "later.txt"), []byte("later\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = f.P.Git.ValidateFullCheckpointScope(ctx, dir, base, areas)
+	var scopeErr *gitx.ScopeError
+	if !errors.As(err, &scopeErr) || !reflect.DeepEqual(scopeErr.Paths, []string{"outside.txt"}) {
+		t.Fatalf("earlier out-of-area checkpoint escaped admission: %#v", err)
+	}
+}
+
+func TestValidateCommitScopeRejectsFileToDirectoryReplacement(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	dir := filepath.Join(f.P.Dir, "worktrees", "file-replacement")
+	if err := f.P.Git.Worktree(ctx, dir, "aih/file-replacement", "refs/remotes/origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	base, err := (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	areas, err := f.P.Git.ClassifyAreasAtRef(ctx, base, []string{"README.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "README.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "README.md"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.md", "nested.txt"), []byte("nested\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	head, err := f.P.Git.Checkpoint(ctx, dir, "file-replacement")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.P.Git.ValidateCommitScope(ctx, base, head, areas); err == nil {
+		t.Fatal("file assignment accepted a file-to-directory replacement")
+	}
+}
+
+func TestValidateCommitScopeRejectsBehindAndDivergedHeads(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	source := gitx.Git{Dir: f.Source}
+	root, err := source.SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.Source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Run(ctx, "", "add", "base.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Run(ctx, "", "commit", "-m", "base child"); err != nil {
+		t.Fatal(err)
+	}
+	base, err := source.SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := source.Run(ctx, "", "rev-parse", root+"^{tree}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	side, err := source.Run(ctx, "sibling\n", "commit-tree", tree, "-p", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	areas, err := source.ClassifyAreasAtRef(ctx, base, []string{"README.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, head := range []string{root, side} {
+		if err := source.ValidateCommitScope(ctx, base, head, areas); err == nil {
+			t.Fatalf("non-descendant head %s was accepted", head)
+		}
 	}
 }
