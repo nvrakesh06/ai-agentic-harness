@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
@@ -13,8 +14,18 @@ import (
 
 func (c *Controller) integrate(id string) {
 	t := c.Snapshot().Tasks[id]
+	if t == nil {
+		return
+	}
 	if t.State == model.PostVerify {
 		c.postVerify(id)
+		return
+	}
+	if !dependenciesComplete(c.Snapshot(), t) {
+		if c.mutate(func(s *model.Snapshot) error { s.Tasks[id].State = model.SyncRequired; return nil }) == nil {
+			_ = c.updatePR(id, true)
+			c.mirror(id)
+		}
 		return
 	}
 	effective, e := c.effective(c.ctx)
@@ -89,6 +100,14 @@ func (c *Controller) integrate(id string) {
 	}
 	checks, e := c.checks(c.ctx, effective, dir, id)
 	if e != nil {
+		// Merge-train checks run on the candidate merge, which is exactly where
+		// an owned-but-unmerged sibling defect can surface. Give the bounded
+		// canonical-base reproduction route the same chance it has during the
+		// ordinary verification pass before falling back to a local FIX retry.
+		if failure, ok := nativeCheckFailure(e); ok {
+			c.verificationFailure(id, failure)
+			return
+		}
 		c.retry(id, "verification", e.Error())
 		return
 	}
@@ -143,6 +162,14 @@ func (c *Controller) integrate(id string) {
 		return
 	}
 	c.postVerify(id)
+}
+
+func nativeCheckFailure(err error) (*checkFailure, bool) {
+	var failure *checkFailure
+	if !errors.As(err, &failure) {
+		return nil, false
+	}
+	return failure, true
 }
 func (c *Controller) postVerify(id string) {
 	t := c.Snapshot().Tasks[id]
