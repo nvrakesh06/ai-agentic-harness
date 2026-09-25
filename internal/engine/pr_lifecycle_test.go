@@ -2,6 +2,8 @@ package engine_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -60,6 +62,24 @@ func waitForPR(t *testing.T, ctx context.Context, f *demo.Fixture, condition fun
 		select {
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+func waitForMarker(ctx context.Context, marker string, done <-chan error) error {
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			return nil
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				return fmt.Errorf("controller stopped before native verification: %w", err)
+			}
+			return errors.New("controller stopped before native verification")
+		case <-ctx.Done():
+			return fmt.Errorf("native verification did not start: %w", ctx.Err())
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
@@ -134,11 +154,15 @@ func TestVerificationFailureKeepsOneDraftPRAndNoopStaysHidden(t *testing.T) {
 }
 
 func TestRecoveryReusesEarlyDraftPR(t *testing.T) {
-	t.Parallel()
+	// This fixture deliberately blocks a real managed check while it records and
+	// recovers a draft PR. Keep its short admission deadline independent from
+	// sibling lifecycle fixtures in ordinary package test runs.
 	ctx := context.Background()
+	firstCtx := contextWithTimeout(t, 90*time.Second)
 	tmp := t.TempDir()
 	marker := filepath.Join(tmp, "check-started")
 	release := filepath.Join(tmp, "check-release")
+	t.Cleanup(func() { _ = os.WriteFile(release, []byte("continue"), 0600) })
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -150,17 +174,10 @@ func TestRecoveryReusesEarlyDraftPR(t *testing.T) {
 	defer f.P.DB.Close()
 	seedReadyTask(t, ctx, f, "recover-draft")
 	firstDone := make(chan error, 1)
-	go func() { firstDone <- engine.New(f.P).Serve(ctx) }()
+	go func() { firstDone <- engine.New(f.P).Serve(firstCtx) }()
 	waitForPR(t, contextWithTimeout(t, 30*time.Second), f, func(updates []demo.PullUpdate) bool { return len(updates) > 0 })
-	for {
-		if _, err = os.Stat(marker); err == nil {
-			break
-		}
-		select {
-		case err = <-firstDone:
-			t.Fatal("controller stopped before native verification", err)
-		case <-time.After(20 * time.Millisecond):
-		}
+	if err = waitForMarker(firstCtx, marker, firstDone); err != nil {
+		t.Fatal(err)
 	}
 	pulls, _ := f.Hub.Pulls()
 	if len(pulls) != 1 || !pulls[0].Draft {
@@ -178,8 +195,7 @@ func TestRecoveryReusesEarlyDraftPR(t *testing.T) {
 	if err = os.WriteFile(release, []byte("continue"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	secondCtx, secondCancel := context.WithTimeout(ctx, 90*time.Second)
-	defer secondCancel()
+	secondCtx := contextWithTimeout(t, 90*time.Second)
 	secondDone := make(chan error, 1)
 	go func() { secondDone <- engine.New(f.P).Serve(secondCtx) }()
 	waitForPR(t, secondCtx, f, func(updates []demo.PullUpdate) bool {
@@ -200,6 +216,15 @@ func TestRecoveryReusesEarlyDraftPR(t *testing.T) {
 		}
 	}
 	stopController(t, f, secondDone)
+}
+
+func TestWaitForMarkerFailsAtDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := waitForMarker(ctx, filepath.Join(t.TempDir(), "never-created"), make(chan error))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("marker wait error = %v, want canceled context", err)
+	}
 }
 
 func contextWithTimeout(t *testing.T, duration time.Duration) context.Context {
