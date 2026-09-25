@@ -21,7 +21,7 @@ func TestMergeHeadsFallbackUsesTemporaryIndexWithoutRefs(t *testing.T) {
 		assertFallbackMerged(t, ctx, g, merged, first, second)
 		assertFallbackFile(t, ctx, g, merged, "first.txt", "first")
 		assertFallbackFile(t, ctx, g, merged, "second.txt", "second")
-		assertFallbackIndexCleaned(t, ctx, g)
+		assertFallbackWorktreeCleaned(t, ctx, g)
 	})
 	t.Run("three heads", func(t *testing.T) {
 		g, base := fallbackRepository(t, ctx)
@@ -34,7 +34,31 @@ func TestMergeHeadsFallbackUsesTemporaryIndexWithoutRefs(t *testing.T) {
 		}
 		assertFallbackMerged(t, ctx, g, merged, first, second, third)
 		assertFallbackFile(t, ctx, g, merged, "third.txt", "third")
-		assertFallbackIndexCleaned(t, ctx, g)
+		assertFallbackWorktreeCleaned(t, ctx, g)
+	})
+	t.Run("nonoverlapping same-file edits", func(t *testing.T) {
+		g, base := fallbackRepository(t, ctx)
+		if err := os.WriteFile(filepath.Join(g.Dir, "README.md"), []byte("one\ntwo\nthree\nfour\nfive\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "expand base"}} {
+			if _, err := g.Run(ctx, "", args...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		updatedBase, err := g.SHA(ctx, "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		base = updatedBase
+		first := fallbackHead(t, ctx, g, base, "first", "README.md", "one\nfirst\nthree\nfour\nfive\n")
+		second := fallbackHead(t, ctx, g, base, "second", "README.md", "one\ntwo\nthree\nfour\nsecond\n")
+		merged, err := g.mergeHeads(ctx, base, []string{first, second}, "Batch merge", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertFallbackFile(t, ctx, g, merged, "README.md", "one\nfirst\nthree\nfour\nsecond")
+		assertFallbackWorktreeCleaned(t, ctx, g)
 	})
 	t.Run("conflict", func(t *testing.T) {
 		g, base := fallbackRepository(t, ctx)
@@ -54,7 +78,7 @@ func TestMergeHeadsFallbackUsesTemporaryIndexWithoutRefs(t *testing.T) {
 		if after != before {
 			t.Fatalf("fallback conflict advanced refs:\nbefore %s\nafter  %s", before, after)
 		}
-		assertFallbackIndexCleaned(t, ctx, g)
+		assertFallbackWorktreeCleaned(t, ctx, g)
 	})
 }
 
@@ -123,17 +147,20 @@ func assertFallbackFile(t *testing.T, ctx context.Context, g Git, head, name, wa
 	}
 }
 
-func assertFallbackIndexCleaned(t *testing.T, ctx context.Context, g Git) {
+func assertFallbackWorktreeCleaned(t *testing.T, ctx context.Context, g Git) {
 	t.Helper()
-	gitDir, err := g.Run(ctx, "", "rev-parse", "--absolute-git-dir")
+	worktrees, err := g.Run(ctx, "", "worktree", "list", "--porcelain")
 	if err != nil {
 		t.Fatal(err)
 	}
-	paths, err := filepath.Glob(filepath.Join(gitDir, "aih-merge-index-*"))
+	if strings.Contains(worktrees, "aih-merge-worktree-") {
+		t.Fatalf("fallback temporary worktree remains: %s", worktrees)
+	}
+	paths, err := filepath.Glob(filepath.Join(os.TempDir(), "aih-merge-worktree-*"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(paths) != 0 {
-		t.Fatalf("fallback temporary index directories remain: %v", paths)
+		t.Fatalf("fallback temporary worktree directories remain: %v", paths)
 	}
 }

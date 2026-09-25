@@ -21,10 +21,6 @@ import (
 type Git struct{ Dir string }
 
 func (g Git) Run(ctx context.Context, input string, args ...string) (string, error) {
-	return g.run(ctx, input, nil, args...)
-}
-
-func (g Git) run(ctx context.Context, input string, extraEnv []string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	argv := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "user.name=AIH", "-c", "user.email=aih@localhost", "-c", "commit.gpgsign=false"}
@@ -38,7 +34,6 @@ func (g Git) run(ctx context.Context, input string, extraEnv []string, args ...s
 		env = append(env, v)
 	}
 	env = append(env, "GIT_TERMINAL_PROMPT=0")
-	env = append(env, extraEnv...)
 	out, e := platform.Run(ctx, g.Dir, env, input, "git", argv...)
 	if e != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), e, safety.Redact(out))
@@ -555,22 +550,36 @@ func (g Git) mergedTree(ctx context.Context, current, head string, writeTree boo
 	if writeTree {
 		return g.Run(ctx, "", "merge-tree", "--write-tree", current, head)
 	}
-	gitDir, err := g.Run(ctx, "", "rev-parse", "--absolute-git-dir")
+	root, err := os.MkdirTemp("", "aih-merge-worktree-")
 	if err != nil {
 		return "", err
 	}
-	indexDir, err := os.MkdirTemp(gitDir, "aih-merge-index-")
+	defer os.RemoveAll(root)
+	path := filepath.Join(root, "checkout")
+	if _, err = g.Run(ctx, "", "worktree", "add", "--detach", path, current); err != nil {
+		return "", err
+	}
+	worktree := Git{Dir: path}
+	cleanup := func() error {
+		_, _ = worktree.Run(context.Background(), "", "merge", "--abort")
+		_, err := g.Run(context.Background(), "", "worktree", "remove", "--force", path)
+		return err
+	}
+	if _, err = worktree.Run(ctx, "", "merge", "--no-commit", "--no-ff", head); err != nil {
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			return "", errors.Join(err, cleanupErr)
+		}
+		return "", err
+	}
+	tree, err := worktree.Run(ctx, "", "write-tree")
 	if err != nil {
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			return "", errors.Join(err, cleanupErr)
+		}
 		return "", err
 	}
-	defer os.RemoveAll(indexDir)
-	index := filepath.Join(indexDir, "index")
-	base, err := g.Run(ctx, "", "merge-base", current, head)
-	if err != nil {
+	if err = cleanup(); err != nil {
 		return "", err
 	}
-	if _, err = g.run(ctx, "", []string{"GIT_INDEX_FILE=" + index}, "read-tree", "-m", base, current, head); err != nil {
-		return "", err
-	}
-	return g.run(ctx, "", []string{"GIT_INDEX_FILE=" + index}, "write-tree")
+	return tree, nil
 }
