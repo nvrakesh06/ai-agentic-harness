@@ -401,6 +401,11 @@ type Evidence struct {
 	Config             string                       `json:"config"`
 	Rules              string                       `json:"rules"`
 	Checks             []string                     `json:"checks"`
+	ValidationGate     string                       `json:"validation_gate,omitempty"`
+	ValidationReason   string                       `json:"validation_reason,omitempty"`
+	ValidationInput    string                       `json:"validation_input,omitempty"`
+	Toolchain          string                       `json:"toolchain,omitempty"`
+	TestInputs         string                       `json:"test_inputs,omitempty"`
 	Visual             *VisualEvidence              `json:"visual,omitempty"`
 	Reviews            map[string]string            `json:"reviews"`
 	ReviewRoster       []string                     `json:"review_roster,omitempty"`

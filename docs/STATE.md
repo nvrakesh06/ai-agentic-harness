@@ -47,7 +47,10 @@ and follows the ordinary verification retry route. Task records contain dependen
 conflict domains, issues/PRs, branch/base/head/merge revisions, retry counters,
 findings, human decisions, portable preflight role progress, blocker/resume state, verification retry guards and exact
 verification evidence. Passed checks record their identity, executable, exit result
-and bounded redacted stdout alongside exact base/head/config/rules. A guard records
+and bounded redacted stdout alongside exact base/head/config/rules. Validation evidence records
+the focused or full gate, its reason, verification-tool and test-input tree identities, and an immutable
+input hash. Focused PR evidence never replaces the full gate on the exact integrated merge-train
+head. A guard records
 only portable environment/command classes,
 the source revision, a normalized fingerprint and attempt count; it contains no
 machine paths or provider conversation state.

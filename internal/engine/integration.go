@@ -9,7 +9,6 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
 	"path/filepath"
-	"time"
 )
 
 func (c *Controller) integrate(id string) {
@@ -98,7 +97,7 @@ func (c *Controller) integrate(id string) {
 	if e = c.mutate(func(s *model.Snapshot) error { return model.Transition(s.Tasks[id], model.MergeTrain) }); e != nil {
 		return
 	}
-	checks, e := c.checks(c.ctx, effective, dir, id)
+	plan, e := fullValidationPlan(c.ctx, effective, dir, merge, "exact integrated merge-train head")
 	if e != nil {
 		// Merge-train checks run on the candidate merge, which is exactly where
 		// an owned-but-unmerged sibling defect can surface. Give the bounded
@@ -111,6 +110,11 @@ func (c *Controller) integrate(id string) {
 		c.retry(id, "verification", e.Error())
 		return
 	}
+	checks, e := c.checksForPlan(c.ctx, dir, id, plan)
+	if e != nil {
+		c.retry(id, "verification", fmt.Sprintf("exact integrated merge head %s: %v", merge, e))
+		return
+	}
 	// The task ref is advanced to the actual merge commit as well. This is an
 	// intentional non-no-op guard: git push omits unchanged refs, so merely
 	// including HEAD:task would not protect the reviewed task head.
@@ -121,10 +125,11 @@ func (c *Controller) integrate(id string) {
 		}
 		task.MergeSHA = merge
 		task.HeadSHA = merge
-		task.Evidence.Checks = checks
+		if err := applyValidationEvidence(task.Evidence, plan, checks); err != nil {
+			return err
+		}
 		task.Evidence.IntegrationSHA = merge
 		task.Evidence.IntegrationOwner = c.owner
-		task.Evidence.At = time.Now().UTC()
 		return model.Transition(task, model.PostVerify)
 	}, gitx.Update{Branch: "main", Old: base, New: merge}, gitx.Update{Branch: t.Branch, Old: t.HeadSHA, New: merge})
 	if e != nil {
@@ -188,16 +193,21 @@ func (c *Controller) postVerify(id string) {
 		}
 		target = effective.BaseSHA
 	}
-	reused := !recovering && effective.BaseSHA == target && t.Evidence != nil &&
+	plan, planErr := fullValidationPlan(c.ctx, effective, c.P.Root, target, "exact integrated merge-train head")
+	reused := planErr == nil && !recovering && effective.BaseSHA == target && t.Evidence != nil &&
 		t.Evidence.IntegrationSHA == target && t.Evidence.IntegrationOwner == c.owner &&
-		t.Evidence.Config == effective.Hash && t.Evidence.Rules == roles.Hash() && len(t.Evidence.Checks) > 0
+		t.Evidence.Config == effective.Hash && t.Evidence.Rules == roles.Hash() && t.Evidence.ValidationGate == "full" && t.Evidence.ValidationInput == plan.Input && len(t.Evidence.Checks) > 0
 	if !reused {
 		if e = c.P.Git.Detached(c.ctx, dir, target); e != nil {
 			c.fail(e)
 			return
 		}
 		defer c.P.Git.RemoveWorktree(context.Background(), dir)
-		_, e = c.checks(c.ctx, effective, dir, id)
+		plan, e = fullValidationPlan(c.ctx, effective, dir, target, "exact integrated merge-train head")
+		var checks []string
+		if e == nil {
+			checks, e = c.checksForPlan(c.ctx, dir, id, plan)
+		}
 		if c.ctx.Err() != nil {
 			return
 		}
@@ -209,6 +219,11 @@ func (c *Controller) postVerify(id string) {
 				return nil
 			})
 			c.mirror(id)
+			return
+		}
+		if e = c.mutate(func(s *model.Snapshot) error {
+			return applyValidationEvidence(s.Tasks[id].Evidence, plan, checks)
+		}); e != nil {
 			return
 		}
 	}

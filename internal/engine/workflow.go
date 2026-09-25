@@ -1374,8 +1374,11 @@ func Verify(ctx context.Context, e config.Effective, dir string) ([]string, erro
 	return verifyWithPermit(ctx, e, dir, nil)
 }
 func verifyWithPermit(ctx context.Context, e config.Effective, dir string, permit func(context.Context, config.Check) (func(), error)) ([]string, error) {
+	return verifyChecksWithPermit(ctx, e.Project.Checks, dir, permit)
+}
+func verifyChecksWithPermit(ctx context.Context, configured []config.Check, dir string, permit func(context.Context, config.Check) (func(), error)) ([]string, error) {
 	var checked []string
-	for _, check := range e.Project.Checks {
+	for _, check := range configured {
 		if !applicable(check) {
 			continue
 		}
@@ -1430,6 +1433,11 @@ func runVerificationCheck(ctx context.Context, check config.Check, dir string) (
 
 func (c *Controller) checks(ctx context.Context, e config.Effective, dir, taskID string) ([]string, error) {
 	return verifyWithPermit(ctx, e, dir, func(ctx context.Context, check config.Check) (func(), error) {
+		return c.checkPermit(ctx, taskID, check)
+	})
+}
+func (c *Controller) checksForPlan(ctx context.Context, dir, taskID string, plan validationPlan) ([]string, error) {
+	return verifyChecksWithPermit(ctx, plan.Checks, dir, func(ctx context.Context, check config.Check) (func(), error) {
 		return c.checkPermit(ctx, taskID, check)
 	})
 }
@@ -1505,14 +1513,6 @@ func (c *Controller) verifyReview(id string) error {
 		return e
 	}
 	t = c.Snapshot().Tasks[id]
-	checks, e := c.checks(c.ctx, effective, dir, id)
-	if e != nil {
-		return e
-	}
-	all, e := roles.Load(effective.Files)
-	if e != nil {
-		return e
-	}
 	for _, p := range paths {
 		if e = safety.Path(p); e != nil {
 			return e
@@ -1531,6 +1531,18 @@ func (c *Controller) verifyReview(id string) error {
 				t.UI = true
 			}
 		}
+	}
+	plan, e := c.taskValidationPlan(c.ctx, effective, t, dir, paths)
+	if e != nil {
+		return e
+	}
+	checks, e := c.checksForPlan(c.ctx, dir, id, plan)
+	if e != nil {
+		return e
+	}
+	all, e := roles.Load(effective.Files)
+	if e != nil {
+		return e
 	}
 	// Changed paths are already bound into the review scope below. Do not append
 	// them to the task contract here: this local copy is not persisted, so doing
@@ -1563,7 +1575,7 @@ func (c *Controller) verifyReview(id string) error {
 			activeRequired = append(activeRequired, role)
 		}
 	}
-	evidence := &model.Evidence{Base: t.BaseSHA, Head: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: checks, Reviews: map[string]string{}, ReviewRoster: roster, ReviewRosterReason: rosterReason, ReviewScope: scope, ReviewDispositions: dispositions, At: time.Now().UTC()}
+	evidence := &model.Evidence{Base: t.BaseSHA, Head: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: checks, ValidationGate: plan.Gate, ValidationReason: plan.Reason, ValidationInput: plan.Input, Toolchain: plan.Toolchain, TestInputs: plan.TestInputs, Reviews: map[string]string{}, ReviewRoster: roster, ReviewRosterReason: rosterReason, ReviewScope: scope, ReviewDispositions: dispositions, At: time.Now().UTC()}
 	if e = c.mutate(func(s *model.Snapshot) error {
 		task := s.Tasks[id]
 		task.State = model.Review
@@ -1818,7 +1830,7 @@ func (c *Controller) updatePR(id string, draft bool) error {
 	return nil
 }
 func acceptedEvidence(t *model.Task) bool {
-	if t == nil || t.Evidence == nil || t.Evidence.Config == "" || t.Evidence.Rules == "" || len(t.Evidence.Checks) == 0 {
+	if t == nil || t.Evidence == nil || t.Evidence.Config == "" || t.Evidence.Rules == "" || t.Evidence.ValidationGate == "" || t.Evidence.ValidationInput == "" || len(t.Evidence.Checks) == 0 {
 		return false
 	}
 	switch t.State {
@@ -1891,6 +1903,7 @@ func (c *Controller) prBody(t *model.Task) string {
 			}
 		}
 		fmt.Fprintf(&b, "\nPolicy hash: `%s`\nRules hash: `%s`\n", e.Config, e.Rules)
+		fmt.Fprintf(&b, "Validation gate: `%s` (%s)\nValidation identity: `%s`\n", e.ValidationGate, e.ValidationReason, e.ValidationInput)
 	}
 	verificationFindings := false
 	for _, finding := range t.Findings {

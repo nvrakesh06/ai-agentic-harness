@@ -148,6 +148,31 @@ func TestStatusShowsVerificationRetryRoute(t *testing.T) {
 	}
 }
 
+func TestStatusShowsValidationGateAndReason(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	snapshot := model.NewSnapshot("validation-project")
+	snapshot.Tasks["task"] = &model.Task{ID: "task", Title: "focused", State: model.Review, Evidence: &model.Evidence{ValidationGate: "focused", ValidationReason: "low-risk change is confined to ./internal/demo", ValidationInput: strings.Repeat("a", 64)}}
+	if err = db.Save(strings.Repeat("b", 40), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	cmd := New()
+	cmd.SetOut(&out)
+	if err = showStatus(cmd, &engine.Project{Dir: dir, DB: db}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Validation: focused", "low-risk change is confined", "aaaaaaaaaaaa"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("status omitted %q: %s", want, out.String())
+		}
+	}
+}
+
 func TestStatusShowsWorkerDeadlineLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "state.db"))
