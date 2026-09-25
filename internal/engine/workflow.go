@@ -885,12 +885,15 @@ func (c *Controller) ensureWorktree(id string) error {
 	t := c.Snapshot().Tasks[id]
 	from := t.HeadSHA
 	if from == "" {
-		from = "refs/remotes/origin/main"
+		from = t.BaseSHA
+		if from == "" {
+			from = "refs/remotes/origin/main"
+		}
 	}
 	if e := c.P.Git.Worktree(c.ctx, c.P.TaskPath(t), t.Branch, from); e != nil {
 		return e
 	}
-	if t.BaseSHA == "" {
+	if t.HeadSHA == "" {
 		if t.State != model.Planned && t.State != model.Ready {
 			return &gitx.ScopeError{}
 		}
@@ -898,20 +901,26 @@ func (c *Controller) ensureWorktree(id string) error {
 		if e != nil {
 			return e
 		}
-		assigned, assignedOK := model.ImmutableAreas(t)
-		if !assignedOK {
-			return &gitx.ScopeError{}
-		}
-		classified, e := c.P.Git.ClassifyAreasAtRef(c.ctx, head, assigned)
-		if e != nil {
-			return e
+		var classified []gitx.Area
+		if t.BaseSHA == "" {
+			assigned, assignedOK := model.ImmutableAreas(t)
+			if !assignedOK {
+				return &gitx.ScopeError{}
+			}
+			classified, e = c.P.Git.ClassifyAreasAtRef(c.ctx, head, assigned)
+			if e != nil {
+				return e
+			}
 		}
 		return c.mutate(func(s *model.Snapshot) error {
 			task := s.Tasks[id]
-			if task.BaseSHA == "" {
-				task.BaseSHA, task.HeadSHA = head, head
-				task.AssignedAreas = canonicalAssignedAreas(classified)
-				task.AssignedAreaKinds = normalizeAreaKinds(classified)
+			if task.HeadSHA == "" {
+				task.HeadSHA = head
+				if task.BaseSHA == "" {
+					task.BaseSHA = head
+					task.AssignedAreas = canonicalAssignedAreas(classified)
+					task.AssignedAreaKinds = normalizeAreaKinds(classified)
+				}
 			}
 			return nil
 		})

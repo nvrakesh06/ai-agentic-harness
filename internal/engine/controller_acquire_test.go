@@ -81,7 +81,8 @@ func TestAcquireHydratesQueuedSchemaSixOwnershipBeforeBranchCreation(t *testing.
 		t.Fatal(err)
 	}
 
-	if err = New(first).acquire(ctx); err != nil {
+	controller := New(first)
+	if err = controller.acquire(ctx); err != nil {
 		t.Fatal(err)
 	}
 	durable, _, err := first.Git.Load(ctx)
@@ -108,5 +109,40 @@ func TestAcquireHydratesQueuedSchemaSixOwnershipBeforeBranchCreation(t *testing.
 	queued = recovered.Tasks["queued"]
 	if queued.BaseSHA == "" || queued.HeadSHA != "" || queued.AssignedAreaKinds["feature-queued.txt"] != model.AreaFile {
 		t.Fatalf("second-machine attach lost queued ownership or invented a branch checkpoint: %#v", queued)
+	}
+
+	if err = os.WriteFile(filepath.Join(source, "unrelated.txt"), []byte("advanced main\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "unrelated.txt"}, {"commit", "-m", "advance main"}, {"push", "origin", "HEAD:main"}} {
+		if _, err := sourceGit.Run(ctx, "", args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	controller.ctx = ctx
+	if err = controller.ensureWorktree("queued"); err != nil {
+		t.Fatal(err)
+	}
+	hydrated := controller.Snapshot().Tasks["queued"]
+	if hydrated.BaseSHA != queued.BaseSHA || hydrated.HeadSHA != queued.BaseSHA {
+		t.Fatalf("queued worktree was not created at its durable base: %#v", hydrated)
+	}
+	worktreeHead, err := (gitx.Git{Dir: first.TaskPath(hydrated)}).SHA(ctx, "HEAD")
+	if err != nil || worktreeHead != queued.BaseSHA {
+		t.Fatalf("queued worktree head = %q, want durable base %q: %v", worktreeHead, queued.BaseSHA, err)
+	}
+	if err = first.Git.Publish(ctx, []gitx.Update{{Branch: hydrated.Branch, New: worktreeHead}}); err != nil {
+		t.Fatalf("publish queued branch at its durable base: %v", err)
+	}
+	if err = os.WriteFile(filepath.Join(first.TaskPath(hydrated), "feature-queued.txt"), []byte("implemented\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = controller.checkpoint(ctx, "queued"); err != nil {
+		t.Fatalf("narrow first checkpoint after main advance failed: %v", err)
+	}
+	checkpointed := controller.Snapshot().Tasks["queued"]
+	if checkpointed.BaseSHA != queued.BaseSHA || checkpointed.HeadSHA == "" {
+		t.Fatalf("checkpoint changed the durable base or omitted its head: %#v", checkpointed)
 	}
 }
