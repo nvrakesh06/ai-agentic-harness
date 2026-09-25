@@ -52,6 +52,13 @@ func TestPlannerAreasMatchGeneratedFixtureFiles(t *testing.T) {
 		if len(task.Domains) != 1 || task.Domains[0] != task.Key {
 			t.Fatalf("planner domains for %q = %v, want [%q]", task.Key, task.Domains, task.Key)
 		}
+		wantRisk := "low"
+		if task.Key == "beta" {
+			wantRisk = "medium"
+		}
+		if task.Risk != wantRisk {
+			t.Fatalf("planner risk for %q = %q, want %q", task.Key, task.Risk, wantRisk)
+		}
 	}
 }
 
