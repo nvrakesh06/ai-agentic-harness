@@ -175,6 +175,52 @@ func TestSchemaMigrationAndFutureRejection(t *testing.T) {
 	}
 }
 
+func TestSchemaSixHydratesOnlyUntouchedTaskAreaAssignments(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Schema = 6
+	head := strings.Repeat("a", 40)
+	s.Tasks["ready"] = &Task{ID: "ready", State: Ready, Areas: []string{"src/engine", "README.md"}}
+	s.Tasks["started"] = &Task{ID: "started", State: Running, Areas: []string{"legacy-output.txt"}, HeadSHA: head}
+	s.Tasks["partial"] = &Task{ID: "partial", State: Ready, AssignedAreas: []string{"cmd/aih"}, AssignedAreaKinds: map[string]string{"cmd/aih": "invalid"}}
+	b, _ := json.Marshal(s)
+	migrated, changed, err := Decode(b)
+	if err != nil || !changed || migrated.Schema != StateSchema {
+		t.Fatalf("schema-6 migration failed: %#v changed=%t err=%v", migrated, changed, err)
+	}
+	ready := migrated.Tasks["ready"]
+	if got := fmt.Sprint(ready.AssignedAreas); got != "[src/engine README.md]" || ready.AssignedAreaKinds["src/engine"] != AreaUnknown || ready.AssignedAreaKinds["README.md"] != AreaUnknown {
+		t.Fatalf("untouched task ownership was not hydrated fail-closed: %#v", ready)
+	}
+	if got := migrated.Tasks["started"]; len(got.AssignedAreas) != 0 || len(got.AssignedAreaKinds) != 0 {
+		t.Fatalf("started legacy task must not adopt mutable Areas: %#v", got)
+	}
+	if got := migrated.Tasks["partial"]; got.AssignedAreaKinds["cmd/aih"] != AreaUnknown {
+		t.Fatalf("invalid historical kind was not hydrated to unknown: %#v", got)
+	}
+	copyAreas, ok := ImmutableAreas(ready)
+	if !ok || len(copyAreas) != 2 {
+		t.Fatalf("immutable areas unavailable: %v %#v", ok, copyAreas)
+	}
+	copyAreas[0] = "mutated"
+	if ready.AssignedAreas[0] == "mutated" {
+		t.Fatal("immutable areas returned mutable task storage")
+	}
+	kinds := ImmutableAreaKinds(ready)
+	kinds["src/engine"] = AreaFile
+	if ready.AssignedAreaKinds["src/engine"] != AreaUnknown {
+		t.Fatal("immutable area kinds returned mutable task storage")
+	}
+}
+
+func TestAssignedAreaKindsRejectIncompleteCurrentState(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Tasks["task"] = &Task{ID: "task", State: Ready, AssignedAreas: []string{"src"}, AssignedAreaKinds: map[string]string{"other": AreaFile}}
+	b, _ := json.Marshal(s)
+	if _, _, err := Decode(b); err == nil {
+		t.Fatal("current state accepted incomplete assigned area kinds")
+	}
+}
+
 func TestSchemaOneMigratesAuthorizedBacklogAndCapacityRoundTrips(t *testing.T) {
 	s := NewSnapshot("project123")
 	s.Schema = 1
