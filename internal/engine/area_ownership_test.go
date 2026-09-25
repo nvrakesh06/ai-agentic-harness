@@ -87,6 +87,11 @@ func TestCrossTaskRoutingDoesNotLoseFindingToRunningOwner(t *testing.T) {
 	if len(model.TaskGuidance(owner)) != 1 {
 		t.Fatalf("running owner has no durable routed-finding guidance: %#v", owner.Decisions)
 	}
+	changed := model.Finding{Severity: "high", Location: "src/studio/live.ts:1", Reason: "The revised failure still needs repair.", Resolution: "Apply the updated safe fix."}
+	route, owners = applyCrossTaskFindings(s, "renderer", []model.Finding{changed}, func(model.Finding) bool { return true })
+	if !route.gated || route.unresolved || len(owners["studio"]) != 1 || len(model.TaskGuidance(owner)) != 2 {
+		t.Fatalf("changed same-location finding did not create a fresh replay epoch: route=%#v owners=%#v guidance=%#v", route, owners, model.TaskGuidance(owner))
+	}
 	replay, err := completeImplementation(owner, 0)
 	if err != nil || !replay || owner.State != model.Ready {
 		t.Fatalf("running owner did not enter bounded replay after handoff: replay=%t state=%s err=%v", replay, owner.State, err)
