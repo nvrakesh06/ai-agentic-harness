@@ -480,7 +480,7 @@ func TestPostVerifyHoldAndHumanRetry(t *testing.T) {
 		t.Fatal("hold not cleared")
 	}
 	evidence := s.Tasks["task"].Evidence
-	if evidence == nil || evidence.IntegrationSHA != base || evidence.ValidationGate != "full" || len(evidence.Checks) == 0 {
+	if evidence == nil || evidence.IntegrationSHA != base || evidence.ValidationGate != "full" || evidence.ValidationInput == strings.Repeat("0", 64) || len(evidence.Checks) == 0 || evidence.Checks[0] == "check=prior integration exit=0" {
 		t.Fatalf("human retry did not retain integration provenance and refresh native evidence: %#v", evidence)
 	}
 	_ = f.P.DB.Submit(store.Command{ID: model.ID(), Kind: "handoff"})
