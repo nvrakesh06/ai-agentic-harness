@@ -661,6 +661,12 @@ func (c *Controller) issueBody(t *model.Task) string {
 	for _, a := range t.Decisions {
 		b.WriteString("\nDecision: " + a + "\n")
 	}
+	for _, finding := range t.Findings {
+		if finding.Location == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\nPending finding: [%s] %s — %s\n", finding.Severity, finding.Location, safety.Redact(finding.Reason))
+	}
 	return b.String()
 }
 func (c *Controller) mirror(id string) {
@@ -696,23 +702,33 @@ func (c *Controller) portable(text string) string {
 }
 func (c *Controller) checkpoint(ctx context.Context, id string) error {
 	t := c.Snapshot().Tasks[id]
+	return c.checkpointAtBase(ctx, id, t.BaseSHA)
+}
+
+// checkpointAtBase validates only the task delta after a rebase. A task's
+// former base may contain unrelated changes that have since reached main;
+// comparing that old base to a rebased head would incorrectly attribute those
+// changes to the task. The new base and rewritten branch head publish together.
+func (c *Controller) checkpointAtBase(ctx context.Context, id, immutableBase string) error {
+	t := c.Snapshot().Tasks[id]
 	areas, ok := immutableScope(t)
-	if !ok || t.BaseSHA == "" {
+	if !ok || immutableBase == "" {
 		return &gitx.ScopeError{}
 	}
-	if e := c.P.Git.ValidateFullCheckpointScope(ctx, c.P.TaskPath(t), t.BaseSHA, areas); e != nil {
+	if e := c.P.Git.ValidateFullCheckpointScope(ctx, c.P.TaskPath(t), immutableBase, areas); e != nil {
 		return e
 	}
 	sha, e := c.P.Git.Checkpoint(ctx, c.P.TaskPath(t), id)
 	if e != nil {
 		return e
 	}
-	if sha == t.HeadSHA {
+	if sha == t.HeadSHA && immutableBase == t.BaseSHA {
 		return nil
 	}
 	return c.save(ctx, func(s *model.Snapshot) error {
 		task := s.Tasks[id]
 		task.HeadSHA = sha
+		task.BaseSHA = immutableBase
 		if task.VisualRequired != nil {
 			task.VisualRequired.Head = sha
 		}
@@ -795,7 +811,18 @@ func (c *Controller) ensureWorktree(id string) error {
 		return e
 	}
 	if t.BaseSHA == "" {
+		if t.State != model.Planned && t.State != model.Ready {
+			return &gitx.ScopeError{}
+		}
 		head, e := (gitx.Git{Dir: c.P.TaskPath(t)}).SHA(c.ctx, "HEAD")
+		if e != nil {
+			return e
+		}
+		assigned, assignedOK := model.ImmutableAreas(t)
+		if !assignedOK {
+			return &gitx.ScopeError{}
+		}
+		classified, e := c.P.Git.ClassifyAreasAtRef(c.ctx, head, assigned)
 		if e != nil {
 			return e
 		}
@@ -803,6 +830,8 @@ func (c *Controller) ensureWorktree(id string) error {
 			task := s.Tasks[id]
 			if task.BaseSHA == "" {
 				task.BaseSHA, task.HeadSHA = head, head
+				task.AssignedAreas = canonicalAssignedAreas(classified)
+				task.AssignedAreaKinds = normalizeAreaKinds(classified)
 			}
 			return nil
 		})
@@ -1167,7 +1196,7 @@ func (c *Controller) syncTask(ctx context.Context, id string) (config.Effective,
 		}
 		return effective, e
 	}
-	if e = c.checkpoint(ctx, id); e != nil {
+	if e = c.checkpointAtBase(ctx, id, base); e != nil {
 		return effective, e
 	}
 	head, e := (gitx.Git{Dir: c.P.TaskPath(t)}).SHA(ctx, "HEAD")

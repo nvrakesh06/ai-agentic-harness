@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"sort"
+	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
@@ -92,8 +93,9 @@ func findingScopeOwner(tasks map[string]*model.Task, origin *model.Task, finding
 }
 
 type crossTaskRoute struct {
-	local []model.Finding
-	gated bool
+	local      []model.Finding
+	gated      bool
+	unresolved bool
 }
 
 func (c *Controller) routeCrossTaskFindings(originID string, findings []model.Finding, blocks func(model.Finding) bool) (crossTaskRoute, error) {
@@ -120,10 +122,11 @@ func applyCrossTaskFindings(s *model.Snapshot, originID string, findings []model
 	origin := s.Tasks[originID]
 	for _, finding := range findings {
 		owner := findingScopeOwner(s.Tasks, origin, finding)
-		if owner.id == "" || owner.ambiguous { // only blocking, out-of-scope findings may gate the origin
+		if owner.id == "" || owner.ambiguous || introducesDependencyCycle(s.Tasks, originID, owner.id) { // only blocking, out-of-scope findings may gate the origin
 			route.local = append(route.local, finding)
 			if blocks(finding) && !findingInTaskScope(origin, finding) {
 				route.gated = true
+				route.unresolved = true
 			}
 			continue
 		}
@@ -140,10 +143,40 @@ func applyCrossTaskFindings(s *model.Snapshot, originID string, findings []model
 		task.Findings = appendUniqueFindings(task.Findings, routed)
 		task.Decisions = append(task.Decisions, "Cross-task review finding routed from "+originID+".")
 	}
-	if route.gated {
-		model.Block(origin, "A blocking review finding was routed to its immutable task owner. It will reverify after that task completes.", "AIH preserved task ownership; this writer may not repair another task's area.", model.SyncRequired)
+	if route.unresolved {
+		model.Block(origin, "A blocking review finding is outside this task's immutable areas and has no safe writable owner. Replan a bounded follow-up, then answer to reverify.", "AIH refused to expand task scope or introduce a dependency cycle.", model.SyncRequired)
+	} else if route.gated {
+		// SyncRequired is scheduler-owned wait state. Unlike BLOCKED_HUMAN it
+		// resumes automatically once the routed owner's new dependency is Done.
+		origin.State = model.SyncRequired
+		origin.Blocker = nil
+		origin.Updated = time.Now().UTC()
 	}
 	return route, owners
+}
+
+func introducesDependencyCycle(tasks map[string]*model.Task, origin, owner string) bool {
+	if owner == "" {
+		return false
+	}
+	seen := map[string]bool{}
+	var visit func(string) bool
+	visit = func(id string) bool {
+		if id == origin {
+			return true
+		}
+		if seen[id] || tasks[id] == nil {
+			return false
+		}
+		seen[id] = true
+		for _, dependency := range tasks[id].Dependencies {
+			if visit(dependency) {
+				return true
+			}
+		}
+		return false
+	}
+	return visit(owner)
 }
 
 func containsTask(items []string, want string) bool {
