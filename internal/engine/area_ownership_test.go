@@ -72,3 +72,14 @@ func TestCrossTaskRoutingRejectsReverseDependencyCycle(t *testing.T) {
 		t.Fatalf("reverse dependency cycle was routed unsafely: route=%#v owners=%#v task=%#v", route, owners, origin)
 	}
 }
+
+func TestCrossTaskRoutingDoesNotLoseFindingToRunningOwner(t *testing.T) {
+	origin := ownedTask("renderer", model.Review, "src/remotion", model.AreaDirectory)
+	owner := ownedTask("studio", model.Running, "src/studio", model.AreaDirectory)
+	s := model.NewSnapshot("ownership-test")
+	s.Tasks = map[string]*model.Task{"renderer": origin, "studio": owner}
+	route, owners := applyCrossTaskFindings(s, "renderer", []model.Finding{{Severity: "high", Location: "src/studio/live.ts:1"}}, func(model.Finding) bool { return true })
+	if !route.gated || !route.unresolved || len(owners) != 0 || origin.State != model.Blocked || origin.Blocker == nil {
+		t.Fatalf("running owner accepted a finding it cannot durably replay: route=%#v owners=%#v origin=%#v", route, owners, origin)
+	}
+}
