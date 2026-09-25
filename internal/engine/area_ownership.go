@@ -1,9 +1,11 @@
 package engine
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
@@ -134,7 +136,8 @@ func applyCrossTaskFindings(s *model.Snapshot, originID string, findings []model
 		target := s.Tasks[owner.id]
 		if target.State == model.Running {
 			message := fmt.Sprintf("Cross-task blocking finding from %s: %s. %s", originID, finding.Location, finding.Resolution)
-			commandID := fmt.Sprintf("routed-finding:%s:%s:%s", originID, owner.id, finding.Location)
+			identity := sha256.Sum256([]byte(strings.Join([]string{originID, owner.id, finding.Location, finding.Category, finding.Reason, finding.Resolution, finding.Role}, "\x00")))
+			commandID := fmt.Sprintf("routed-finding:%x", identity)
 			if err := model.QueueRoutedFinding(target, origin, commandID, message); err != nil {
 				route.local = append(route.local, finding)
 				if blocks(finding) {
