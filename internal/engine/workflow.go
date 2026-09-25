@@ -1201,9 +1201,20 @@ func (c *Controller) checks(ctx context.Context, e config.Effective, dir, taskID
 	})
 }
 
-func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Task, dir, diff string, evidence *model.Evidence, attempt int, required []roles.Role) []reviewOutcome {
+func reviewPromptTask(task *model.Task, paths []string) *model.Task {
+	// Prompt scoping must include actual changed paths so nested AGENTS.md
+	// instructions apply even when a worker changed outside its planned Areas.
+	// This copy is deliberately never used for review-scope hashing or durable
+	// task state: the canonical task contract remains immutable during review.
+	promptTask := *task
+	promptTask.Areas = append(append([]string(nil), task.Areas...), paths...)
+	return &promptTask
+}
+
+func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Task, paths []string, dir, diff string, evidence *model.Evidence, attempt int, required []roles.Role) []reviewOutcome {
 	outcomes := make([]reviewOutcome, len(required))
 	payload := reviewEvidencePayload(evidence, attempt)
+	promptTask := reviewPromptTask(task, paths)
 	if evidence.Visual != nil {
 		payload += "\nVISUAL ARTIFACT ROOT (local, read-only): " + filepath.Join(c.P.Dir, filepath.FromSlash(filepath.Dir(evidence.Visual.Manifest))) + "\nInspect the screenshot and diagnostics listed in visual.artifacts. A capture artifact is evidence, not a visual pass.\n"
 	}
@@ -1212,7 +1223,7 @@ func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Ta
 		reviews.Add(1)
 		go func() {
 			defer reviews.Done()
-			outcomes[i].result, outcomes[i].err = c.role(c.ctx, effective, role, task, dir, task.Objective, diff, payload)
+			outcomes[i].result, outcomes[i].err = c.role(c.ctx, effective, role, promptTask, dir, task.Objective, diff, payload)
 		}()
 	}
 	reviews.Wait()
@@ -1285,7 +1296,10 @@ func (c *Controller) verifyReview(id string) error {
 			}
 		}
 	}
-	t.Areas = append(t.Areas, paths...)
+	// Changed paths are already bound into the review scope below. Do not append
+	// them to the task contract here: this local copy is not persisted, so doing
+	// so makes a completed MERGE_READY review scope differ from the scope rebuilt
+	// by final integration and forces an unnecessary full re-verification.
 	required, e := roles.Required(all, t, paths, "review")
 	if e != nil {
 		return e
@@ -1340,7 +1354,7 @@ func (c *Controller) verifyReview(id string) error {
 		return e
 	}
 	c.mirror(id)
-	outcomes := c.runReviewAttempt(effective, t, dir, diff, evidence, 1, activeRequired)
+	outcomes := c.runReviewAttempt(effective, t, paths, dir, diff, evidence, 1, activeRequired)
 	assessment := assessReviews(activeRequired, outcomes)
 	if e = c.preserveReviewFindings(id, assessment.findings); e != nil {
 		return e
@@ -1417,7 +1431,7 @@ func (c *Controller) verifyReview(id string) error {
 		if e = c.publishReviewProgress(id, evidence); e != nil {
 			return e
 		}
-		refreshed := c.runReviewAttempt(effective, t, dir, diff, evidence, 2, refreshRoles)
+		refreshed := c.runReviewAttempt(effective, t, paths, dir, diff, evidence, 2, refreshRoles)
 		refreshAssessment := assessReviews(refreshRoles, refreshed)
 		if e = c.preserveReviewFindings(id, refreshAssessment.findings); e != nil {
 			return e

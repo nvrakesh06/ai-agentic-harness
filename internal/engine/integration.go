@@ -23,12 +23,16 @@ func (c *Controller) integrate(id string) {
 		return
 	}
 	base := effective.BaseSHA
-	rosterAccepted, rosterErr := c.reviewEvidenceAccepted(c.ctx, effective, t)
+	rosterAccepted, reviewReason, rosterErr := c.reviewEvidenceAccepted(c.ctx, effective, t)
 	if rosterErr != nil {
 		c.block(id, "Restore canonical review state before integration.", rosterErr.Error(), model.SyncRequired)
 		return
 	}
 	if t.Evidence == nil || t.Evidence.Base != base || t.Evidence.Head != t.HeadSHA || t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() || !rosterAccepted {
+		if reviewReason == "" {
+			reviewReason = "base, head, configuration, or rules hash no longer matches exact-head review evidence"
+		}
+		_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_invalidated", reviewReason)
 		if e = c.verifyReview(id); e != nil {
 			c.handleVerificationError(id, e)
 			return
@@ -43,8 +47,11 @@ func (c *Controller) integrate(id string) {
 			return
 		}
 		base = t.BaseSHA
-		rosterAccepted, rosterErr = c.reviewEvidenceAccepted(c.ctx, effective, t)
+		rosterAccepted, reviewReason, rosterErr = c.reviewEvidenceAccepted(c.ctx, effective, t)
 		if rosterErr != nil || effective.BaseSHA != base || effective.Hash != t.Evidence.Config || !rosterAccepted {
+			if reviewReason != "" {
+				_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_invalidated", reviewReason)
+			}
 			if c.mutate(func(s *model.Snapshot) error { s.Tasks[id].State = model.SyncRequired; return nil }) == nil {
 				_ = c.updatePR(id, true)
 				c.mirror(id)

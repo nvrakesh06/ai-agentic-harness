@@ -44,6 +44,13 @@ func reviewScope(task *model.Task, paths, roster []string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// acceptedReviewScope accepts only a fingerprint generated from the durable
+// task contract. Historical snapshots do not retain the former contract, so a
+// legacy fingerprint cannot safely survive an area removal or other narrowing.
+func acceptedReviewScope(task *model.Task, paths, roster []string, scope string) bool {
+	return scope == reviewScope(task, paths, roster)
+}
+
 func reviewReusePaths(paths, allowed []string) bool {
 	if len(paths) == 0 || len(allowed) == 0 {
 		return false
@@ -194,26 +201,26 @@ func validReviewDispositions(required []roles.Role, evidence *model.Evidence) bo
 // reviewEvidenceAccepted is shared by MergeReady admission and final
 // integration. It reconstructs the roster from canonical policy instead of
 // trusting the earlier in-memory review attempt.
-func (c *Controller) reviewEvidenceAccepted(ctx context.Context, effective config.Effective, task *model.Task) (bool, error) {
+func (c *Controller) reviewEvidenceAccepted(ctx context.Context, effective config.Effective, task *model.Task) (bool, string, error) {
 	if task == nil || task.Evidence == nil {
-		return false, nil
+		return false, "no durable review evidence", nil
 	}
 	_, paths, err := c.P.Git.Diff(ctx, task.BaseSHA, task.HeadSHA)
 	if err != nil {
-		return false, err
+		return false, "could not reconstruct exact-head changed paths", err
 	}
 	all, err := roles.Load(effective.Files)
 	if err != nil {
-		return false, err
+		return false, "could not load canonical review roles", err
 	}
 	required, err := roles.Required(all, task, paths, "review")
 	if err != nil {
-		return false, err
+		return false, "could not select the canonical review roster", err
 	}
 	if visualRequirementMatches(task, effective) {
 		visual, ok := all[task.VisualRequired.Role]
 		if !ok || !designerReviewRole(visual) {
-			return false, nil
+			return false, "the required visual reviewer is no longer configured", nil
 		}
 		found := false
 		for _, role := range required {
@@ -224,8 +231,11 @@ func (c *Controller) reviewEvidenceAccepted(ctx context.Context, effective confi
 		}
 	}
 	roster, _ := roles.ReviewRoster(required)
-	if task.Evidence.ReviewScope != reviewScope(task, paths, roster) || !validReviewDispositions(required, task.Evidence) {
-		return false, nil
+	if !acceptedReviewScope(task, paths, roster, task.Evidence.ReviewScope) {
+		return false, "review scope changed (task contract, changed paths, or selected roster differs)", nil
+	}
+	if !validReviewDispositions(required, task.Evidence) {
+		return false, "a required review disposition is missing, malformed, or not exact-head", nil
 	}
 	for name, disposition := range task.Evidence.ReviewDispositions {
 		if disposition.Disposition != "reused" {
@@ -233,11 +243,11 @@ func (c *Controller) reviewEvidenceAccepted(ctx context.Context, effective confi
 		}
 		expected := c.reusableReviewDispositions(ctx, effective, task, roster, task.Evidence.ReviewScope)
 		if expected == nil || expected[name].SourceHead != disposition.SourceHead || expected[name].Runtime != disposition.Runtime {
-			return false, nil
+			return false, "the bounded security-review reuse exception is no longer valid", nil
 		}
 	}
 	if visualRequirementMatches(task, effective) && (task.Evidence.Visual == nil || strings.TrimSpace(task.Evidence.Reviews[task.VisualRequired.Role]) == "") {
-		return false, nil
+		return false, "required exact-head visual capture or review summary is missing", nil
 	}
-	return true, nil
+	return true, "", nil
 }
