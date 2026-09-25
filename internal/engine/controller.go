@@ -321,7 +321,11 @@ func recoverSnapshot(s *model.Snapshot) error {
 	for _, t := range s.Tasks {
 		switch t.State {
 		case model.Running:
-			t.State = model.Ready
+			if _, assigned := model.ImmutableAreas(t); !assigned {
+				model.Block(t, "This interrupted legacy task has no immutable area assignment. Replan it before resuming.", "AIH refuses to reconstruct a started task's historical write scope.", model.Ready)
+			} else {
+				t.State = model.Ready
+			}
 		case model.Implemented, model.Verifying, model.Review, model.MergeTrain:
 			t.State = model.SyncRequired
 		}
