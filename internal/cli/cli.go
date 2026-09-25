@@ -678,6 +678,9 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 			fmt.Fprintln(cmd.OutOrStdout(), "  Review: "+review)
 		}
 		if t.Evidence != nil {
+			if t.Evidence.ValidationGate != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "  Validation: %s (%s); identity %s\n", t.Evidence.ValidationGate, t.Evidence.ValidationReason, shortSHA(t.Evidence.ValidationInput))
+			}
 			names := make([]string, 0, len(t.Evidence.ReviewDispositions))
 			for role := range t.Evidence.ReviewDispositions {
 				names = append(names, role)
