@@ -119,6 +119,13 @@ func TestAcquireHydratesQueuedSchemaSixOwnershipBeforeBranchCreation(t *testing.
 			t.Fatal(err)
 		}
 	}
+	if err = first.Git.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := first.Git.SHA(ctx, "refs/remotes/origin/main")
+	if err != nil || advanced == queued.BaseSHA {
+		t.Fatalf("dispatch machine did not observe the advanced main: base=%q main=%q err=%v", queued.BaseSHA, advanced, err)
+	}
 
 	controller.ctx = ctx
 	if err = controller.ensureWorktree("queued"); err != nil {
@@ -132,8 +139,16 @@ func TestAcquireHydratesQueuedSchemaSixOwnershipBeforeBranchCreation(t *testing.
 	if err != nil || worktreeHead != queued.BaseSHA {
 		t.Fatalf("queued worktree head = %q, want durable base %q: %v", worktreeHead, queued.BaseSHA, err)
 	}
-	if err = first.Git.Publish(ctx, []gitx.Update{{Branch: hydrated.Branch, New: worktreeHead}}); err != nil {
-		t.Fatalf("publish queued branch at its durable base: %v", err)
+	if err = second.Attach(ctx); err != nil {
+		t.Fatalf("second-machine attach after worktree creation failed: %v", err)
+	}
+	recovered, _, err = second.DB.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued = recovered.Tasks["queued"]
+	if queued.BaseSHA != worktreeHead || queued.HeadSHA != worktreeHead || queued.AssignedAreaKinds["feature-queued.txt"] != model.AreaFile {
+		t.Fatalf("second-machine attach did not recover the atomically published branch checkpoint: %#v", queued)
 	}
 	if err = os.WriteFile(filepath.Join(first.TaskPath(hydrated), "feature-queued.txt"), []byte("implemented\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -144,5 +159,68 @@ func TestAcquireHydratesQueuedSchemaSixOwnershipBeforeBranchCreation(t *testing.
 	checkpointed := controller.Snapshot().Tasks["queued"]
 	if checkpointed.BaseSHA != queued.BaseSHA || checkpointed.HeadSHA == "" {
 		t.Fatalf("checkpoint changed the durable base or omitted its head: %#v", checkpointed)
+	}
+}
+
+func TestEnsureWorktreeRejectsStaleQueuedLocalBranchBeforePublication(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	remote, source := filepath.Join(root, "origin.git"), filepath.Join(root, "source")
+	if err := os.MkdirAll(remote, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	remoteGit, sourceGit := gitx.Git{Dir: remote}, gitx.Git{Dir: source}
+	if _, err := remoteGit.Run(ctx, "", "init", "--bare", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sourceGit.Run(ctx, "", "init", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("base\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "base"}, {"remote", "add", "origin", remote}, {"push", "origin", "HEAD:main"}} {
+		if _, err := sourceGit.Run(ctx, "", args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	project := config.Defaults()
+	project.ID = "stale-branch-project"
+	project.LeaseSeconds = 60
+	p := leaseTestProject(t, ctx, root, remote, "machine-a", project)
+	if err := p.Git.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	base, err := p.Git.SHA(ctx, "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(source, "unrelated.txt"), []byte("advanced\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "unrelated.txt"}, {"commit", "-m", "advance main"}, {"push", "origin", "HEAD:main"}} {
+		if _, err = sourceGit.Run(ctx, "", args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = p.Git.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.Git.Run(ctx, "", "branch", "aih/queued", "refs/remotes/origin/main"); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := model.NewSnapshot(project.ID)
+	snapshot.Tasks["queued"] = &model.Task{ID: "queued", State: model.Ready, Branch: "aih/queued", BaseSHA: base, AssignedAreas: []string{"feature-queued.txt"}, AssignedAreaKinds: map[string]string{"feature-queued.txt": model.AreaFile}}
+	controller := &Controller{P: p, s: snapshot, ctx: ctx}
+	if err = controller.ensureWorktree("queued"); err == nil {
+		t.Fatal("stale local branch was accepted for initial publication")
+	}
+	if task := controller.Snapshot().Tasks["queued"]; task.HeadSHA != "" {
+		t.Fatalf("stale local branch was published into durable state: %#v", task)
 	}
 }

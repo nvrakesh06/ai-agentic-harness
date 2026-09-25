@@ -901,6 +901,9 @@ func (c *Controller) ensureWorktree(id string) error {
 		if e != nil {
 			return e
 		}
+		if t.BaseSHA != "" && head != t.BaseSHA {
+			return fmt.Errorf("task %s local branch does not match its durable base", id)
+		}
 		var classified []gitx.Area
 		if t.BaseSHA == "" {
 			assigned, assignedOK := model.ImmutableAreas(t)
@@ -912,7 +915,7 @@ func (c *Controller) ensureWorktree(id string) error {
 				return e
 			}
 		}
-		return c.mutate(func(s *model.Snapshot) error {
+		err := c.save(c.ctx, func(s *model.Snapshot) error {
 			task := s.Tasks[id]
 			if task.HeadSHA == "" {
 				task.HeadSHA = head
@@ -923,7 +926,11 @@ func (c *Controller) ensureWorktree(id string) error {
 				}
 			}
 			return nil
-		})
+		}, gitx.Update{Branch: t.Branch, New: head})
+		if err != nil {
+			c.fail(err)
+		}
+		return err
 	}
 	return nil
 }
