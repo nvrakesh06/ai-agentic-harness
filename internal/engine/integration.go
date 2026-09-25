@@ -194,7 +194,7 @@ func (c *Controller) postVerify(id string) {
 		target = effective.BaseSHA
 	}
 	reason := postVerifyValidationReason(recovering, target, t.MergeSHA)
-	plan, planErr := fullValidationPlan(c.ctx, effective, c.P.Root, target, reason)
+	plan, planErr := fullValidationPlanWithGitDir(c.ctx, effective, c.P.Root, c.P.Git.Dir, target, reason)
 	reused := planErr == nil && !recovering && effective.BaseSHA == target && t.Evidence != nil &&
 		t.Evidence.IntegrationSHA == target && t.Evidence.IntegrationOwner == c.owner &&
 		t.Evidence.Config == effective.Hash && t.Evidence.Rules == roles.Hash() && t.Evidence.ValidationGate == "full" && t.Evidence.ValidationInput == plan.Input && len(t.Evidence.Checks) > 0

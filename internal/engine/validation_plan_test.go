@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,6 +11,110 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 )
+
+func TestPostVerifyPlanUsesSourceToolchainAndControlGitInput(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	remote := filepath.Join(root, "origin.git")
+	controlDir := filepath.Join(root, "control.git")
+	for _, dir := range []string{source, remote} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sourceGit := gitx.Git{Dir: source}
+	if _, err := sourceGit.Run(ctx, "", "init", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (gitx.Git{Dir: remote}).Run(ctx, "", "init", "--bare", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sourceGit.Run(ctx, "", "remote", "add", "origin", remote); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "verify-tool"), []byte{0, 1, 2, 3}, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "input.txt"), []byte("base\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sourceGit.Run(ctx, "", "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sourceGit.Run(ctx, "", "commit", "-m", "base"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sourceGit.Run(ctx, "", "push", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	control, err := gitx.OpenControl(ctx, controlDir, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = control.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	base, err := control.SHA(ctx, "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sourceGit.Run(ctx, "", "checkout", "-b", "candidate"); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(source, "input.txt"), []byte("candidate\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sourceGit.Run(ctx, "", "add", "input.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sourceGit.Run(ctx, "", "commit", "-m", "candidate"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := sourceGit.SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sourceGit.Run(ctx, "", "push", "origin", "HEAD:aih/candidate"); err != nil {
+		t.Fatal(err)
+	}
+	if err = control.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	merge, err := control.MergeCommit(ctx, base, head, "merge candidate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sourceGit.SHA(ctx, merge); err == nil {
+		t.Fatal("source checkout unexpectedly contains the control-only merge")
+	}
+	effective := config.Effective{Hash: strings.Repeat("a", 64), Project: config.Project{Checks: []config.Check{{Name: "relative", Command: []string{"./verify-tool"}, Timeout: 60}}}}
+	if _, err = fullValidationPlan(ctx, effective, source, merge, "exact integrated merge-train head"); err == nil {
+		t.Fatal("source checkout resolved a merge that exists only in control.git")
+	}
+	postVerify, err := fullValidationPlanWithGitDir(ctx, effective, source, control.Dir, merge, "exact integrated merge-train head")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if postVerify.Toolchain == "" || postVerify.TestInputs == "" {
+		t.Fatalf("incomplete post-verify plan: %#v", postVerify)
+	}
+	if _, err = os.Stat(filepath.Join(control.Dir, "verify-tool")); !os.IsNotExist(err) {
+		t.Fatalf("relative tool unexpectedly resolved from control.git: %v", err)
+	}
+	integrationDir := filepath.Join(root, "integration")
+	if err = control.Detached(ctx, integrationDir, merge); err != nil {
+		t.Fatal(err)
+	}
+	defer control.RemoveWorktree(context.Background(), integrationDir)
+	integration, err := fullValidationPlan(ctx, effective, integrationDir, merge, "exact integrated merge-train head")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if postVerify.Input != integration.Input {
+		t.Fatalf("post-verify plan %#v does not reuse exact integration plan %#v", postVerify, integration)
+	}
+}
 
 func TestFocusedPackageOnlyAllowsOneOrdinaryGoPackage(t *testing.T) {
 	for _, tc := range []struct {
