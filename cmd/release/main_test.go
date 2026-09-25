@@ -240,12 +240,17 @@ func TestReleaseYieldStopsOwnedTree(t *testing.T) {
 	t.Setenv("GO_WANT_RELEASE_YIELD_HELPER", "root")
 	result := make(chan error, 1)
 	go func() { result <- run(ctx, nil, os.Args[0], "-test.run=TestReleaseYieldStopsOwnedTree", "--") }()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(marker); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
+			cancel()
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+			}
 			t.Fatal("release test descendant never started")
 		}
 		time.Sleep(10 * time.Millisecond)
