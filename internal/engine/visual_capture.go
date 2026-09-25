@@ -648,14 +648,17 @@ func loadVisualSeal(dir, taskID, head, configHash string, targets []config.Visua
 	return seal, current, nil
 }
 
-func visualInputClosure(ctx context.Context, dir string, e config.Effective, actualRuntime string) (*visualClosureReceipt, error) {
+func visualInputClosure(ctx context.Context, dir string, e config.Effective, actualRuntime, head string) (*visualClosureReceipt, error) {
 	capture := e.Project.VisualCapture
 	if capture == nil || capture.InputClosure == nil {
 		return nil, nil
 	}
 	closure := capture.InputClosure
+	if !visualRevision.MatchString(head) {
+		return nil, errors.New("visual input closure needs an exact committed head")
+	}
 	git := gitx.Git{Dir: dir}
-	tree, treeErr := git.Run(ctx, "", "rev-parse", "HEAD^{tree}")
+	tree, treeErr := git.Run(ctx, "", "rev-parse", head+"^{tree}")
 	if treeErr != nil || !visualRevision.MatchString(strings.TrimSpace(tree)) {
 		return nil, errors.New("visual input closure needs a committed full tracked tree")
 	}
@@ -821,7 +824,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		if runtimeErr != nil {
 			return nil, runtimeErr
 		}
-		closure, err = visualInputClosure(ctx, dir, e, runtimeIdentity)
+		closure, err = visualInputClosure(ctx, dir, e, runtimeIdentity, task.HeadSHA)
 		if err != nil {
 			return nil, &checkFailure{name: "visual capture", command: "git", err: err}
 		}

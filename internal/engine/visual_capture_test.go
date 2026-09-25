@@ -823,7 +823,7 @@ func TestVisualInputClosureReattestsOnlyIdenticalDeclaredInputs(t *testing.T) {
 	closure := &config.VisualInputClosure{Version: 1, Runtime: "chrome-1", Targets: []config.VisualInputClosureTarget{{ID: "desktop"}}}
 	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: []string{"node", "scripts/capture.mjs"}, Timeout: 10, Targets: targets, InputClosure: closure}}}
 	c := &Controller{P: &Project{Dir: state}}
-	receipt, err := visualInputClosure(ctx, repo, effective, "test-runtime")
+	receipt, err := visualInputClosure(ctx, repo, effective, "test-runtime", first)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -876,6 +876,12 @@ func TestVisualInputClosureReattestsOnlyIdenticalDeclaredInputs(t *testing.T) {
 			t.Fatalf("changed closure input %s was reused: ok=%t err=%v", path, ok, err)
 		}
 	}
+	// The reviewed head is immutable even if the worktree branch advances
+	// while the browser runtime probe is running.
+	original, err := visualInputClosure(ctx, repo, effective, "test-runtime", first)
+	if err != nil || original.Hash != receipt.Hash || original.Tree != receipt.Tree {
+		t.Fatalf("closure followed moving HEAD instead of reviewed head: %#v %v", original, err)
+	}
 	changedRuntime := effective
 	changedRuntime.Project.VisualCapture = &config.VisualCapture{Server: effective.Project.VisualCapture.Server, Timeout: 10, Targets: targets, InputClosure: &config.VisualInputClosure{Version: 1, Runtime: "chrome-2", Targets: closure.Targets}}
 	if _, ok, err := c.reattestVisualEvidence(ctx, base, filepath.Join(base, "runtime"), &model.Task{ID: "task-closure", HeadSHA: run("rev-parse", "HEAD")}, changedRuntime, targets, mustVisualClosure(t, ctx, repo, changedRuntime)); err != nil || ok {
@@ -898,7 +904,11 @@ func mustVisualClosure(t *testing.T, ctx context.Context, dir string, effective 
 
 func mustVisualClosureWithRuntime(t *testing.T, ctx context.Context, dir string, effective config.Effective, runtime string) *visualClosureReceipt {
 	t.Helper()
-	closure, err := visualInputClosure(ctx, dir, effective, runtime)
+	head, err := (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closure, err := visualInputClosure(ctx, dir, effective, runtime, head)
 	if err != nil {
 		t.Fatal(err)
 	}
