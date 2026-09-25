@@ -120,6 +120,9 @@ func (c *Controller) acquire(ctx context.Context) error {
 	if s.Project != c.P.Config.Project.ID {
 		return errors.New("remote project identity mismatch")
 	}
+	if e = hydrateQueuedLegacyOwnership(ctx, c.P, s); e != nil {
+		return e
+	}
 	now := c.nowUTC()
 	if s.Controller.Owner != "" && s.Controller.Expires.Add(5*time.Second).After(now) {
 		return fmt.Errorf("%w: held by %s until %s", ErrLease, s.Controller.Machine, s.Controller.Expires)
@@ -145,6 +148,46 @@ func (c *Controller) acquire(ctx context.Context) error {
 	}
 	c.recordProgress()
 	c.traceStage("acquire: complete")
+	return nil
+}
+
+// hydrateQueuedLegacyOwnership upgrades the intentionally unknown ownership
+// classification left by the schema-six decoder while the controller holds no
+// writer lease. The acquired lease and this exact-base classification publish
+// in one fenced snapshot, before any resumed task can enter a worktree.
+func hydrateQueuedLegacyOwnership(ctx context.Context, p *Project, s *model.Snapshot) error {
+	base := ""
+	for _, task := range model.Ordered(s) {
+		if task.State != model.Planned && task.State != model.Ready || task.BaseSHA != "" || task.HeadSHA != "" {
+			continue
+		}
+		areas, ok := model.ImmutableAreas(task)
+		if !ok {
+			continue
+		}
+		kinds := model.ImmutableAreaKinds(task)
+		legacy := len(kinds) == len(areas)
+		for _, kind := range kinds {
+			legacy = legacy && kind == model.AreaUnknown
+		}
+		if !legacy {
+			continue
+		}
+		if base == "" {
+			var err error
+			base, err = p.Git.SHA(ctx, "refs/remotes/origin/main")
+			if err != nil {
+				return fmt.Errorf("resolve canonical base for legacy task ownership: %w", err)
+			}
+		}
+		classified, err := p.Git.ClassifyAreasAtRef(ctx, base, areas)
+		if err != nil {
+			return fmt.Errorf("classify legacy task %s ownership: %w", task.ID, err)
+		}
+		task.BaseSHA, task.HeadSHA = base, base
+		task.AssignedAreas = canonicalAssignedAreas(classified)
+		task.AssignedAreaKinds = normalizeAreaKinds(classified)
+	}
 	return nil
 }
 func (c *Controller) save(ctx context.Context, fn func(*model.Snapshot) error, updates ...gitx.Update) error {
