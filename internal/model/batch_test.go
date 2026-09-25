@@ -77,10 +77,16 @@ func TestSelectIntegrationBatchFindsLaterPairAndRejectsMissingPaths(t *testing.T
 }
 
 func TestSelectIntegrationBatchRequiresPassedNativeValidation(t *testing.T) {
-	s := batchSnapshotWith("alpha", "bravo")
-	s.Tasks["alpha"].Evidence.Checks = nil
-	if batch := SelectIntegrationBatch(s, map[string][]string{"alpha": {"internal/alpha/file.go"}, "bravo": {"internal/bravo/file.go"}}); batch != nil {
-		t.Fatalf("batch without native validation admitted: %#v", batch)
+	for _, check := range []string{"", "check=tests exit=0", "stage=native check=\"tests\" command=\"go\" command_id=0123456789ab exit=1 pass_counts=\"none\" stdout=empty stdout_bytes=0 stdout_lines=0"} {
+		s := batchSnapshotWith("alpha", "bravo")
+		if check == "" {
+			s.Tasks["alpha"].Evidence.Checks = nil
+		} else {
+			s.Tasks["alpha"].Evidence.Checks = []string{check}
+		}
+		if batch := SelectIntegrationBatch(s, map[string][]string{"alpha": {"internal/alpha/file.go"}, "bravo": {"internal/bravo/file.go"}}); batch != nil {
+			t.Fatalf("batch with invalid native validation %q admitted: %#v", check, batch)
+		}
 	}
 }
 
@@ -133,5 +139,5 @@ func batchSnapshotWith(ids ...string) *Snapshot {
 func batchTask(id, area, domain string) *Task {
 	base, head := strings.Repeat("a", 40), strings.Repeat("e", 40)
 	config, rules, scope := strings.Repeat("b", 64), strings.Repeat("c", 64), strings.Repeat("d", 64)
-	return &Task{ID: id, State: MergeReady, Risk: "low", BaseSHA: base, HeadSHA: head, Domains: []string{domain}, AssignedAreas: []string{area}, AssignedAreaKinds: map[string]string{area: AreaDirectory}, Evidence: &Evidence{Base: base, Head: head, Config: config, Rules: rules, Checks: []string{"check=tests exit=0"}, ValidationGate: "focused", ValidationInput: strings.Repeat("f", 64), Toolchain: "go=test", TestInputs: head, ReviewRoster: []string{"qa", "reviewer"}, ReviewScope: scope, ReviewDispositions: map[string]ReviewDisposition{"qa": {Disposition: "completed", SourceHead: head, Runtime: "codex/test"}, "reviewer": {Disposition: "completed", SourceHead: head, Runtime: "codex/test"}}}}
+	return &Task{ID: id, State: MergeReady, Risk: "low", BaseSHA: base, HeadSHA: head, Domains: []string{domain}, AssignedAreas: []string{area}, AssignedAreaKinds: map[string]string{area: AreaDirectory}, Evidence: &Evidence{Base: base, Head: head, Config: config, Rules: rules, Checks: []string{"stage=native check=\"tests\" command=\"go\" command_id=0123456789ab exit=0 pass_counts=\"none\" stdout=empty stdout_bytes=0 stdout_lines=0"}, ValidationGate: "focused", ValidationInput: strings.Repeat("f", 64), Toolchain: "go=test", TestInputs: head, ReviewRoster: []string{"qa", "reviewer"}, ReviewScope: scope, ReviewDispositions: map[string]ReviewDisposition{"qa": {Disposition: "completed", SourceHead: head, Runtime: "codex/test"}, "reviewer": {Disposition: "completed", SourceHead: head, Runtime: "codex/test"}}}}
 }

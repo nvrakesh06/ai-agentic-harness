@@ -67,3 +67,24 @@ func TestSameBatchPathsRequiresExactCurrentDiff(t *testing.T) {
 		t.Fatal("changed path set was accepted")
 	}
 }
+
+func TestValidationPlanMatchesCurrentEvidenceIdentity(t *testing.T) {
+	plan := validationPlan{Gate: "focused", Input: strings.Repeat("a", 64), Toolchain: "go=tool", TestInputs: strings.Repeat("b", 40)}
+	evidence := &model.Evidence{ValidationGate: plan.Gate, ValidationInput: plan.Input, Toolchain: plan.Toolchain, TestInputs: plan.TestInputs}
+	if !validationPlanMatchesEvidence(plan, evidence) {
+		t.Fatal("current validation plan was rejected")
+	}
+	for _, mutate := range []func(){
+		func() { evidence.ValidationInput = strings.Repeat("c", 64) },
+		func() { evidence.Toolchain = "go=other" },
+		func() { evidence.TestInputs = strings.Repeat("d", 40) },
+	} {
+		copy := *evidence
+		evidence = &copy
+		mutate()
+		if validationPlanMatchesEvidence(plan, evidence) {
+			t.Fatal("stale validation plan evidence was accepted")
+		}
+		evidence = &model.Evidence{ValidationGate: plan.Gate, ValidationInput: plan.Input, Toolchain: plan.Toolchain, TestInputs: plan.TestInputs}
+	}
+}

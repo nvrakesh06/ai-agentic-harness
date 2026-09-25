@@ -97,8 +97,17 @@ func (c *Controller) batchReservationCurrent(ctx context.Context, effective conf
 		if !sameBatchPaths(member.Paths, paths) {
 			return false, nil
 		}
+		plan, err := c.taskValidationPlan(ctx, effective, task, c.P.TaskPath(task), paths)
+		if err != nil || !validationPlanMatchesEvidence(plan, task.Evidence) {
+			return false, nil
+		}
 	}
 	return true, nil
+}
+
+func validationPlanMatchesEvidence(plan validationPlan, evidence *model.Evidence) bool {
+	return evidence != nil && evidence.ValidationGate == plan.Gate && evidence.ValidationInput == plan.Input &&
+		evidence.Toolchain == plan.Toolchain && evidence.TestInputs == plan.TestInputs
 }
 
 func batchReservationMatchesRuntime(batch *model.IntegrationBatch, effective config.Effective) bool {
