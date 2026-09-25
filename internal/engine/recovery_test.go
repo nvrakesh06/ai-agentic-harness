@@ -488,3 +488,85 @@ func TestPostVerifyHoldAndHumanRetry(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestSyncConflictCheckpointPublishesResolvedMerge(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	base, err := f.P.Git.SHA(ctx, "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &model.Task{ID: "sync", ObjectiveID: "objective", State: model.SyncRequired, Branch: "aih/sync", BaseSHA: base, AssignedAreas: []string{"README.md"}, AssignedAreaKinds: map[string]string{"README.md": model.AreaFile}, FixCycles: map[string]int{}}
+	dir := f.P.TaskPath(task)
+	if err = f.P.Git.Worktree(ctx, dir, task.Branch, base); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "README.md"), []byte("task\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	task.HeadSHA, err = f.P.Git.Checkpoint(ctx, dir, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: task.Branch, New: task.HeadSHA}}); err != nil {
+		t.Fatal(err)
+	}
+	source := gitx.Git{Dir: f.Source}
+	if err = os.WriteFile(filepath.Join(f.Source, "README.md"), []byte("main\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = source.Run(ctx, "", "add", "README.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = source.Run(ctx, "", "commit", "-m", "main conflict"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = source.Run(ctx, "", "push", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	target, err := f.P.Git.SHA(ctx, "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, h, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Objectives["objective"] = &model.Objective{ID: "objective", Planned: true}
+	s.Tasks[task.ID] = task
+	next, err := f.P.Git.StateCommit(ctx, h, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: h, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	c := engine.New(f.P)
+	if err = engine.AcquireForTest(c, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = engine.SyncTaskForTest(c, ctx, task.ID); err == nil {
+		t.Fatal("conflicting sync unexpectedly completed")
+	}
+	if got := c.Snapshot().Tasks[task.ID].SyncBase; got != target {
+		t.Fatalf("conflict did not persist sync target: %q", got)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "README.md"), []byte("resolved\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = engine.CheckpointForTest(c, ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	resolved := c.Snapshot().Tasks[task.ID]
+	if resolved.BaseSHA != target || resolved.SyncBase != "" || resolved.HeadSHA == task.HeadSHA || !f.P.Git.Ancestor(ctx, target, resolved.HeadSHA) || resolved.Evidence != nil {
+		t.Fatalf("resolved sync state was not atomically published: %#v", resolved)
+	}
+}
