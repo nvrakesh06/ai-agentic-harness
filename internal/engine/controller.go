@@ -757,6 +757,10 @@ func (c *Controller) commands() (bool, error) {
 					}
 					return errors.New("unknown blocked task/objective")
 				}
+				// model.Answer clears the blocker. Capture this durable provenance
+				// before that transition so an exact token cannot turn a worker's
+				// product decision into a verification-only continuation.
+				verificationOnly := verificationOnlyBlocker(t.Blocker)
 				if e := model.Answer(t, cmd.Payload); e != nil {
 					return e
 				}
@@ -766,7 +770,16 @@ func (c *Controller) commands() (bool, error) {
 				// contract and must receive a fresh preflight.
 				effective, effectiveErr := c.effective(c.ctx)
 				preflightRoles, rolesErr := requiredPreflightRoles(effective, t)
-				if effectiveErr == nil && rolesErr == nil && humanContinuationEvidence(t, cmd.Payload) && reusePreflightForContinuation(t.Preflight, t, effective, preflightRoles) {
+				if verificationOnly && effectiveErr == nil && rolesErr == nil && humanContinuationEvidence(t, cmd.Payload) && reusePreflightForHumanContinuation(t.Preflight, t, effective, preflightRoles) {
+					// Verification-only recovery normally resumes through SYNC_REQUIRED.
+					// The exact acknowledgement requests one bounded writer pass at the
+					// unchanged source checkpoint; native verification and review run
+					// again after that pass.
+					if t.State == model.SyncRequired {
+						if e := model.Transition(t, model.Fix); e != nil {
+							return e
+						}
+					}
 					t.Decisions = append(t.Decisions, "Human checkpoint continuation: reused completed pre-implementation guidance at "+t.HeadSHA+".")
 				} else {
 					t.Preflight = nil

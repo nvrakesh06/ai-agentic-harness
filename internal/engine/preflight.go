@@ -84,6 +84,30 @@ func reusePreflightForContinuation(p *model.Preflight, t *model.Task, effective 
 	return true
 }
 
+// reusePreflightForHumanContinuation admits only the operator's exact durable
+// checkpoint acknowledgement. Unlike an implementer checkpoint continuation,
+// the source head is intentionally unchanged: the human is unblocking a
+// verification-only interruption, not publishing new source edits.
+func reusePreflightForHumanContinuation(p *model.Preflight, t *model.Task, effective config.Effective, required []roles.Role) bool {
+	if p == nil || t == nil || (t.State != model.Ready && t.State != model.Fix && t.State != model.SyncRequired) || p.Phase != "writing" || p.HeadSHA != t.HeadSHA ||
+		p.BaseSHA != effective.BaseSHA || p.Config != effective.Hash || p.Rules != roles.Hash() ||
+		p.Scope == "" || p.Scope != preflightScope(t, effective) || p.ReuseCount >= effective.Policy.ImplementationRetries {
+		return false
+	}
+	for _, role := range required {
+		if !slices.Contains(p.Completed, role.Name) {
+			return false
+		}
+	}
+	reusePreflight(p, t)
+	p.ReuseReason = "resumed exact-head human checkpoint continuation with completed pre-implementation guidance: scope, base, policy, and role rules unchanged"
+	return true
+}
+
+func verificationOnlyBlocker(b *model.Blocker) bool {
+	return b != nil && b.Origin == model.BlockerOriginVerificationOnly
+}
+
 // humanContinuationEvidence is deliberately strict. A free-form answer can
 // alter a product decision without changing a schema field, so it cannot reuse
 // specialist advice. The sole exception is an answer that identifies the

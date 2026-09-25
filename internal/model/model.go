@@ -364,7 +364,18 @@ type Blocker struct {
 	Impact         string `json:"impact"`
 	Recommendation string `json:"recommendation,omitempty"`
 	Resume         State  `json:"resume_state"`
+	Origin         string `json:"origin,omitempty"`
 }
+
+const (
+	// BlockerOriginVerificationOnly marks a supervisor-owned verification
+	// interruption that introduced no product or implementation decision.
+	BlockerOriginVerificationOnly = "verification-only"
+	// BlockerOriginImplementerDecision marks a worker request for a human
+	// product or implementation decision.
+	BlockerOriginImplementerDecision = "implementer-decision"
+)
+
 type Finding struct {
 	Severity         string `json:"severity"`
 	Category         string `json:"category"`
@@ -658,6 +669,8 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		// Schema 8 makes review relevance durable. Historical findings did not
 		// contain a supervisor-verifiable classification, so preserve them as
 		// explicit unknowns rather than treating their absence as baseline proof.
+		// Blocker origin was also not recorded before schema 8, so leave it empty
+		// and never grant the verification-only continuation exception to history.
 		for _, task := range s.Tasks {
 			if task == nil {
 				continue
@@ -666,6 +679,9 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 				if task.Findings[i].Relevance == "" {
 					task.Findings[i].Relevance = FindingUnknown
 				}
+			}
+			if task.Blocker != nil {
+				task.Blocker.Origin = ""
 			}
 		}
 	}
@@ -879,7 +895,13 @@ func Transition(t *Task, to State) error {
 	return fmt.Errorf("invalid task transition %s -> %s", t.State, to)
 }
 func Block(t *Task, question, reason string, resume State) {
-	t.Blocker = &Blocker{Question: question, Reason: reason, Impact: "Only this task and its dependants wait.", Resume: resume}
+	BlockWithOrigin(t, question, reason, resume, "")
+}
+
+// BlockWithOrigin preserves why a human unblock was required so later
+// continuation policy does not infer it from prose after the blocker is gone.
+func BlockWithOrigin(t *Task, question, reason string, resume State, origin string) {
+	t.Blocker = &Blocker{Question: question, Reason: reason, Impact: "Only this task and its dependants wait.", Resume: resume, Origin: origin}
 	t.State = Blocked
 	t.Updated = time.Now().UTC()
 }

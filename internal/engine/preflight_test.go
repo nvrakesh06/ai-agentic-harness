@@ -318,6 +318,49 @@ func TestCompletedPreflightReusesUnchangedImplementerCheckpointOnly(t *testing.T
 	}
 }
 
+func TestCompletedPreflightReusesExactHeadHumanCheckpointOnly(t *testing.T) {
+	effective := config.Effective{BaseSHA: "base", Hash: "config", Policy: config.Policy{ImplementationRetries: 2}}
+	required := []roles.Role{{Name: "designer", Stage: "pre-implementation"}}
+	newTask := func() *model.Task {
+		return &model.Task{State: model.Ready, HeadSHA: "head", Objective: "repair the UI", Acceptance: []string{"works"}, Areas: []string{"ui"}, Domains: []string{"ui"}, UI: true}
+	}
+	newPreflight := func(task *model.Task) *model.Preflight {
+		return &model.Preflight{Phase: "writing", BaseSHA: "base", HeadSHA: task.HeadSHA, Config: "config", Rules: roles.Hash(), Scope: preflightScope(task, effective), Completed: []string{"designer"}}
+	}
+	task := newTask()
+	p := newPreflight(task)
+	if !reusePreflightForHumanContinuation(p, task, effective, required) || p.Phase != "ready" || p.HeadSHA != task.HeadSHA || !strings.Contains(p.ReuseReason, "human checkpoint") {
+		t.Fatalf("exact-head human continuation did not retain writer-ready guidance: %+v", p)
+	}
+	for _, change := range []struct {
+		name   string
+		update func(*model.Preflight, *model.Task, *config.Effective)
+	}{
+		{"changed head", func(p *model.Preflight, _ *model.Task, _ *config.Effective) { p.HeadSHA = "other-head" }},
+		{"incomplete role", func(p *model.Preflight, _ *model.Task, _ *config.Effective) { p.Completed = nil }},
+		{"areas", func(_ *model.Preflight, task *model.Task, _ *config.Effective) { task.Areas = []string{"new-ui"} }},
+		{"base", func(_ *model.Preflight, _ *model.Task, effective *config.Effective) { effective.BaseSHA = "new-base" }},
+		{"config", func(_ *model.Preflight, _ *model.Task, effective *config.Effective) { effective.Hash = "changed" }},
+		{"rules", func(p *model.Preflight, _ *model.Task, _ *config.Effective) { p.Rules = "changed" }},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			task, effective := newTask(), effective
+			p := newPreflight(task)
+			change.update(p, task, &effective)
+			if reusePreflightForHumanContinuation(p, task, effective, required) {
+				t.Fatal("stale exact-head human continuation reused specialist guidance")
+			}
+		})
+	}
+}
+
+func TestOrdinaryCompletedWriterDoesNotAdvancePreflightIdentity(t *testing.T) {
+	task := &model.Task{State: model.Running, HeadSHA: "writer-checkpoint", Preflight: &model.Preflight{Phase: "writing", HeadSHA: "pre-writer"}}
+	if replay, err := completeImplementation(task, 0); err != nil || replay || task.State != model.Implemented || task.Preflight.HeadSHA != "pre-writer" {
+		t.Fatalf("ordinary writer completion changed bounded FIX preflight semantics: replay=%t task=%#v err=%v", replay, task, err)
+	}
+}
+
 func TestHumanContinuationEvidenceRequiresExactCheckpointAndNoNewDecision(t *testing.T) {
 	task := &model.Task{HeadSHA: strings.Repeat("a", 40)}
 	if !humanContinuationEvidence(task, "AIH-CONTINUE CHECKPOINT "+task.HeadSHA) {
