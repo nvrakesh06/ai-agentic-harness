@@ -28,7 +28,15 @@ type validationPlan struct {
 }
 
 func fullValidationPlan(ctx context.Context, e config.Effective, dir, head, reason string) (validationPlan, error) {
-	return makeValidationPlan(ctx, e, dir, head, "full", reason, "", e.Project.Checks)
+	return fullValidationPlanWithGitDir(ctx, e, dir, dir, head, reason)
+}
+
+// fullValidationPlanWithGitDir keeps path-sensitive verification-tool identity
+// in a checkout while resolving the validation tree from the Git store that
+// owns head. Post-verify normally has a source checkout that predates the
+// integrated merge, so its control repository is the only safe object lookup.
+func fullValidationPlanWithGitDir(ctx context.Context, e config.Effective, toolDir, gitDir, head, reason string) (validationPlan, error) {
+	return makeValidationPlan(ctx, e, toolDir, gitDir, head, "full", reason, "", e.Project.Checks)
 }
 
 func postVerifyValidationReason(recovering bool, target, merge string) string {
@@ -64,7 +72,7 @@ func (c *Controller) taskValidationPlan(ctx context.Context, e config.Effective,
 	if len(focused) == 0 {
 		return fullValidationPlan(ctx, e, dir, t.HeadSHA, "no configured focused Go test or static check")
 	}
-	return makeValidationPlan(ctx, e, dir, t.HeadSHA, "focused", "low-risk change is confined to "+pkg, pkg, focused)
+	return makeValidationPlan(ctx, e, dir, dir, t.HeadSHA, "focused", "low-risk change is confined to "+pkg, pkg, focused)
 }
 
 func focusedPackage(paths []string) (string, string) {
@@ -134,12 +142,12 @@ func focusedGoCheck(check config.Check, pkg string) (config.Check, bool) {
 	return copy, found
 }
 
-func makeValidationPlan(ctx context.Context, e config.Effective, dir, head, gate, reason, pkg string, checks []config.Check) (validationPlan, error) {
-	toolchain, err := toolchainIdentity(dir, checks)
+func makeValidationPlan(ctx context.Context, e config.Effective, toolDir, gitDir, head, gate, reason, pkg string, checks []config.Check) (validationPlan, error) {
+	toolchain, err := toolchainIdentity(toolDir, checks)
 	if err != nil {
 		return validationPlan{}, err
 	}
-	inputs, err := testInputIdentity(ctx, dir, head, pkg)
+	inputs, err := testInputIdentity(ctx, gitDir, head, pkg)
 	if err != nil {
 		return validationPlan{}, err
 	}
