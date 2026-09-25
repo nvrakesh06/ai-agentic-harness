@@ -76,10 +76,19 @@ func TestCrossTaskRoutingRejectsReverseDependencyCycle(t *testing.T) {
 func TestCrossTaskRoutingDoesNotLoseFindingToRunningOwner(t *testing.T) {
 	origin := ownedTask("renderer", model.Review, "src/remotion", model.AreaDirectory)
 	owner := ownedTask("studio", model.Running, "src/studio", model.AreaDirectory)
+	origin.ObjectiveID, owner.ObjectiveID = "different-origin", "different-owner"
+	origin.HeadSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	s := model.NewSnapshot("ownership-test")
 	s.Tasks = map[string]*model.Task{"renderer": origin, "studio": owner}
 	route, owners := applyCrossTaskFindings(s, "renderer", []model.Finding{{Severity: "high", Location: "src/studio/live.ts:1"}}, func(model.Finding) bool { return true })
-	if !route.gated || !route.unresolved || len(owners) != 0 || origin.State != model.Blocked || origin.Blocker == nil {
-		t.Fatalf("running owner accepted a finding it cannot durably replay: route=%#v owners=%#v origin=%#v", route, owners, origin)
+	if !route.gated || route.unresolved || len(owners["studio"]) != 1 || origin.State != model.SyncRequired || origin.Blocker != nil {
+		t.Fatalf("running owner did not receive a durable replay handoff: route=%#v owners=%#v origin=%#v", route, owners, origin)
+	}
+	if len(model.TaskGuidance(owner)) != 1 {
+		t.Fatalf("running owner has no durable routed-finding guidance: %#v", owner.Decisions)
+	}
+	replay, err := completeImplementation(owner, 0)
+	if err != nil || !replay || owner.State != model.Ready {
+		t.Fatalf("running owner did not enter bounded replay after handoff: replay=%t state=%s err=%v", replay, owner.State, err)
 	}
 }
