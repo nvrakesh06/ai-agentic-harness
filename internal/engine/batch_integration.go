@@ -28,13 +28,39 @@ func (c *Controller) reserveBatchIntegration() (*model.IntegrationBatch, error) 
 	return c.Snapshot().IntegrationBatch, nil
 }
 
-func (c *Controller) clearBatch(id string) {
+// failBatch breaks deterministic re-admission after a merge conflict, failed
+// integrated check, or fenced publication rejection. The lexical first member
+// must refresh from main; the remaining members can proceed through the normal
+// serial path on the next scheduler tick.
+func (c *Controller) failBatch(id, diagnostic string) {
 	_ = c.mutate(func(s *model.Snapshot) error {
-		if s.IntegrationBatch != nil && s.IntegrationBatch.ID == id {
-			s.IntegrationBatch = nil
+		if s.IntegrationBatch == nil || s.IntegrationBatch.ID != id {
+			return nil
+		}
+		members := s.IntegrationBatch.Tasks
+		s.IntegrationBatch = nil
+		if len(members) != 0 {
+			if task := s.Tasks[members[0].ID]; task != nil && task.State == model.MergeReady && task.HeadSHA == members[0].HeadSHA {
+				task.State = model.SyncRequired
+				task.Evidence = nil
+				task.Summary = "Batch integration deferred: " + diagnostic
+			}
 		}
 		return nil
 	})
+}
+
+// batchCandidateCount is deliberately cheap. It avoids running Git diffs,
+// policy plans, and review reconciliation every scheduler tick when only a
+// singleton can possibly be admitted.
+func batchCandidateCount(snapshot *model.Snapshot) int {
+	count := 0
+	for _, task := range model.Ordered(snapshot) {
+		if task.State == model.MergeReady && task.Risk == "low" && task.Evidence != nil {
+			count++
+		}
+	}
+	return count
 }
 
 // integrateBatch validates the durable admission again immediately before it
@@ -48,40 +74,40 @@ func (c *Controller) integrateBatch(id string) {
 	}
 	effective, err := c.effective(c.ctx)
 	if err != nil {
-		c.clearBatch(id)
+		c.failBatch(id, "canonical integration identity could not be read")
 		return
 	}
 	current, err := c.batchReservationCurrent(c.ctx, effective, snapshot, batch)
 	if err != nil || !current {
-		c.clearBatch(id)
+		c.failBatch(id, "reserved members are no longer current")
 		return
 	}
 	heads := make([]string, 0, len(batch.Tasks))
 	for _, member := range batch.Tasks {
 		task := snapshot.Tasks[member.ID]
 		if task == nil || c.validateTaskScope(task) != nil {
-			c.clearBatch(id)
+			c.failBatch(id, "member scope is no longer valid")
 			return
 		}
 		pr, pullErr := c.P.Hub.Pull(c.ctx, task.PR)
 		if pullErr != nil || pr.State != "open" || pr.Merged || pr.Draft || pr.Base.Ref != "main" || pr.Head.SHA != member.HeadSHA {
-			c.clearBatch(id)
+			c.failBatch(id, "member pull request is no longer exact")
 			return
 		}
 		heads = append(heads, member.HeadSHA)
 	}
 	merge, err := c.P.Git.MergeHeads(c.ctx, batch.BaseSHA, heads, "Merge AIH batch "+batch.ID)
 	if err != nil {
-		c.clearBatch(id)
+		c.failBatch(id, "combined tree could not be verified")
 		return
 	}
 	dir := filepath.Join(c.P.Dir, "integration", model.ID())
 	if err = c.P.Git.Detached(c.ctx, dir, merge); err != nil {
-		c.clearBatch(id)
+		c.failBatch(id, "candidate checkout could not be created")
 		return
 	}
 	defer c.P.Git.RemoveWorktree(c.ctx, dir)
-	plan, err := fullValidationPlan(c.ctx, effective, dir, merge, "exact integrated batch merge-train head")
+	plan, err := fullValidationPlan(c.ctx, effective, dir, merge, "exact integrated merge-train head")
 	if err == nil {
 		checks, checkErr := c.checksForPlan(c.ctx, dir, batch.Tasks[0].ID, plan)
 		err = checkErr
@@ -90,7 +116,7 @@ func (c *Controller) integrateBatch(id string) {
 		}
 	}
 	if err != nil {
-		c.clearBatch(id)
+		c.failBatch(id, "integrated validation or fenced publication failed")
 		return
 	}
 	// The publish stored full exact-SHA evidence for every member, so these

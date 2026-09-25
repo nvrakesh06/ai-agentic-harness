@@ -514,14 +514,24 @@ func (c *Controller) Serve(parent context.Context) error {
 				}
 			}
 			if !merging {
-				batch, batchErr := c.reserveBatchIntegration()
-				if batchErr != nil {
-					ce = batchErr
-					break
+				// A held post-merge task is the recovery boundary. Do not begin a
+				// new batch while it is unresolved.
+				if s.IntegrationBlocked == "" && batchCandidateCount(s) >= model.MinIntegrationBatchTasks {
+					batch, batchErr := c.reserveBatchIntegration()
+					if batchErr != nil {
+						ce = batchErr
+						break
+					}
+					if batch != nil {
+						merging = true
+						c.launch(func() { c.integrateBatch(batch.ID); done <- "@batch" })
+						continue
+					}
 				}
-				if batch != nil {
+				if held := s.Tasks[s.IntegrationBlocked]; held != nil && held.State == model.PostVerify {
 					merging = true
-					c.launch(func() { c.integrateBatch(batch.ID); done <- "@batch" })
+					id := held.ID
+					c.launch(func() { c.integrate(id); done <- "@merge:" + id })
 					continue
 				}
 				for _, t := range model.Ordered(s) {
