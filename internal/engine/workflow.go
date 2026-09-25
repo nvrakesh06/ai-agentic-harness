@@ -810,21 +810,45 @@ func (c *Controller) checkpoint(ctx context.Context, id string) error {
 // changes to the task. The new base and rewritten branch head publish together.
 func (c *Controller) checkpointAtBase(ctx context.Context, id, immutableBase string) error {
 	t := c.Snapshot().Tasks[id]
+	var e error
 	areas, ok := immutableScope(t)
 	if !ok || immutableBase == "" {
 		return &gitx.ScopeError{}
 	}
 	pendingMerge := t.SyncBase == immutableBase
+	sha := ""
 	if pendingMerge {
-		if e := c.P.Git.ValidatePendingMergeScope(ctx, c.P.TaskPath(t), immutableBase, areas); e != nil {
-			return e
+		current, currentErr := (gitx.Git{Dir: c.P.TaskPath(t)}).SHA(ctx, "HEAD")
+		if currentErr != nil {
+			return currentErr
+		}
+		if pending, pendingErr := (gitx.Git{Dir: c.P.TaskPath(t)}).SHA(ctx, "MERGE_HEAD"); pendingErr == nil {
+			if pending != immutableBase || current != t.HeadSHA {
+				return errors.New("pending merge is not linked to the exact durable task checkpoint")
+			}
+			if e := c.P.Git.ValidatePendingMergeScope(ctx, c.P.TaskPath(t), immutableBase, areas); e != nil {
+				return e
+			}
+		} else if current != t.HeadSHA && c.P.Git.Ancestor(ctx, t.HeadSHA, current) && c.P.Git.Ancestor(ctx, immutableBase, current) {
+			// A prior fenced publish may have failed after the local merge commit.
+			// Its tree is still provable from both durable parents, so retry only
+			// the atomic publication rather than asking a writer to replay work.
+			sha = current
+			if e := c.P.Git.ValidateCommitScope(ctx, immutableBase, sha, areas); e != nil {
+				return e
+			}
+		} else {
+			return errors.New("synchronization merge is neither pending nor a durable-head descendant")
 		}
 	} else if e := c.P.Git.ValidateFullCheckpointScope(ctx, c.P.TaskPath(t), immutableBase, areas); e != nil {
 		return e
 	}
-	sha, e := c.P.Git.Checkpoint(ctx, c.P.TaskPath(t), id)
-	if e != nil {
-		return e
+	if sha == "" {
+		var e error
+		sha, e = c.P.Git.Checkpoint(ctx, c.P.TaskPath(t), id)
+		if e != nil {
+			return e
+		}
 	}
 	if pendingMerge {
 		if !c.P.Git.Ancestor(ctx, immutableBase, sha) {
@@ -857,6 +881,7 @@ func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result 
 		return errors.New("invalid recovered deadline handoff")
 	}
 	t := c.Snapshot().Tasks[id]
+	var err error
 	effective, effectiveErr := c.effective(ctx)
 	preflightRoles, preflightErr := requiredPreflightRoles(effective, t)
 	areas, scoped := immutableScope(t)
@@ -868,16 +893,35 @@ func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result 
 		return &gitx.ScopeError{}
 	}
 	pendingMerge := t.SyncBase == immutableBase
+	sha := ""
 	if pendingMerge {
-		if err := c.P.Git.ValidatePendingMergeScope(ctx, c.P.TaskPath(t), immutableBase, areas); err != nil {
-			return err
+		current, currentErr := (gitx.Git{Dir: c.P.TaskPath(t)}).SHA(ctx, "HEAD")
+		if currentErr != nil {
+			return currentErr
+		}
+		if pending, pendingErr := (gitx.Git{Dir: c.P.TaskPath(t)}).SHA(ctx, "MERGE_HEAD"); pendingErr == nil {
+			if pending != immutableBase || current != t.HeadSHA {
+				return errors.New("pending merge is not linked to the exact durable task checkpoint")
+			}
+			if err := c.P.Git.ValidatePendingMergeScope(ctx, c.P.TaskPath(t), immutableBase, areas); err != nil {
+				return err
+			}
+		} else if current != t.HeadSHA && c.P.Git.Ancestor(ctx, t.HeadSHA, current) && c.P.Git.Ancestor(ctx, immutableBase, current) {
+			sha = current
+			if err := c.P.Git.ValidateCommitScope(ctx, immutableBase, sha, areas); err != nil {
+				return err
+			}
+		} else {
+			return errors.New("synchronization merge is neither pending nor a durable-head descendant")
 		}
 	} else if err := c.P.Git.ValidateFullCheckpointScope(ctx, c.P.TaskPath(t), immutableBase, areas); err != nil {
 		return err
 	}
-	sha, err := c.P.Git.Checkpoint(ctx, c.P.TaskPath(t), id)
-	if err != nil {
-		return err
+	if sha == "" {
+		sha, err = c.P.Git.Checkpoint(ctx, c.P.TaskPath(t), id)
+		if err != nil {
+			return err
+		}
 	}
 	if pendingMerge {
 		if !c.P.Git.Ancestor(ctx, immutableBase, sha) {

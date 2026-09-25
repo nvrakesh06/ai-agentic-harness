@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -182,7 +184,12 @@ func (g Git) ValidatePendingMergeScope(ctx context.Context, worktree, base strin
 		if err != nil {
 			return err
 		}
-		return errors.New("pending merge still has unresolved paths")
+		for _, path := range strings.Fields(unresolved) {
+			content, readErr := os.ReadFile(filepath.Join(worktree, path))
+			if readErr != nil || strings.Contains(string(content), "<<<<<<<") || strings.Contains(string(content), ">>>>>>>") {
+				return errors.New("pending merge still has unresolved paths")
+			}
+		}
 	}
 	if _, err = w.Run(ctx, "", "add", "--all"); err != nil {
 		return err
