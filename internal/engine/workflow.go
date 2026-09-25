@@ -833,6 +833,13 @@ func (c *Controller) checkpointAtBase(ctx context.Context, id, immutableBase str
 			// A prior fenced publish may have failed after the local merge commit.
 			// Its tree is still provable from both durable parents, so retry only
 			// the atomic publication rather than asking a writer to replay work.
+			status, statusErr := (gitx.Git{Dir: c.P.TaskPath(t)}).Run(ctx, "", "status", "--porcelain")
+			if statusErr != nil {
+				return statusErr
+			}
+			if status != "" {
+				return errors.New("resolved synchronization merge has uncommitted work; preserving it for the owning writer")
+			}
 			sha = current
 			if e := c.P.Git.ValidateCommitScope(ctx, immutableBase, sha, areas); e != nil {
 				return e
@@ -907,6 +914,13 @@ func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result 
 				return err
 			}
 		} else if current != t.HeadSHA && c.P.Git.Ancestor(ctx, t.HeadSHA, current) && c.P.Git.Ancestor(ctx, immutableBase, current) {
+			status, statusErr := (gitx.Git{Dir: c.P.TaskPath(t)}).Run(ctx, "", "status", "--porcelain")
+			if statusErr != nil {
+				return statusErr
+			}
+			if status != "" {
+				return errors.New("resolved synchronization merge has uncommitted work; preserving it for the owning writer")
+			}
 			sha = current
 			if err := c.P.Git.ValidateCommitScope(ctx, immutableBase, sha, areas); err != nil {
 				return err
