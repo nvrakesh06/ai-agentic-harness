@@ -29,6 +29,8 @@ import (
 type checkFailure struct {
 	name, command, output string
 	err                   error
+	check                 config.Check
+	report                *nativeFailureReport
 }
 
 func (e *checkFailure) Error() string {
@@ -1147,8 +1149,20 @@ func (c *Controller) verificationFailure(id string, failure *checkFailure) {
 		c.block(id, "Restore canonical policy access before retrying verification.", err.Error(), model.SyncRequired)
 		return
 	}
-	environment := nativeEnvironment(effective)
 	task := c.Snapshot().Tasks[id]
+	if task == nil {
+		return
+	}
+	if routed, routeErr := c.reproduceAndRouteNativeFailure(id, failure, effective); routeErr != nil {
+		c.block(id, "Canonical-base failure reproduction could not complete. Retry verification when the local check resource is available.", routeErr.Error(), model.SyncRequired)
+		return
+	} else if routed {
+		_ = c.P.DB.Event(id, task.RunID, "verification", "native", "native_failure_routed", failure.check.Name+" id="+failure.report.ID+" path="+failure.report.Path)
+		_ = c.updatePR(id, true)
+		c.mirror(id)
+		return
+	}
+	environment := nativeEnvironment(effective)
 	guard := task.Verification
 	// A NativeOnly handoff is a request for the first supervisor-owned check,
 	// not a prior native failure. Only a guard with a recorded native attempt can
@@ -1344,12 +1358,10 @@ func verifyWithPermit(ctx context.Context, e config.Effective, dir string, permi
 				return checked, err
 			}
 		}
-		checkCtx, cancel := context.WithTimeout(ctx, time.Duration(check.Timeout)*time.Second)
-		out, err := platform.Run(checkCtx, dir, cleanEnvironment(), "", check.Command[0], check.Command[1:]...)
-		cancel()
+		out, err, report := runVerificationCheck(ctx, check, dir)
 		release()
 		if err != nil {
-			return checked, &checkFailure{name: check.Name, command: filepath.Base(check.Command[0]), err: err, output: boundedFailureDiagnostic(safety.Redact(out))}
+			return checked, &checkFailure{name: check.Name, command: filepath.Base(check.Command[0]), err: err, output: boundedFailureDiagnostic(safety.Redact(out)), check: check, report: report}
 		}
 		checked = append(checked, passedCheckEvidence(check, out))
 	}
@@ -1365,6 +1377,28 @@ func verifyWithPermit(ctx context.Context, e config.Effective, dir string, permi
 	}
 	return checked, nil
 }
+
+func runVerificationCheck(ctx context.Context, check config.Check, dir string) (string, error, *nativeFailureReport) {
+	reportPath, cleanup, setupErr := nativeFailureReportPath(check)
+	if setupErr != nil {
+		return "", setupErr, nil
+	}
+	defer cleanup()
+	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(check.Timeout)*time.Second)
+	out, err := platform.Run(checkCtx, dir, nativeFailureEnvironment(cleanEnvironment(), reportPath), "", check.Command[0], check.Command[1:]...)
+	cancel()
+	if err == nil || reportPath == "" {
+		return out, err, nil
+	}
+	report, reportErr := parseNativeFailureReport(reportPath)
+	if reportErr != nil {
+		// A malformed child diagnostic must not hide the check failure or widen
+		// its routing authority. The ordinary bounded local recovery remains.
+		return out, err, nil
+	}
+	return out, err, report
+}
+
 func (c *Controller) checks(ctx context.Context, e config.Effective, dir, taskID string) ([]string, error) {
 	return verifyWithPermit(ctx, e, dir, func(ctx context.Context, check config.Check) (func(), error) {
 		return c.checkPermit(ctx, taskID, check)
@@ -1667,6 +1701,20 @@ func (c *Controller) verifyReview(id string) error {
 	}
 	if visualRequired && (evidence.Visual == nil || strings.TrimSpace(evidence.Reviews[t.VisualRequired.Role]) == "") {
 		c.block(id, "Exact-head visual evidence and the designated visual review are required before merge.", "The durable preflight visual requirement was not satisfied; capture or reviewer completion is missing.", model.SyncRequired)
+		return c.refreshDraftPR(id)
+	}
+	if !dependenciesComplete(c.Snapshot(), t) {
+		// A cross-task route can arrive while final reviews are running. Do not
+		// advertise a merge-ready PR until every durable dependency is complete;
+		// after its owner merges this task must obtain fresh integration evidence.
+		if e = c.mutate(func(s *model.Snapshot) error {
+			task := s.Tasks[id]
+			task.Evidence = evidence
+			task.State = model.SyncRequired
+			return nil
+		}); e != nil {
+			return e
+		}
 		return c.refreshDraftPR(id)
 	}
 	if e = c.mutate(func(s *model.Snapshot) error {
