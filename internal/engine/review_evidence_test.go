@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -11,11 +12,30 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
 )
 
 func mustPassedCheckEvidence(t *testing.T, check config.Check, output string) string {
 	t.Helper()
 	return passedCheckEvidence(check, output)
+}
+
+func TestBoundedFailureDiagnosticPreservesTailAfterLongSuccessfulOutput(t *testing.T) {
+	secret := "sk-abcdefghijklmnopqrstuvwxyz012345"
+	output := strings.Repeat("successful check output token="+secret+"\n", 300) + "src/studio-server/http.ts(291,69): TS2740: cannot use Duplex as Socket\n"
+	failure := &checkFailure{name: "fixture acceptance", err: errors.New("exit status 1"), output: boundedFailureDiagnostic(safety.Redact(output))}
+	reason := failure.Error()
+	for _, want := range []string{"fixture acceptance failed", "exit status 1", "TS2740", "bytes omitted"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("bounded native failure reason omitted %q: %q", want, reason)
+		}
+	}
+	if strings.Contains(reason, secret) {
+		t.Fatalf("bounded native failure reason leaked a secret: %q", reason)
+	}
+	if len(reason) > maxFailureDiagnosticBytes {
+		t.Fatalf("bounded native failure reason is %d bytes, want at most %d", len(reason), maxFailureDiagnosticBytes)
+	}
 }
 
 func TestPassedCheckEvidenceDoesNotPublishOutputOrArguments(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -58,6 +59,39 @@ func TestObservedProcessRecordsRecentOutput(t *testing.T) {
 	}
 	if observed.Output == "" || observed.Stdout == "" || observed.Stderr != "" || observed.LastActivity.IsZero() || time.Since(observed.LastActivity) > time.Second {
 		t.Fatalf("missing recent activity evidence: %#v", observed)
+	}
+}
+
+func TestFailedPowerShellProcessRetainsTailAfterLongStdout(t *testing.T) {
+	powershell, err := exec.LookPath("powershell")
+	if err != nil {
+		t.Skip("PowerShell is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	const decisive = "AIH_DECISIVE_FAILURE: TypeScript validation failed at the end of stdout"
+	script := "[Console]::Out.Write(('successful test output ' * 500000)); [Console]::Out.WriteLine('" + decisive + "'); exit 1"
+	out, err := Run(ctx, "", os.Environ(), "", powershell, "-NoProfile", "-NonInteractive", "-Command", script)
+	if err == nil || !strings.Contains(err.Error(), "exit status 1") {
+		t.Fatalf("PowerShell failure exit was not preserved: %v", err)
+	}
+	for _, want := range []string{"successful test output", decisive, "earlier process output omitted"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("failed PowerShell output omitted %q", want)
+		}
+	}
+	if len(out) > maxCapturedOutputBytes {
+		t.Fatalf("failed PowerShell output is %d bytes, want at most %d", len(out), maxCapturedOutputBytes)
+	}
+}
+
+func TestLimitedBufferSuccessSnapshotRetainsFirstOutput(t *testing.T) {
+	var output limitedBuffer
+	_, _ = output.Write([]byte(strings.Repeat("a", maxCapturedOutputBytes)))
+	_, _ = output.Write([]byte("decisive tail"))
+	got, _ := output.snapshot()
+	if len(got) != maxCapturedOutputBytes || strings.Contains(got, "decisive tail") {
+		t.Fatalf("successful output no longer retains its bounded leading slice: %d bytes", len(got))
 	}
 }
 

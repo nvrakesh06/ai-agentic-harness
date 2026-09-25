@@ -19,6 +19,10 @@ var errProcessTerminationTimeout = errors.New("process termination did not compl
 
 const processTerminationGrace = 500 * time.Millisecond
 
+const maxCapturedOutputBytes = 8 * 1024 * 1024
+
+const failureCaptureMarker = "\n[... earlier process output omitted; showing first and last captured output ...]\n"
+
 // AcquireContext serializes short local operations across CLI processes. The
 // supervisor itself still uses fail-fast Acquire to reject duplicate owners.
 func AcquireContext(ctx context.Context, path string) (*Lock, error) {
@@ -43,6 +47,9 @@ func AcquireContext(ctx context.Context, path string) (*Lock, error) {
 type limitedBuffer struct {
 	mu           sync.Mutex
 	b            bytes.Buffer
+	tail         []byte
+	tailStart    int
+	tailLen      int
 	lastActivity time.Time
 }
 
@@ -50,17 +57,48 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	n := len(p)
-	left := 8*1024*1024 - b.b.Len()
+	left := maxCapturedOutputBytes - b.b.Len()
 	if left > 0 {
 		if len(p) > left {
-			p = p[:left]
+			_, _ = b.b.Write(p[:left])
+			p = p[left:]
+		} else {
+			_, _ = b.b.Write(p)
+			p = nil
 		}
-		_, _ = b.b.Write(p)
+	}
+	if len(p) > 0 {
+		if b.tail == nil {
+			b.tail = make([]byte, maxCapturedOutputBytes)
+			copy(b.tail, b.b.Bytes())
+			b.tailLen = maxCapturedOutputBytes
+		}
+		b.appendTail(p)
 	}
 	if n > 0 {
 		b.lastActivity = time.Now().UTC()
 	}
 	return n, nil
+}
+
+func (b *limitedBuffer) appendTail(p []byte) {
+	if len(p) >= maxCapturedOutputBytes {
+		copy(b.tail, p[len(p)-maxCapturedOutputBytes:])
+		b.tailStart, b.tailLen = 0, maxCapturedOutputBytes
+		return
+	}
+	start := (b.tailStart + b.tailLen) % maxCapturedOutputBytes
+	copy(b.tail[start:], p)
+	if remaining := len(p) - (maxCapturedOutputBytes - start); remaining > 0 {
+		copy(b.tail, p[len(p)-remaining:])
+	}
+	if b.tailLen < maxCapturedOutputBytes {
+		b.tailLen += len(p)
+		if b.tailLen > maxCapturedOutputBytes {
+			b.tailLen = maxCapturedOutputBytes
+		}
+	}
+	b.tailStart = (b.tailStart + len(p)) % maxCapturedOutputBytes
 }
 
 type Observation struct {
@@ -176,6 +214,22 @@ func (b *limitedBuffer) snapshot() (string, time.Time) {
 	return b.b.String(), b.lastActivity
 }
 
+// failureSnapshot keeps the existing first-output behavior for successful
+// commands while exposing the rolling tail when a command fails. That tail is
+// where test runners usually print the decisive diagnostic after long success
+// logs, and it remains bounded to the existing per-stream capture limit.
+func (b *limitedBuffer) failureSnapshot() (string, time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.tail == nil {
+		return b.b.String(), b.lastActivity
+	}
+	headBytes := maxCapturedOutputBytes / 4
+	tailBytes := maxCapturedOutputBytes - headBytes - len(failureCaptureMarker)
+	tail := string(b.tail[b.tailStart:]) + string(b.tail[:b.tailStart])
+	return b.b.String()[:headBytes] + failureCaptureMarker + tail[len(tail)-tailBytes:], b.lastActivity
+}
+
 func RunObserved(ctx context.Context, dir string, env []string, input string, name string, args ...string) (Observation, error) {
 	cmd, err := command(name, args)
 	if err != nil {
@@ -218,8 +272,8 @@ func RunObserved(ctx context.Context, dir string, env []string, input string, na
 		}
 	}
 	if err != nil {
-		stdout, stdoutAt := output.snapshot()
-		stderrText, stderrAt := stderr.snapshot()
+		stdout, stdoutAt := output.failureSnapshot()
+		stderrText, stderrAt := stderr.failureSnapshot()
 		if stderrAt.After(stdoutAt) {
 			stdoutAt = stderrAt
 		}

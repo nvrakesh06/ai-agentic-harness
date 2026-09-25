@@ -39,6 +39,9 @@ func (e *checkFailure) Unwrap() error { return e.err }
 const (
 	maxVerificationEvidenceScan   = 64 << 10
 	maxVerificationPassCountItems = 8
+	maxFailureDiagnosticBytes     = 8 << 10
+	failureDiagnosticHeadBytes    = 2 << 10
+	failureDiagnosticTailBytes    = 5 << 10
 )
 
 var verificationPassCount = regexp.MustCompile(`(?i)\b(test files|tests|test suites|suites|specs?)\s*:?\s*(\d{1,9})\s+(?:passed|passing)\b`)
@@ -97,6 +100,18 @@ func boundedVerificationOutput(output string) string {
 		return output
 	}
 	return output[len(output)-maxVerificationEvidenceScan:]
+}
+
+// boundedFailureDiagnostic preserves the beginning and, especially, the end of
+// a failed check's output. Test runners commonly print many successful results
+// before writing the actionable failure at the end. The caller redacts before
+// invoking this helper, so both retained slices are safe to persist.
+func boundedFailureDiagnostic(output string) string {
+	if len(output) <= maxFailureDiagnosticBytes {
+		return output
+	}
+	omitted := len(output) - failureDiagnosticHeadBytes - failureDiagnosticTailBytes
+	return output[:failureDiagnosticHeadBytes] + fmt.Sprintf("\n[... %d bytes omitted; showing first and last diagnostic output ...]\n", omitted) + output[len(output)-failureDiagnosticTailBytes:]
 }
 
 func passedCheckEvidence(check config.Check, output string) string {
@@ -1244,7 +1259,7 @@ func verifyWithPermit(ctx context.Context, e config.Effective, dir string, permi
 		cancel()
 		release()
 		if err != nil {
-			return checked, &checkFailure{name: check.Name, command: filepath.Base(check.Command[0]), err: err, output: short(safety.Redact(out), 8000)}
+			return checked, &checkFailure{name: check.Name, command: filepath.Base(check.Command[0]), err: err, output: boundedFailureDiagnostic(safety.Redact(out))}
 		}
 		checked = append(checked, passedCheckEvidence(check, out))
 	}
