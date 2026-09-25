@@ -559,7 +559,49 @@ func TestSyncConflictCheckpointPublishesResolvedMerge(t *testing.T) {
 	if got := c.Snapshot().Tasks[task.ID].SyncBase; got != target {
 		t.Fatalf("conflict did not persist sync target: %q", got)
 	}
+	local := gitx.Git{Dir: dir}
+	if _, err = local.Run(ctx, "", "update-ref", "refs/heads/"+task.Branch, base, task.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err = engine.CheckpointForTest(c, ctx, task.ID); err == nil {
+		t.Fatal("pending merge from a stale local head passed the durable-head guard")
+	}
+	if _, err = local.Run(ctx, "", "update-ref", "refs/heads/"+task.Branch, task.HeadSHA, base); err != nil {
+		t.Fatal(err)
+	}
 	if err = os.WriteFile(filepath.Join(dir, "README.md"), []byte("resolved\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	engine.RejectTaskPublishForTest(c, task.Branch)
+	if err = engine.CheckpointForTest(c, ctx, task.ID); err == nil {
+		t.Fatal("resolved merge unexpectedly published through rejected fence")
+	}
+	committed, err := (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
+	if err != nil || committed == task.HeadSHA || !f.P.Git.Ancestor(ctx, target, committed) {
+		t.Fatalf("rejected publication did not preserve local resolved merge: head=%q err=%v", committed, err)
+	}
+	if current := c.Snapshot().Tasks[task.ID]; current.HeadSHA != task.HeadSHA || current.SyncBase != target || current.BaseSHA != base {
+		t.Fatalf("failed fence advanced durable task state: %#v", current)
+	}
+	remoteHead, err := f.P.Git.RemoteHead(ctx, task.Branch)
+	if err != nil || remoteHead != task.HeadSHA {
+		t.Fatalf("failed fence advanced remote task ref: head=%q err=%v", remoteHead, err)
+	}
+	engine.RestorePublishForTest(c)
+	if err = os.WriteFile(filepath.Join(dir, "README.md"), []byte("new uncheckpointed edit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = engine.CheckpointForTest(c, ctx, task.ID); err == nil {
+		t.Fatal("dirty retry silently published the earlier local merge")
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "README.md"))
+	if err != nil || string(content) != "new uncheckpointed edit\n" {
+		t.Fatalf("failed retry lost writer edit: content=%q err=%v", content, err)
+	}
+	if current := c.Snapshot().Tasks[task.ID]; current.HeadSHA != task.HeadSHA || current.SyncBase != target {
+		t.Fatalf("dirty retry advanced durable task state: %#v", current)
+	}
+	if _, err = (gitx.Git{Dir: dir}).Run(ctx, "", "restore", "README.md"); err != nil {
 		t.Fatal(err)
 	}
 	if err = engine.CheckpointForTest(c, ctx, task.ID); err != nil {
