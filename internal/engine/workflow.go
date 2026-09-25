@@ -515,6 +515,15 @@ func (c *Controller) plan(id string) {
 			}
 		}
 	}
+	plannedAreas := make(map[string][]gitx.Area, len(r.Plan))
+	for _, p := range r.Plan {
+		classified, classifyErr := c.P.Git.ClassifyAreasAtRef(c.ctx, effective.BaseSHA, p.Areas)
+		if classifyErr != nil {
+			c.planFailure(id, fmt.Errorf("classify planned areas for %s: %w", p.Key, classifyErr))
+			return
+		}
+		plannedAreas[p.Key] = classified
+	}
 	e = c.mutate(func(s *model.Snapshot) error {
 		for _, p := range r.Plan {
 			taskID := id + "-" + p.Key
@@ -522,7 +531,8 @@ func (c *Controller) plan(id string) {
 			for _, d := range p.Dependencies {
 				deps = append(deps, id+"-"+d)
 			}
-			s.Tasks[taskID] = &model.Task{ID: taskID, ObjectiveID: id, Title: p.Title, Objective: p.Objective, Acceptance: p.Acceptance, Dependencies: deps, Areas: p.Areas, Domains: p.Domains, Risk: p.Risk, UI: p.UI, Security: p.Security, Roles: p.Roles, State: model.Planned, FixCycles: map[string]int{}}
+			classified := plannedAreas[p.Key]
+			s.Tasks[taskID] = &model.Task{ID: taskID, ObjectiveID: id, Title: p.Title, Objective: p.Objective, Acceptance: p.Acceptance, Dependencies: deps, Areas: p.Areas, AssignedAreas: canonicalAssignedAreas(classified), AssignedAreaKinds: normalizeAreaKinds(classified), Domains: p.Domains, Risk: p.Risk, UI: p.UI, Security: p.Security, Roles: p.Roles, State: model.Planned, FixCycles: map[string]int{}}
 		}
 		s.Objectives[id].Planned = true
 		return nil
@@ -686,6 +696,13 @@ func (c *Controller) portable(text string) string {
 }
 func (c *Controller) checkpoint(ctx context.Context, id string) error {
 	t := c.Snapshot().Tasks[id]
+	areas, ok := immutableScope(t)
+	if !ok || t.BaseSHA == "" {
+		return &gitx.ScopeError{}
+	}
+	if e := c.P.Git.ValidateFullCheckpointScope(ctx, c.P.TaskPath(t), t.BaseSHA, areas); e != nil {
+		return e
+	}
 	sha, e := c.P.Git.Checkpoint(ctx, c.P.TaskPath(t), id)
 	if e != nil {
 		return e
@@ -710,6 +727,13 @@ func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result 
 	t := c.Snapshot().Tasks[id]
 	effective, effectiveErr := c.effective(ctx)
 	preflightRoles, preflightErr := requiredPreflightRoles(effective, t)
+	areas, scoped := immutableScope(t)
+	if !scoped || t.BaseSHA == "" {
+		return &gitx.ScopeError{}
+	}
+	if err := c.P.Git.ValidateFullCheckpointScope(ctx, c.P.TaskPath(t), t.BaseSHA, areas); err != nil {
+		return err
+	}
 	sha, err := c.P.Git.Checkpoint(ctx, c.P.TaskPath(t), id)
 	if err != nil {
 		return err
@@ -770,6 +794,19 @@ func (c *Controller) ensureWorktree(id string) error {
 	if e := c.P.Git.Worktree(c.ctx, c.P.TaskPath(t), t.Branch, from); e != nil {
 		return e
 	}
+	if t.BaseSHA == "" {
+		head, e := (gitx.Git{Dir: c.P.TaskPath(t)}).SHA(c.ctx, "HEAD")
+		if e != nil {
+			return e
+		}
+		return c.mutate(func(s *model.Snapshot) error {
+			task := s.Tasks[id]
+			if task.BaseSHA == "" {
+				task.BaseSHA, task.HeadSHA = head, head
+			}
+			return nil
+		})
+	}
 	return nil
 }
 func (c *Controller) work(id string, write bool) {
@@ -797,6 +834,10 @@ func (c *Controller) work(id string, write bool) {
 }
 
 func (c *Controller) handleVerificationError(id string, err error) {
+	if scopeError(err) {
+		c.block(id, "Correct or replan the immutable task-area assignment; local work is preserved.", err.Error(), model.Ready)
+		return
+	}
 	var unavailable *visualCaptureUnavailableError
 	if errors.As(err, &unavailable) {
 		t := c.Snapshot().Tasks[id]
@@ -829,6 +870,10 @@ func (c *Controller) implement(id string) bool {
 		return false
 	}
 	t := c.Snapshot().Tasks[id]
+	if _, ok := immutableScope(t); !ok {
+		c.block(id, "This legacy task has no provable immutable area assignment. Replan it before work starts.", "AIH refuses to guess a started task's historical write scope.", model.Ready)
+		return false
+	}
 	dir := c.P.TaskPath(t)
 	if t.SyncBase != "" {
 		if e = c.P.Git.PrepareMerge(c.ctx, dir, t.SyncBase); e != nil {
@@ -1262,6 +1307,9 @@ func (c *Controller) verifyReview(id string) error {
 	if diff == "" {
 		return errors.New("implementation has no source changes")
 	}
+	if e = c.validateTaskScope(t); e != nil {
+		return e
+	}
 	if e = safety.Check(diff); e != nil {
 		return e
 	}
@@ -1371,8 +1419,15 @@ func (c *Controller) verifyReview(id string) error {
 	if e = c.publishReviewProgress(id, evidence); e != nil {
 		return e
 	}
-	if e = c.reviewFollowups(t, assessment.findings); e != nil {
+	route, routeErr := c.routeCrossTaskFindings(id, assessment.findings, func(finding model.Finding) bool { return findingBlocks(activeRequired, finding) })
+	if routeErr != nil {
+		return routeErr
+	}
+	if e = c.reviewFollowups(t, route.local); e != nil {
 		return e
+	}
+	if route.gated {
+		return c.refreshDraftPR(id)
 	}
 	if assessment.blocking >= 0 {
 		role := activeRequired[assessment.blocking]
@@ -1448,8 +1503,15 @@ func (c *Controller) verifyReview(id string) error {
 		if e = c.publishReviewProgress(id, evidence); e != nil {
 			return e
 		}
-		if e = c.reviewFollowups(t, refreshAssessment.findings); e != nil {
+		refreshRoute, routeErr := c.routeCrossTaskFindings(id, refreshAssessment.findings, func(finding model.Finding) bool { return findingBlocks(refreshRoles, finding) })
+		if routeErr != nil {
+			return routeErr
+		}
+		if e = c.reviewFollowups(t, refreshRoute.local); e != nil {
 			return e
+		}
+		if refreshRoute.gated {
+			return c.refreshDraftPR(id)
 		}
 		if refreshAssessment.blocking >= 0 {
 			role := refreshRoles[refreshAssessment.blocking]

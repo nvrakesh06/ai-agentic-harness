@@ -59,6 +59,10 @@ func (c *Controller) integrate(id string) {
 			return
 		}
 	}
+	if e = c.validateTaskScope(t); e != nil {
+		c.block(id, "Correct or replan the immutable task-area assignment before integration.", e.Error(), model.SyncRequired)
+		return
+	}
 	pr, e := c.P.Hub.Pull(c.ctx, t.PR)
 	if e != nil {
 		c.block(id, "Check PR access and retry.", e.Error(), model.SyncRequired)
