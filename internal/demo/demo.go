@@ -280,6 +280,11 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 	if r.Role == "orchestrator" {
 		for _, key := range []string{"alpha", "beta", "human", "dependent"} {
 			p := model.PlanTask{Key: key, Title: key, Objective: "Create " + key + " fixture", Acceptance: []string{"feature-" + key + ".txt contains implemented"}, Areas: []string{"feature-" + key + ".txt"}, Domains: []string{key}, Risk: "low"}
+			// This recovery demo exercises a serial merge train. The separate
+			// batch lifecycle fixture covers low-risk grouped integration.
+			if key == "beta" {
+				p.Risk = "medium"
+			}
 			if key == "dependent" {
 				p.Dependencies = []string{"alpha"}
 			}
