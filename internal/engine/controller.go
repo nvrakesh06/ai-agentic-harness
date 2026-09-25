@@ -446,6 +446,9 @@ func (c *Controller) Serve(parent context.Context) error {
 				delete(active, strings.TrimPrefix(id, "@merge:"))
 				merging = false
 			}
+			if id == "@batch" {
+				merging = false
+			}
 			if id == "@plan" {
 				planning = false
 			}
@@ -511,6 +514,16 @@ func (c *Controller) Serve(parent context.Context) error {
 				}
 			}
 			if !merging {
+				batch, batchErr := c.reserveBatchIntegration()
+				if batchErr != nil {
+					ce = batchErr
+					break
+				}
+				if batch != nil {
+					merging = true
+					c.launch(func() { c.integrateBatch(batch.ID); done <- "@batch" })
+					continue
+				}
 				for _, t := range model.Ordered(s) {
 					if hasActive(active, t.ID) {
 						continue
