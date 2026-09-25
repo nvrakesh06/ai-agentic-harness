@@ -49,12 +49,38 @@ func TestSelectIntegrationBatchFailsClosedOnConflictsDependenciesAndRisk(t *test
 		"dependency": {"internal/dependency/file.go"}, "risk": {"internal/risk/file.go"}, "safe": {"internal/safe/file.go"},
 	}
 	batch := SelectIntegrationBatch(s, paths)
-	if batch == nil || len(batch.Tasks) != 2 || batch.Tasks[0].ID != "alpha" || batch.Tasks[1].ID != "safe" {
-		t.Fatalf("conflicting candidates admitted: %#v", batch)
+	if batch == nil || len(batch.Tasks) < 2 {
+		t.Fatalf("no independent batch selected: %#v", batch)
 	}
-	delete(s.Tasks, "safe")
-	if batch := SelectIntegrationBatch(s, paths); batch != nil {
-		t.Fatalf("singleton fallback must not wait or reserve: %#v", batch)
+	for _, member := range batch.Tasks {
+		if member.ID == "dependency" || member.ID == "risk" {
+			t.Fatalf("ineligible candidate admitted: %#v", batch)
+		}
+	}
+}
+
+func TestSelectIntegrationBatchFindsLaterPairAndRejectsMissingPaths(t *testing.T) {
+	s := batchSnapshot()
+	s.Tasks["alpha"] = batchTask("alpha", "internal", "alpha")
+	s.Tasks["bravo"] = batchTask("bravo", "internal/bravo", "bravo")
+	s.Tasks["charlie"] = batchTask("charlie", "internal/charlie", "charlie")
+	paths := map[string][]string{"bravo": {"internal/bravo/file.go"}, "charlie": {"internal/charlie/file.go"}}
+	batch := SelectIntegrationBatch(s, paths)
+	if batch == nil || len(batch.Tasks) != 2 || batch.Tasks[0].ID != "bravo" || batch.Tasks[1].ID != "charlie" {
+		t.Fatalf("later compatible pair was suppressed: %#v", batch)
+	}
+	paths["alpha"] = []string{"internal/alpha.go"}
+	batch = SelectIntegrationBatch(s, paths)
+	if batch == nil || batch.Tasks[0].ID != "bravo" || batch.Tasks[1].ID != "charlie" {
+		t.Fatalf("conflicting early candidate became an anchor: %#v", batch)
+	}
+}
+
+func TestSelectIntegrationBatchRequiresPassedNativeValidation(t *testing.T) {
+	s := batchSnapshotWith("alpha", "bravo")
+	s.Tasks["alpha"].Evidence.Checks = nil
+	if batch := SelectIntegrationBatch(s, map[string][]string{"alpha": {"internal/alpha/file.go"}, "bravo": {"internal/bravo/file.go"}}); batch != nil {
+		t.Fatalf("batch without native validation admitted: %#v", batch)
 	}
 }
 
@@ -107,5 +133,5 @@ func batchSnapshotWith(ids ...string) *Snapshot {
 func batchTask(id, area, domain string) *Task {
 	base, head := strings.Repeat("a", 40), strings.Repeat("e", 40)
 	config, rules, scope := strings.Repeat("b", 64), strings.Repeat("c", 64), strings.Repeat("d", 64)
-	return &Task{ID: id, State: MergeReady, Risk: "low", BaseSHA: base, HeadSHA: head, Domains: []string{domain}, AssignedAreas: []string{area}, AssignedAreaKinds: map[string]string{area: AreaDirectory}, Evidence: &Evidence{Base: base, Head: head, Config: config, Rules: rules, ReviewRoster: []string{"qa", "reviewer"}, ReviewScope: scope, ReviewDispositions: map[string]ReviewDisposition{"qa": {Disposition: "completed", SourceHead: head, Runtime: "codex/test"}, "reviewer": {Disposition: "completed", SourceHead: head, Runtime: "codex/test"}}}}
+	return &Task{ID: id, State: MergeReady, Risk: "low", BaseSHA: base, HeadSHA: head, Domains: []string{domain}, AssignedAreas: []string{area}, AssignedAreaKinds: map[string]string{area: AreaDirectory}, Evidence: &Evidence{Base: base, Head: head, Config: config, Rules: rules, Checks: []string{"check=tests exit=0"}, ValidationGate: "focused", ValidationInput: strings.Repeat("f", 64), Toolchain: "go=test", TestInputs: head, ReviewRoster: []string{"qa", "reviewer"}, ReviewScope: scope, ReviewDispositions: map[string]ReviewDisposition{"qa": {Disposition: "completed", SourceHead: head, Runtime: "codex/test"}, "reviewer": {Disposition: "completed", SourceHead: head, Runtime: "codex/test"}}}}
 }

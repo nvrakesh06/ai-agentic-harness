@@ -34,3 +34,36 @@ func TestBatchAdmissionMatchesOnlyCurrentCanonicalIdentity(t *testing.T) {
 		task = saved
 	}
 }
+
+func TestBatchReservationRejectsStaleCanonicalIdentity(t *testing.T) {
+	base := strings.Repeat("a", 40)
+	effective := config.Effective{BaseSHA: base, Hash: strings.Repeat("b", 64)}
+	batch := &model.IntegrationBatch{BaseSHA: base, Config: effective.Hash, Rules: roles.Hash()}
+	if !batchReservationMatchesRuntime(batch, effective) {
+		t.Fatal("current reservation was rejected")
+	}
+	for _, mutate := range []func(){
+		func() { batch.BaseSHA = strings.Repeat("c", 40) },
+		func() { batch.Config = strings.Repeat("d", 64) },
+		func() { batch.Rules = strings.Repeat("e", 64) },
+	} {
+		copy := *batch
+		mutateBatch := &copy
+		saved := batch
+		batch = mutateBatch
+		mutate()
+		if batchReservationMatchesRuntime(batch, effective) {
+			t.Fatal("stale reservation identity was accepted")
+		}
+		batch = saved
+	}
+}
+
+func TestSameBatchPathsRequiresExactCurrentDiff(t *testing.T) {
+	if !sameBatchPaths([]string{"a.go", "b.go"}, []string{"b.go", "a.go"}) {
+		t.Fatal("path ordering changed an otherwise identical diff")
+	}
+	if sameBatchPaths([]string{"a.go"}, []string{"a.go", "b.go"}) || sameBatchPaths([]string{"a.go"}, []string{"other.go"}) {
+		t.Fatal("changed path set was accepted")
+	}
+}

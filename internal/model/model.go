@@ -913,6 +913,11 @@ const (
 	MaxIntegrationBatchTasks = 3
 )
 
+type integrationBatchCandidate struct {
+	task  *Task
+	paths []string
+}
+
 // SelectIntegrationBatch returns the first deterministic pair or triple that
 // is safe to reserve. It does not wait for another task to become ready: a
 // pair is sufficient, while a singleton deliberately falls back to serial
@@ -922,41 +927,62 @@ func SelectIntegrationBatch(s *Snapshot, changedPaths map[string][]string) *Inte
 	if s == nil || s.IntegrationBatch != nil {
 		return nil
 	}
-	var selected []*Task
-	var base, configHash, rules string
-	var roster []string
-	usedDomains := map[string]bool{}
-	usedPaths := map[string]bool{}
-	usedAreas := []immutableBatchArea{}
+	var candidates []integrationBatchCandidate
 	for _, task := range Ordered(s) {
 		paths := canonicalBatchPaths(changedPaths[task.ID])
 		if !batchTaskEligible(s, task, paths) {
 			continue
 		}
-		if len(selected) == 0 {
-			base, configHash, rules = task.BaseSHA, task.Evidence.Config, task.Evidence.Rules
-			roster = append([]string(nil), task.Evidence.ReviewRoster...)
-		} else if task.BaseSHA != base || task.Evidence.Config != configHash || task.Evidence.Rules != rules || !sameStrings(task.Evidence.ReviewRoster, roster) {
-			continue
-		}
-		areas := batchAreas(task)
-		if batchScopesConflict(usedAreas, areas) || anyStringUsed(usedDomains, task.Domains) || anyStringUsed(usedPaths, paths) {
-			continue
-		}
-		selected = append(selected, task)
-		usedAreas = append(usedAreas, areas...)
-		markStrings(usedDomains, task.Domains)
-		markStrings(usedPaths, paths)
-		if len(selected) == MaxIntegrationBatchTasks {
-			break
+		candidates = append(candidates, integrationBatchCandidate{task: task, paths: paths})
+	}
+	// Prefer the lexically first valid triple. If none exists, return the
+	// lexically first valid pair immediately; an incompatible early task cannot
+	// anchor and suppress a later independent pair.
+	for size := MaxIntegrationBatchTasks; size >= MinIntegrationBatchTasks; size-- {
+		for i := 0; i < len(candidates); i++ {
+			selected := findBatchSelection(candidates, i+1, size, []integrationBatchCandidate{candidates[i]})
+			if selected != nil {
+				return newIntegrationBatch(s, selected)
+			}
 		}
 	}
-	if len(selected) < MinIntegrationBatchTasks {
-		return nil
+	return nil
+}
+
+func findBatchSelection(candidates []integrationBatchCandidate, start, size int, selected []integrationBatchCandidate) []integrationBatchCandidate {
+	if len(selected) == size {
+		return selected
 	}
-	batch := &IntegrationBatch{BaseSHA: base, Config: configHash, Rules: rules, ReviewRoster: roster}
-	for _, task := range selected {
-		batch.Tasks = append(batch.Tasks, IntegrationBatchTask{ID: task.ID, HeadSHA: task.HeadSHA, ReviewScope: task.Evidence.ReviewScope, Paths: canonicalBatchPaths(changedPaths[task.ID])})
+	for i := start; i < len(candidates); i++ {
+		if !batchCandidateCompatible(selected, candidates[i]) {
+			continue
+		}
+		if match := findBatchSelection(candidates, i+1, size, append(selected, candidates[i])); match != nil {
+			return match
+		}
+	}
+	return nil
+}
+
+func batchCandidateCompatible(selected []integrationBatchCandidate, candidate integrationBatchCandidate) bool {
+	first := selected[0].task
+	if candidate.task.BaseSHA != first.BaseSHA || candidate.task.Evidence.Config != first.Evidence.Config || candidate.task.Evidence.Rules != first.Evidence.Rules || !sameStrings(candidate.task.Evidence.ReviewRoster, first.Evidence.ReviewRoster) {
+		return false
+	}
+	for _, member := range selected {
+		if batchScopesConflict(batchAreas(member.task), batchAreas(candidate.task)) || anyStringUsed(stringsToSet(member.task.Domains), candidate.task.Domains) || anyStringUsed(stringsToSet(member.paths), candidate.paths) {
+			return false
+		}
+	}
+	return true
+}
+
+func newIntegrationBatch(s *Snapshot, selected []integrationBatchCandidate) *IntegrationBatch {
+	first := selected[0].task
+	batch := &IntegrationBatch{BaseSHA: first.BaseSHA, Config: first.Evidence.Config, Rules: first.Evidence.Rules, ReviewRoster: append([]string(nil), first.Evidence.ReviewRoster...)}
+	for _, candidate := range selected {
+		task := candidate.task
+		batch.Tasks = append(batch.Tasks, IntegrationBatchTask{ID: task.ID, HeadSHA: task.HeadSHA, ReviewScope: task.Evidence.ReviewScope, Paths: append([]string(nil), candidate.paths...)})
 	}
 	batch.ID = integrationBatchID(batch)
 	if ValidateIntegrationBatch(s, batch) != nil {
@@ -1020,7 +1046,7 @@ type immutableBatchArea struct{ path, kind string }
 func batchTaskEligible(s *Snapshot, task *Task, paths []string) bool {
 	if task == nil || task.State != MergeReady || task.Risk != "low" || task.Evidence == nil || task.BaseSHA == "" || task.HeadSHA == "" ||
 		task.Evidence.Base != task.BaseSHA || task.Evidence.Head != task.HeadSHA || !validHash(task.Evidence.Config) || !validHash(task.Evidence.Rules) ||
-		!validRoleRoster(task.Evidence.ReviewRoster) || !validHash(task.Evidence.ReviewScope) || !completedDependencies(s, task) {
+		!validRoleRoster(task.Evidence.ReviewRoster) || !validHash(task.Evidence.ReviewScope) || !batchValidationAccepted(task.Evidence) || !completedDependencies(s, task) {
 		return false
 	}
 	if len(task.Evidence.ReviewDispositions) != len(task.Evidence.ReviewRoster) {
@@ -1036,8 +1062,20 @@ func batchTaskEligible(s *Snapshot, task *Task, paths []string) bool {
 	if len(areas) == 0 || len(task.Domains) == 0 || hasDuplicateOrBlank(task.Domains) {
 		return false
 	}
-	if paths != nil && (len(paths) == 0 || !batchPathsWithinAreas(paths, areas)) {
+	if len(paths) == 0 || !batchPathsWithinAreas(paths, areas) {
 		return false
+	}
+	return true
+}
+
+func batchValidationAccepted(evidence *Evidence) bool {
+	if evidence == nil || (evidence.ValidationGate != "focused" && evidence.ValidationGate != "full") || !validHash(evidence.ValidationInput) || strings.TrimSpace(evidence.Toolchain) == "" || !validSHA(evidence.TestInputs) || len(evidence.Checks) == 0 {
+		return false
+	}
+	for _, check := range evidence.Checks {
+		if strings.TrimSpace(check) == "" {
+			return false
+		}
 	}
 	return true
 }
@@ -1124,6 +1162,11 @@ func markStrings(used map[string]bool, values []string) {
 	for _, value := range values {
 		used[value] = true
 	}
+}
+func stringsToSet(values []string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	markStrings(set, values)
+	return set
 }
 func hasDuplicateOrBlank(values []string) bool {
 	seen := map[string]bool{}
