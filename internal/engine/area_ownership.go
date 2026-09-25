@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -62,11 +63,7 @@ func findingInTaskScope(task *model.Task, finding model.Finding) bool {
 }
 
 func writableOwner(state model.State) bool {
-	// A RUNNING writer has already captured its task input. Routing a new
-	// finding to it without a durable replay protocol could let it checkpoint
-	// and clear the finding before it observes it. Treat it as unavailable;
-	// the origin fails closed and a later bounded task can be replanned.
-	return state == model.Ready || state == model.Fix
+	return state == model.Ready || state == model.Running || state == model.Fix
 }
 
 func findingScopeOwner(tasks map[string]*model.Task, origin *model.Task, finding model.Finding) scopeOwner {
@@ -133,6 +130,18 @@ func applyCrossTaskFindings(s *model.Snapshot, originID string, findings []model
 				route.unresolved = true
 			}
 			continue
+		}
+		target := s.Tasks[owner.id]
+		if target.State == model.Running {
+			message := fmt.Sprintf("Cross-task blocking finding from %s: %s. %s", originID, finding.Location, finding.Resolution)
+			commandID := fmt.Sprintf("routed-finding:%s:%s:%s", originID, owner.id, finding.Location)
+			if err := model.QueueRoutedFinding(target, origin, commandID, message); err != nil {
+				route.local = append(route.local, finding)
+				if blocks(finding) {
+					route.gated, route.unresolved = true, true
+				}
+				continue
+			}
 		}
 		owners[owner.id] = append(owners[owner.id], finding)
 		if blocks(finding) {

@@ -219,6 +219,40 @@ func QueueGuidance(target, source *Task, commandID, message string) error {
 	return nil
 }
 
+// QueueRoutedFinding is supervisor-created guidance for a concrete finding
+// transferred between immutable task areas. Unlike an operator correction it
+// may cross objective boundaries, but still requires a durable source head and
+// is replayed when it arrives during an in-flight implementation.
+func QueueRoutedFinding(target, source *Task, commandID, message string) error {
+	if target == nil || source == nil || target.ID == source.ID {
+		return errors.New("routed finding guidance requires distinct tasks")
+	}
+	if target.State != Ready && target.State != Running && target.State != Fix {
+		return errors.New("routed finding target must be READY, RUNNING, or FIX")
+	}
+	if !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(source.HeadSHA) {
+		return errors.New("routed finding source needs a durable code checkpoint")
+	}
+	message = strings.TrimSpace(message)
+	if message == "" || len(message) > MaxGuidanceBytes || !utf8.ValidString(message) || strings.ContainsRune(message, '\x00') {
+		return errors.New("routed finding guidance must be bounded UTF-8")
+	}
+	for _, prior := range TaskGuidance(target) {
+		if prior.CommandID == commandID {
+			return nil
+		}
+	}
+	if len(TaskGuidance(target)) >= MaxTaskGuidance {
+		return errors.New("task guidance limit reached")
+	}
+	encoded, err := json.Marshal(Guidance{CommandID: commandID, SourceID: source.ID, SourceSHA: source.HeadSHA, Text: message})
+	if err != nil {
+		return err
+	}
+	target.Decisions = append(target.Decisions, guidancePrefix+string(encoded))
+	return nil
+}
+
 // QueueOperatorGuidance is deliberately scoped to the exact task checkpoint
 // and active policy hashes. It shares the durable delivery/replay mechanism
 // with cross-task guidance, but requires no synthetic source task.
