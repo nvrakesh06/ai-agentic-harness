@@ -814,12 +814,25 @@ func (c *Controller) checkpointAtBase(ctx context.Context, id, immutableBase str
 	if !ok || immutableBase == "" {
 		return &gitx.ScopeError{}
 	}
-	if e := c.P.Git.ValidateFullCheckpointScope(ctx, c.P.TaskPath(t), immutableBase, areas); e != nil {
+	pendingMerge := t.SyncBase == immutableBase
+	if pendingMerge {
+		if e := c.P.Git.ValidatePendingMergeScope(ctx, c.P.TaskPath(t), immutableBase, areas); e != nil {
+			return e
+		}
+	} else if e := c.P.Git.ValidateFullCheckpointScope(ctx, c.P.TaskPath(t), immutableBase, areas); e != nil {
 		return e
 	}
 	sha, e := c.P.Git.Checkpoint(ctx, c.P.TaskPath(t), id)
 	if e != nil {
 		return e
+	}
+	if pendingMerge {
+		if !c.P.Git.Ancestor(ctx, immutableBase, sha) {
+			return errors.New("resolved merge does not contain the durable synchronization target")
+		}
+		if e = c.P.Git.ValidateCommitScope(ctx, immutableBase, sha, areas); e != nil {
+			return e
+		}
 	}
 	if sha == t.HeadSHA && immutableBase == t.BaseSHA {
 		return nil
@@ -847,15 +860,32 @@ func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result 
 	effective, effectiveErr := c.effective(ctx)
 	preflightRoles, preflightErr := requiredPreflightRoles(effective, t)
 	areas, scoped := immutableScope(t)
-	if !scoped || t.BaseSHA == "" {
+	immutableBase := t.BaseSHA
+	if t.SyncBase != "" {
+		immutableBase = t.SyncBase
+	}
+	if !scoped || immutableBase == "" {
 		return &gitx.ScopeError{}
 	}
-	if err := c.P.Git.ValidateFullCheckpointScope(ctx, c.P.TaskPath(t), t.BaseSHA, areas); err != nil {
+	pendingMerge := t.SyncBase == immutableBase
+	if pendingMerge {
+		if err := c.P.Git.ValidatePendingMergeScope(ctx, c.P.TaskPath(t), immutableBase, areas); err != nil {
+			return err
+		}
+	} else if err := c.P.Git.ValidateFullCheckpointScope(ctx, c.P.TaskPath(t), immutableBase, areas); err != nil {
 		return err
 	}
 	sha, err := c.P.Git.Checkpoint(ctx, c.P.TaskPath(t), id)
 	if err != nil {
 		return err
+	}
+	if pendingMerge {
+		if !c.P.Git.Ancestor(ctx, immutableBase, sha) {
+			return errors.New("recovered merge does not contain the durable synchronization target")
+		}
+		if err = c.P.Git.ValidateCommitScope(ctx, immutableBase, sha, areas); err != nil {
+			return err
+		}
 	}
 	updates := []gitx.Update{}
 	if sha != t.HeadSHA {
@@ -865,7 +895,15 @@ func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result 
 	err = c.save(ctx, func(s *model.Snapshot) error {
 		task := s.Tasks[id]
 		task.HeadSHA = sha
+		if pendingMerge {
+			task.BaseSHA = immutableBase
+			task.SyncBase = ""
+			task.Evidence = nil
+		}
 		if task.VisualRequired != nil {
+			if pendingMerge {
+				task.VisualRequired.Base = immutableBase
+			}
 			task.VisualRequired.Head = sha
 		}
 		task.Summary = c.portable(result.Summary)

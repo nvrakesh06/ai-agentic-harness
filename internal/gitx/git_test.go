@@ -188,11 +188,17 @@ func TestConflictRecoveryAndCheckpointMarkers(t *testing.T) {
 	if e = g.PrepareMerge(ctx, dir, base); e != nil {
 		t.Fatal(e)
 	}
+	if e = g.ValidatePendingMergeScope(ctx, dir, base, []gitx.Area{{Pattern: "README.md", Kind: gitx.AreaExplicitFile}}); e == nil {
+		t.Fatal("unresolved merge passed pending scope validation")
+	}
 	if _, e = g.Checkpoint(ctx, dir, "conflict"); e == nil {
 		t.Fatal("unresolved markers checkpointed")
 	}
 	if e = os.WriteFile(filepath.Join(dir, "README.md"), []byte("resolved task and main\n"), 0600); e != nil {
 		t.Fatal(e)
+	}
+	if e = g.ValidatePendingMergeScope(ctx, dir, base, []gitx.Area{{Pattern: "README.md", Kind: gitx.AreaExplicitFile}}); e != nil {
+		t.Fatal("resolved merge pending scope validation:", e)
 	}
 	head, e := g.Checkpoint(ctx, dir, "conflict")
 	if e != nil {
@@ -200,6 +206,9 @@ func TestConflictRecoveryAndCheckpointMarkers(t *testing.T) {
 	}
 	if !g.Ancestor(ctx, base, head) {
 		t.Fatal("resolved checkpoint lost main ancestry")
+	}
+	if e = g.ValidateCommitScope(ctx, base, head, []gitx.Area{{Pattern: "README.md", Kind: gitx.AreaExplicitFile}}); e != nil {
+		t.Fatal("resolved checkpoint scope:", e)
 	}
 	if e = g.Rebase(ctx, dir, base); e != nil {
 		t.Fatal("resolved merge must not replay old checkpoints:", e)
