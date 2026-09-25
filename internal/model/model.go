@@ -16,7 +16,7 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 7
+const StateSchema = 8
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
@@ -366,13 +366,24 @@ type Blocker struct {
 	Resume         State  `json:"resume_state"`
 }
 type Finding struct {
-	Severity   string `json:"severity"`
-	Category   string `json:"category"`
-	Location   string `json:"location"`
-	Reason     string `json:"reason"`
-	Resolution string `json:"suggested_resolution"`
-	Role       string `json:"role,omitempty"`
+	Severity         string `json:"severity"`
+	Category         string `json:"category"`
+	Location         string `json:"location"`
+	Reason           string `json:"reason"`
+	Resolution       string `json:"suggested_resolution"`
+	Role             string `json:"role,omitempty"`
+	Relevance        string `json:"relevance,omitempty"`
+	BaselineSHA      string `json:"baseline_sha,omitempty"`
+	BaselineEvidence string `json:"baseline_evidence,omitempty"`
 }
+
+const (
+	FindingChanged  = "changed"
+	FindingCausal   = "causal"
+	FindingBaseline = "baseline"
+	FindingUnknown  = "unknown"
+)
+
 type Evidence struct {
 	Base               string                       `json:"base"`
 	Head               string                       `json:"head"`
@@ -639,6 +650,21 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 				kind := task.AssignedAreaKinds[area]
 				if kind != AreaFile && kind != AreaDirectory && kind != AreaUnknown {
 					task.AssignedAreaKinds[area] = AreaUnknown
+				}
+			}
+		}
+	}
+	if s.Schema <= 7 {
+		// Schema 8 makes review relevance durable. Historical findings did not
+		// contain a supervisor-verifiable classification, so preserve them as
+		// explicit unknowns rather than treating their absence as baseline proof.
+		for _, task := range s.Tasks {
+			if task == nil {
+				continue
+			}
+			for i := range task.Findings {
+				if task.Findings[i].Relevance == "" {
+					task.Findings[i].Relevance = FindingUnknown
 				}
 			}
 		}

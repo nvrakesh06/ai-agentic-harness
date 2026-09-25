@@ -263,6 +263,24 @@ func TestStructuredResults(t *testing.T) {
 	}
 }
 
+func TestFindingRelevanceRequiresBaselineProof(t *testing.T) {
+	base := strings.Repeat("a", 40)
+	valid := `{"schema_version":1,"status":"completed","summary":"done","question":"","changed_areas":[],"tests_run":[],"remaining_risks":[],"findings":[{"severity":"medium","category":"reliability","location":"internal/studio/base.go:12","reason":"Same failure reproduces at base.","suggested_resolution":"Route to the owner.","relevance":"baseline","baseline_sha":"` + base + `","baseline_evidence":"go test ./internal/studio at base fails identically"}],"plan":[]}`
+	result, err := Parse(valid, "reviewer")
+	if err != nil || result.Findings[0].Relevance != model.FindingBaseline {
+		t.Fatalf("valid baseline finding = %#v, %v", result, err)
+	}
+	for _, input := range []string{
+		strings.Replace(valid, `"baseline_evidence":"go test ./internal/studio at base fails identically"`, `"baseline_evidence":""`, 1),
+		strings.Replace(valid, `"relevance":"baseline"`, `"relevance":"not-proven"`, 1),
+		strings.Replace(valid, `"relevance":"baseline"`, `"relevance":"causal"`, 1),
+	} {
+		if _, err := Parse(input, "reviewer"); err == nil {
+			t.Fatalf("invalid relevance proof accepted: %s", input)
+		}
+	}
+}
+
 func TestPlanRiskSchemaMatchesValidation(t *testing.T) {
 	var schema map[string]any
 	if err := json.Unmarshal([]byte(Schema()), &schema); err != nil {

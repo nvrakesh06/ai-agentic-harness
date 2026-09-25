@@ -312,9 +312,22 @@ func Parse(out, role string) (Result, error) {
 	if r.Status == "blocked" && strings.TrimSpace(r.Question) == "" && role != "implementer" {
 		return r, errors.New("blocked advisory result requires a question")
 	}
-	for _, f := range r.Findings {
+	for i := range r.Findings {
+		f := &r.Findings[i]
 		if !roles.Severity(f.Severity) || f.Reason == "" {
 			return r, errors.New("malformed finding")
+		}
+		if f.Relevance == "" {
+			f.Relevance = model.FindingUnknown
+		}
+		if f.Relevance != model.FindingChanged && f.Relevance != model.FindingCausal && f.Relevance != model.FindingBaseline && f.Relevance != model.FindingUnknown {
+			return r, errors.New("invalid finding relevance")
+		}
+		if f.Relevance != model.FindingBaseline && (f.BaselineSHA != "" || f.BaselineEvidence != "") {
+			return r, errors.New("baseline evidence requires baseline relevance")
+		}
+		if f.Relevance == model.FindingBaseline && (f.BaselineSHA == "" || f.BaselineEvidence == "") {
+			return r, errors.New("baseline finding requires base revision and evidence")
 		}
 	}
 	if role == "orchestrator" && r.Status == "completed" {
@@ -336,7 +349,7 @@ func Schema() string {
 		}
 		return map[string]any{"type": "object", "properties": props, "required": required, "additionalProperties": false}
 	}
-	finding := obj(map[string]any{"severity": map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low", "nit"}}, "category": str, "location": str, "reason": str, "suggested_resolution": str})
+	finding := map[string]any{"type": "object", "properties": map[string]any{"severity": map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low", "nit"}}, "category": str, "location": str, "reason": str, "suggested_resolution": str, "relevance": map[string]any{"type": "string", "enum": []string{model.FindingChanged, model.FindingCausal, model.FindingBaseline, model.FindingUnknown}}, "baseline_sha": str, "baseline_evidence": str}, "required": []string{"severity", "category", "location", "reason", "suggested_resolution", "relevance"}, "additionalProperties": false}
 	risk := map[string]any{"type": "string", "enum": []string{"low", "medium", "high"}}
 	key := map[string]any{"type": "string", "pattern": model.PlanKeyPattern}
 	task := obj(map[string]any{"key": key, "title": nonEmptyString, "objective": nonEmptyString, "acceptance": nonEmptyArray(str), "dependencies": array(str), "areas": nonEmptyArray(str), "conflict_domains": nonEmptyArray(str), "risk": risk, "ui": map[string]any{"type": "boolean"}, "security": map[string]any{"type": "boolean"}, "roles": array(str)})

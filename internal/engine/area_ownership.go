@@ -161,7 +161,10 @@ func applyCrossTaskFindings(s *model.Snapshot, originID string, findings []model
 	for id, routed := range owners {
 		task := s.Tasks[id]
 		task.Findings = appendUniqueFindings(task.Findings, routed)
-		task.Decisions = append(task.Decisions, "Cross-task review finding routed from "+originID+".")
+		decision := "Cross-task review finding routed from " + originID + "."
+		if !containsTask(task.Decisions, decision) {
+			task.Decisions = append(task.Decisions, decision)
+		}
 	}
 	if route.unresolved {
 		model.Block(origin, "A blocking review finding is outside this task's immutable areas and has no safe writable owner. Replan a bounded follow-up, then answer to reverify.", "AIH refused to expand task scope or introduce a dependency cycle.", model.SyncRequired)
@@ -215,6 +218,31 @@ func findingBlocks(required []roles.Role, finding model.Finding) bool {
 		}
 	}
 	return false
+}
+
+// normalizedReviewFinding keeps state written by old workers fail-closed. New
+// prompts require relevance, but attach can still receive an already-running
+// worker response from a previous executable.
+func normalizedReviewFinding(finding model.Finding) model.Finding {
+	if finding.Relevance == "" {
+		finding.Relevance = model.FindingUnknown
+	}
+	return finding
+}
+
+// trustedBaselineFinding is deliberately fail-closed until AIH has a
+// supervisor-owned base reproduction primitive. Reviewer-supplied SHA and
+// prose can describe a baseline observation, but neither proves that a
+// changed function did not break an unchanged caller. Do not auto-route such
+// a finding and accidentally turn a causal regression into a MergeReady task.
+func trustedBaselineFinding(origin *model.Task, paths []string, finding model.Finding) bool {
+	return false
+}
+
+func reviewFindingBlocksOrigin(origin *model.Task, paths []string, required []roles.Role) func(model.Finding) bool {
+	return func(finding model.Finding) bool {
+		return findingBlocks(required, finding) && !trustedBaselineFinding(origin, paths, finding)
+	}
 }
 
 func scopeError(err error) bool { var target *gitx.ScopeError; return errors.As(err, &target) }
