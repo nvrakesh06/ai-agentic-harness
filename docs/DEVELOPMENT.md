@@ -104,6 +104,14 @@ or running check and its elapsed wait or run time.
 Checks must leave tracked source and unignored files unchanged. Use check-mode
 formatters and ignore build outputs in the application itself.
 
+For every successful configured check, AIH records exact-head native evidence:
+the check name, executable basename, opaque full-command identifier, exit status,
+and a bounded list of recognizable pass counts. It never treats arbitrary child
+stdout as authenticated stage evidence and never publishes successful stdout,
+command arguments, or environment values. Configure independently executable
+checks when separate stage evidence is required; AIH runs and records each check
+individually.
+
 `visual_capture` is optional and separate from build/test checks. `prepare` and
 `server` are project adapter argv values that AIH runs only from a fresh,
 supervisor-owned detached checkout at the pinned task head. `prepare` is optional,

@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -35,6 +36,69 @@ func (e *checkFailure) Error() string {
 }
 func (e *checkFailure) Unwrap() error { return e.err }
 
+const (
+	maxVerificationEvidenceScan   = 64 << 10
+	maxVerificationPassCountItems = 8
+)
+
+var verificationPassCount = regexp.MustCompile(`(?i)\b(test files|tests|test suites|suites|specs?)\s*:?\s*(\d{1,9})\s+(?:passed|passing)\b`)
+var verificationBarePassCount = regexp.MustCompile(`(?i)\b(\d{1,9})\s+passed\b`)
+
+// verificationPassCounts extracts only fixed labels and decimal counts from
+// successful command output. Review evidence must be useful without copying
+// arbitrary stdout, which can contain source paths, fixture data, or secrets.
+func verificationPassCounts(output string) string {
+	output = boundedVerificationOutput(output)
+	counts := make([]string, 0, 4)
+	seen := map[string]bool{}
+	add := func(item string) bool {
+		if seen[item] || len(counts) == maxVerificationPassCountItems {
+			return len(counts) < maxVerificationPassCountItems
+		}
+		seen[item] = true
+		counts = append(counts, item)
+		return len(counts) < maxVerificationPassCountItems
+	}
+	named := verificationPassCount.FindAllStringSubmatchIndex(output, -1)
+	for _, match := range named {
+		label := strings.ToLower(strings.ReplaceAll(output[match[2]:match[3]], " ", "_"))
+		item := label + "=" + output[match[4]:match[5]] + "_passed"
+		if !add(item) {
+			break
+		}
+	}
+	// Playwright commonly reports only "N passed". Preserve it alongside
+	// named test-suite counts, while still never copying adjacent free text.
+	if len(counts) < maxVerificationPassCountItems {
+		for _, match := range verificationBarePassCount.FindAllStringSubmatchIndex(output, -1) {
+			overlapsNamed := false
+			for _, namedMatch := range named {
+				if match[0] < namedMatch[1] && namedMatch[0] < match[1] {
+					overlapsNamed = true
+					break
+				}
+			}
+			if overlapsNamed {
+				continue
+			}
+			if !add("passed=" + output[match[2]:match[3]]) {
+				break
+			}
+		}
+	}
+	if len(counts) == 0 {
+		return "none"
+	}
+	return strings.Join(counts, ",")
+}
+
+func boundedVerificationOutput(output string) string {
+	if len(output) <= maxVerificationEvidenceScan {
+		return output
+	}
+	return output[len(output)-maxVerificationEvidenceScan:]
+}
+
 func passedCheckEvidence(check config.Check, output string) string {
 	state := "captured"
 	lines := 0
@@ -46,7 +110,8 @@ func passedCheckEvidence(check config.Check, output string) string {
 			lines++
 		}
 	}
-	return fmt.Sprintf("check=%q command=%q exit=0 stdout=%s stdout_bytes=%d stdout_lines=%d", check.Name, filepath.Base(check.Command[0]), state, len([]byte(output)), lines)
+	commandID := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(check.Command, "\x00"))))[:12]
+	return fmt.Sprintf("stage=native check=%q command=%q command_id=%s exit=0 pass_counts=%q stdout=%s stdout_bytes=%d stdout_lines=%d", check.Name, filepath.Base(check.Command[0]), commandID, verificationPassCounts(output), state, len([]byte(output)), lines)
 }
 
 type reviewOutcome struct {
@@ -181,7 +246,7 @@ func reviewEvidencePayload(evidence *model.Evidence, attempt int) string {
 		*model.Evidence
 		Attempt int    `json:"review_attempt"`
 		Policy  string `json:"review_policy"`
-	}{Evidence: &copy, Attempt: attempt, Policy: "Peer reviews are concurrent and independent; the empty reviews map is intentional. Supervisor check evidence is exact-head metadata; successful stdout content, command arguments, and environment values are intentionally omitted."}
+	}{Evidence: &copy, Attempt: attempt, Policy: "Peer reviews are concurrent and independent; the empty reviews map is intentional. Supervisor check evidence is exact-head metadata. It includes the AIH-observed native check stage, executable, opaque command ID, exit status, and parsed pass counts, but omits successful stdout content, command arguments, and environment values."}
 	serialized, _ := json.Marshal(payload)
 	return string(serialized)
 }
