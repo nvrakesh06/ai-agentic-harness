@@ -21,6 +21,10 @@ import (
 type Git struct{ Dir string }
 
 func (g Git) Run(ctx context.Context, input string, args ...string) (string, error) {
+	return g.run(ctx, input, nil, args...)
+}
+
+func (g Git) run(ctx context.Context, input string, extraEnv []string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	argv := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "user.name=AIH", "-c", "user.email=aih@localhost", "-c", "commit.gpgsign=false"}
@@ -34,6 +38,7 @@ func (g Git) Run(ctx context.Context, input string, args ...string) (string, err
 		env = append(env, v)
 	}
 	env = append(env, "GIT_TERMINAL_PROMPT=0")
+	env = append(env, extraEnv...)
 	out, e := platform.Run(ctx, g.Dir, env, input, "git", argv...)
 	if e != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), e, safety.Redact(out))
@@ -477,6 +482,10 @@ func (g Git) MergeCommit(ctx context.Context, base, head, message string) (strin
 // Git computes each merged tree and rejects a content conflict instead of choosing
 // one head's version. The returned commit has every supplied head as an ancestor.
 func (g Git) MergeHeads(ctx context.Context, base string, heads []string, message string) (string, error) {
+	return g.mergeHeads(ctx, base, heads, message, g.mergeTreeWriteTreeSupported(ctx))
+}
+
+func (g Git) mergeHeads(ctx context.Context, base string, heads []string, message string, writeTree bool) (string, error) {
 	if len(heads) < 2 || len(heads) > 3 {
 		return "", errors.New("batch merge requires two or three task heads")
 	}
@@ -511,7 +520,7 @@ func (g Git) MergeHeads(ctx context.Context, base string, heads []string, messag
 
 	current := baseSHA
 	for i, head := range resolved {
-		tree, err := g.Run(ctx, "", "merge-tree", "--write-tree", current, head)
+		tree, err := g.mergedTree(ctx, current, head, writeTree)
 		if err != nil {
 			return "", fmt.Errorf("batch merge head %d conflicts with the preceding integration tree: %w", i+1, err)
 		}
@@ -524,4 +533,44 @@ func (g Git) MergeHeads(ctx context.Context, base string, heads []string, messag
 		}
 	}
 	return current, nil
+}
+
+func (g Git) mergeTreeWriteTreeSupported(ctx context.Context) bool {
+	version, err := g.Run(ctx, "", "version")
+	if err != nil {
+		return false
+	}
+	parts := strings.Fields(version)
+	if len(parts) < 3 {
+		return false
+	}
+	var major, minor int
+	if _, err = fmt.Sscanf(parts[2], "%d.%d", &major, &minor); err != nil {
+		return false
+	}
+	return major > 2 || major == 2 && minor >= 38
+}
+
+func (g Git) mergedTree(ctx context.Context, current, head string, writeTree bool) (string, error) {
+	if writeTree {
+		return g.Run(ctx, "", "merge-tree", "--write-tree", current, head)
+	}
+	gitDir, err := g.Run(ctx, "", "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return "", err
+	}
+	indexDir, err := os.MkdirTemp(gitDir, "aih-merge-index-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(indexDir)
+	index := filepath.Join(indexDir, "index")
+	base, err := g.Run(ctx, "", "merge-base", current, head)
+	if err != nil {
+		return "", err
+	}
+	if _, err = g.run(ctx, "", []string{"GIT_INDEX_FILE=" + index}, "read-tree", "-m", base, current, head); err != nil {
+		return "", err
+	}
+	return g.run(ctx, "", []string{"GIT_INDEX_FILE=" + index}, "write-tree")
 }
