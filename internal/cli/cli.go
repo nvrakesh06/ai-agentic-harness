@@ -268,6 +268,17 @@ func New() *cobra.Command {
 						fmt.Fprintln(cmd.OutOrStdout(), "Supervisor stopped; checkpoints persisted and controller lease released.")
 						return nil
 					}
+					if snapshot, _, loadErr := p.DB.Load(); loadErr == nil {
+						lease := snapshot.Controller.Expires.Sub(snapshot.Controller.Heartbeat)
+						health := engine.LocalSupervisorHealth(p.DB, lease, time.Now())
+						if health.State == "stalled" {
+							stage := health.Stage
+							if stage == "" {
+								stage = "unavailable"
+							}
+							return fmt.Errorf("shutdown remains queued but the local supervisor appears stalled (%s; last stage %s); inspect aih status and logs before recovery", health.Reason, stage)
+						}
+					}
 				}
 			}
 		}})
@@ -497,6 +508,12 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		s.Capacity.MaxLightChecks = p.Config.Project.Resources.MaxLightChecks
 	}
 	localActive := active(p)
+	lease := s.Controller.Expires.Sub(s.Controller.Heartbeat)
+	var health *engine.SupervisorHealth
+	if localActive {
+		local := engine.LocalSupervisorHealth(p.DB, lease, time.Now())
+		health = &local
+	}
 	invokedBuild := buildinfo.Current()
 	var supervisorBuild *buildinfo.Identity
 	if localActive {
@@ -518,15 +535,16 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		}
 		return enc.Encode(struct {
 			*model.Snapshot
-			MachineMaxHeavyChecks int                 `json:"machine_max_heavy_checks"`
-			LocalSupervisorActive bool                `json:"local_supervisor_active"`
-			LocalActiveWriters    int                 `json:"local_active_writers"`
-			LocalActiveReaders    int                 `json:"local_active_readers"`
-			LocalActivePreflights int                 `json:"local_active_preflights"`
-			ActiveSupervisorBuild *buildinfo.Identity `json:"active_supervisor_build,omitempty"`
-			InvokedBinaryBuild    buildinfo.Identity  `json:"invoked_binary_build"`
-			BuildsDiffer          bool                `json:"builds_differ"`
-		}{s, machineHeavy, localActive, localCount(localActive, s.Capacity.ActiveWriters), localCount(localActive, s.Capacity.ActiveReaders), localCount(localActive, s.Capacity.ActivePreflights), supervisorBuild, invokedBuild, buildsDiffer})
+			MachineMaxHeavyChecks int                      `json:"machine_max_heavy_checks"`
+			LocalSupervisorActive bool                     `json:"local_supervisor_active"`
+			LocalActiveWriters    int                      `json:"local_active_writers"`
+			LocalActiveReaders    int                      `json:"local_active_readers"`
+			LocalActivePreflights int                      `json:"local_active_preflights"`
+			ActiveSupervisorBuild *buildinfo.Identity      `json:"active_supervisor_build,omitempty"`
+			InvokedBinaryBuild    buildinfo.Identity       `json:"invoked_binary_build"`
+			BuildsDiffer          bool                     `json:"builds_differ"`
+			LocalSupervisorHealth *engine.SupervisorHealth `json:"local_supervisor_health,omitempty"`
+		}{s, machineHeavy, localActive, localCount(localActive, s.Capacity.ActiveWriters), localCount(localActive, s.Capacity.ActiveReaders), localCount(localActive, s.Capacity.ActivePreflights), supervisorBuild, invokedBuild, buildsDiffer, health})
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Project %s · durable revision %d (%s)\n", s.Project, s.Revision, shortSHA(h))
 	fmt.Fprintf(cmd.OutOrStdout(), "Controller: %s · durable heartbeat %s · lease expires %s\n", s.Controller.Machine, s.Controller.Heartbeat.Format(time.RFC3339), s.Controller.Expires.Format(time.RFC3339))
@@ -536,6 +554,15 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 			fmt.Fprintf(cmd.OutOrStdout(), "Local supervisor: active · local heartbeat %s (durable renewals are coalesced)\n", heartbeat.Format(time.RFC3339))
 		} else {
 			fmt.Fprintln(cmd.OutOrStdout(), "Local supervisor: active (cached state; inspect logs for progress)")
+		}
+		if health != nil {
+			if health.State == "stalled" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Local supervisor health: STALLED · %s · last stage %s\n", health.Reason, health.Stage)
+			} else if health.State == "healthy" {
+				fmt.Fprintln(cmd.OutOrStdout(), "Local supervisor health: healthy")
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "Local supervisor health: unavailable (older supervisor or startup in progress)")
+			}
 		}
 	} else {
 		fmt.Fprintln(cmd.OutOrStdout(), "Local supervisor: stopped")

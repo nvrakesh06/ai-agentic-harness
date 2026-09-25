@@ -189,3 +189,84 @@ func TestLeaseCadenceBounds(t *testing.T) {
 		t.Fatalf("30-minute steady state published %d lease renewals, want 20", publications)
 	}
 }
+
+func TestLocalSupervisorHealthDetectsBlockedPublicationDespiteFreshAttempt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	remote := filepath.Join(root, "origin.git")
+	if err := os.MkdirAll(remote, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (gitx.Git{Dir: remote}).Run(ctx, "", "init", "--bare", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	project := config.Defaults()
+	project.ID = "blocked-publication-health"
+	project.LeaseSeconds = 60
+	p := leaseTestProject(t, ctx, root, remote, "machine-a", project)
+	initial := model.NewSnapshot(project.ID)
+	initial.Revision = 1
+	head, err := p.Git.StateCommit(ctx, "", initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", New: head}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = p.DB.Save(head, initial); err != nil {
+		t.Fatal(err)
+	}
+
+	base := time.Date(2026, 9, 25, 16, 0, 0, 0, time.UTC)
+	c := New(p)
+	c.now = func() time.Time { return base }
+	if err = c.acquire(ctx); err != nil {
+		t.Fatal(err)
+	}
+	enteredPublication := make(chan struct{})
+	releasePublication := make(chan struct{})
+	c.publish = func(context.Context, []gitx.Update) error {
+		close(enteredPublication)
+		<-releasePublication
+		return nil
+	}
+	persistDone := make(chan error, 1)
+	go func() {
+		_, persistErr := c.persist(ctx, func(s *model.Snapshot) error {
+			s.Applied["blocked-publication"] = true
+			return nil
+		})
+		persistDone <- persistErr
+	}()
+	<-enteredPublication
+
+	stalledAt := base.Add(SupervisorHealthWindow(time.Minute) + time.Second)
+	c.now = func() time.Time { return stalledAt }
+	pulseDone := make(chan error, 1)
+	go func() {
+		_, pulseErr := c.pulseLease(ctx)
+		pulseDone <- pulseErr
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for p.DB.Get(LocalLeaseHeartbeatKey) != stalledAt.Format(time.RFC3339Nano) {
+		if time.Now().After(deadline) {
+			t.Fatal("blocked heartbeat attempt did not record local evidence")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	health := LocalSupervisorHealth(p.DB, time.Minute, stalledAt)
+	if health.State != "stalled" || health.LastHeartbeat != stalledAt || health.LastProgress != base {
+		t.Fatalf("blocked publication was reported as healthy: %#v", health)
+	}
+	if health.Stage != "persist: waiting for controller mutex" {
+		t.Fatalf("blocked stage = %q, want controller-mutex diagnostic", health.Stage)
+	}
+	close(releasePublication)
+	if err = <-persistDone; err != nil {
+		t.Fatal(err)
+	}
+	if err = <-pulseDone; err != nil {
+		t.Fatal(err)
+	}
+}

@@ -31,7 +31,16 @@ const (
 	// LocalSupervisorBuildKey identifies the binary holding supervisor.lock.
 	// This is local status evidence, never a fencing or publication authority.
 	LocalSupervisorBuildKey = "supervisor_build"
-	maxLocalLeasePulse      = 30 * time.Second
+	// LocalSupervisorProgressKey records the last completed local lease pulse.
+	// It distinguishes a controller that still owns supervisor.lock from one
+	// whose heartbeat is waiting behind a blocked controller operation.
+	LocalSupervisorProgressKey = "supervisor_progress"
+	// LocalSupervisorStageKey and LocalSupervisorStageAtKey are bounded local
+	// diagnostics. They intentionally name harness stages only, never paths,
+	// command payloads, or provider output.
+	LocalSupervisorStageKey   = "supervisor_stage"
+	LocalSupervisorStageAtKey = "supervisor_stage_at"
+	maxLocalLeasePulse        = 30 * time.Second
 )
 
 type Controller struct {
@@ -48,6 +57,7 @@ type Controller struct {
 	lightChecks chan struct{}
 	jobs        sync.WaitGroup
 	now         func() time.Time
+	publish     func(context.Context, []gitx.Update) error
 }
 
 func New(p *Project) *Controller {
@@ -64,6 +74,23 @@ func (c *Controller) nowUTC() time.Time {
 		return c.now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func (c *Controller) publishUpdates(ctx context.Context, updates []gitx.Update) error {
+	if c.publish != nil {
+		return c.publish(ctx, updates)
+	}
+	return c.P.Git.Publish(ctx, updates)
+}
+
+func (c *Controller) traceStage(stage string) {
+	now := c.nowUTC().Format(time.RFC3339Nano)
+	_ = c.P.DB.Set(LocalSupervisorStageKey, stage)
+	_ = c.P.DB.Set(LocalSupervisorStageAtKey, now)
+}
+
+func (c *Controller) recordProgress() {
+	_ = c.P.DB.Set(LocalSupervisorProgressKey, c.nowUTC().Format(time.RFC3339Nano))
 }
 
 func (c *Controller) leaseDuration() time.Duration {
@@ -104,7 +131,8 @@ func (c *Controller) acquire(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
-	if e = c.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: h, New: next}}); e != nil {
+	c.traceStage("acquire: publishing controller lease")
+	if e = c.publishUpdates(ctx, []gitx.Update{{Branch: "aih-state", Old: h, New: next}}); e != nil {
 		return e
 	}
 	c.s = s
@@ -112,7 +140,12 @@ func (c *Controller) acquire(ctx context.Context) error {
 	if e = c.P.DB.Save(next, s); e != nil {
 		return e
 	}
-	return c.P.DB.Set(LocalLeaseHeartbeatKey, now.Format(time.RFC3339Nano))
+	if e = c.P.DB.Set(LocalLeaseHeartbeatKey, now.Format(time.RFC3339Nano)); e != nil {
+		return e
+	}
+	c.recordProgress()
+	c.traceStage("acquire: complete")
+	return nil
 }
 func (c *Controller) save(ctx context.Context, fn func(*model.Snapshot) error, updates ...gitx.Update) error {
 	_, e := c.persist(ctx, fn, updates...)
@@ -123,6 +156,7 @@ func (c *Controller) save(ctx context.Context, fn func(*model.Snapshot) error, u
 // publishes when the durable lease has reached half-life, so frequent local
 // pulses and duplicate mutations do not create remote history.
 func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error, updates ...gitx.Update) (bool, error) {
+	c.traceStage("persist: waiting for controller mutex")
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.s == nil {
@@ -162,12 +196,14 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 		next.Controller.Expires = now.Add(c.leaseDuration())
 	}
 	next.Revision = c.s.Revision + 1
+	c.traceStage("persist: committing state")
 	newHead, e := c.P.Git.StateCommit(ctx, c.head, next)
 	if e != nil {
 		return false, e
 	}
 	all := append([]gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}, updates...)
-	if e = c.P.Git.Publish(ctx, all); e != nil {
+	c.traceStage("persist: publishing state")
+	if e = c.publishUpdates(ctx, all); e != nil {
 		return false, e
 	}
 	for id, task := range next.Tasks {
@@ -181,10 +217,12 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 	}
 	c.s = next
 	c.head = newHead
+	c.traceStage("persist: saving local state")
 	if e = c.P.DB.Save(newHead, next); e != nil {
 		return true, e
 	}
 	_ = c.P.DB.Set(LocalLeaseHeartbeatKey, now.Format(time.RFC3339Nano))
+	c.traceStage("persist: complete")
 	return true, nil
 }
 
@@ -195,19 +233,23 @@ func (c *Controller) renewLeaseLocked(ctx context.Context, now time.Time) (bool,
 	next := model.Clone(c.s)
 	next.Controller.Heartbeat = now
 	next.Controller.Expires = now.Add(c.leaseDuration())
+	c.traceStage("lease: committing renewal")
 	newHead, e := c.P.Git.LeaseCommit(ctx, c.head, next)
 	if e != nil {
 		return false, e
 	}
-	if e = c.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}); e != nil {
+	c.traceStage("lease: publishing renewal")
+	if e = c.publishUpdates(ctx, []gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}); e != nil {
 		return false, e
 	}
 	c.s = next
 	c.head = newHead
+	c.traceStage("lease: saving local state")
 	if e = c.P.DB.Save(newHead, next); e != nil {
 		return true, e
 	}
 	_ = c.P.DB.Set(LocalLeaseHeartbeatKey, now.Format(time.RFC3339Nano))
+	c.traceStage("lease: complete")
 	return true, nil
 }
 func (c *Controller) mutate(fn func(*model.Snapshot) error) error {
@@ -244,6 +286,8 @@ func (c *Controller) pulseLease(ctx context.Context) (bool, error) {
 		expires := c.Snapshot().Controller.Expires.Format(time.RFC3339)
 		_ = c.P.DB.Event("", "", "", "", "lease_renewed", "durable controller lease extended to "+expires)
 	}
+	c.recordProgress()
+	c.traceStage("heartbeat: lease pulse complete")
 	return published, nil
 }
 
