@@ -212,7 +212,11 @@ func supervisorEvidenceOnlyFinding(result provider.Result, finding model.Finding
 	}
 }
 
-func assessReviews(required []roles.Role, outcomes []reviewOutcome) reviewAssessment {
+func assessReviews(required []roles.Role, outcomes []reviewOutcome, blockers ...func(model.Finding) bool) reviewAssessment {
+	blocksOrigin := func(finding model.Finding) bool { return findingBlocks(required, finding) }
+	if len(blockers) != 0 && blockers[0] != nil {
+		blocksOrigin = blockers[0]
+	}
 	assessment := reviewAssessment{blocking: -1, human: -1}
 	for i, role := range required {
 		result := outcomes[i].result
@@ -222,11 +226,17 @@ func assessReviews(required []roles.Role, outcomes []reviewOutcome) reviewAssess
 				continue
 			}
 			finding.Role = role.Name
+			finding = normalizedReviewFinding(finding)
 			assessment.findings = append(assessment.findings, finding)
 			retained = append(retained, finding)
 		}
-		if assessment.blocking == -1 && roles.Blocking(role, retained) {
-			assessment.blocking = i
+		if assessment.blocking == -1 {
+			for _, finding := range retained {
+				if blocksOrigin(finding) {
+					assessment.blocking = i
+					break
+				}
+			}
 		}
 		if outcomes[i].err != nil && assessment.failure == nil {
 			assessment.failure = outcomes[i].err
@@ -1562,7 +1572,7 @@ func (c *Controller) verifyReview(id string) error {
 	}
 	c.mirror(id)
 	outcomes := c.runReviewAttempt(effective, t, paths, dir, diff, evidence, 1, activeRequired)
-	assessment := assessReviews(activeRequired, outcomes)
+	assessment := assessReviews(activeRequired, outcomes, reviewFindingBlocksOrigin(t, paths, activeRequired))
 	if e = c.preserveReviewFindings(id, assessment.findings); e != nil {
 		return e
 	}
@@ -1578,10 +1588,12 @@ func (c *Controller) verifyReview(id string) error {
 	if e = c.publishReviewProgress(id, evidence); e != nil {
 		return e
 	}
-	route, routeErr := c.routeCrossTaskFindings(id, assessment.findings, func(finding model.Finding) bool { return findingBlocks(activeRequired, finding) })
+	routed, local := routableReviewFindings(assessment.findings)
+	route, routeErr := c.routeCrossTaskFindings(id, routed, reviewFindingBlocksOrigin(t, paths, activeRequired))
 	if routeErr != nil {
 		return routeErr
 	}
+	route.local = append(route.local, local...)
 	if e = c.reviewFollowups(t, route.local); e != nil {
 		return e
 	}
@@ -1646,7 +1658,7 @@ func (c *Controller) verifyReview(id string) error {
 			return e
 		}
 		refreshed := c.runReviewAttempt(effective, t, paths, dir, diff, evidence, 2, refreshRoles)
-		refreshAssessment := assessReviews(refreshRoles, refreshed)
+		refreshAssessment := assessReviews(refreshRoles, refreshed, reviewFindingBlocksOrigin(t, paths, refreshRoles))
 		if e = c.preserveReviewFindings(id, refreshAssessment.findings); e != nil {
 			return e
 		}
@@ -1662,10 +1674,12 @@ func (c *Controller) verifyReview(id string) error {
 		if e = c.publishReviewProgress(id, evidence); e != nil {
 			return e
 		}
-		refreshRoute, routeErr := c.routeCrossTaskFindings(id, refreshAssessment.findings, func(finding model.Finding) bool { return findingBlocks(refreshRoles, finding) })
+		refreshedRouted, refreshedLocal := routableReviewFindings(refreshAssessment.findings)
+		refreshRoute, routeErr := c.routeCrossTaskFindings(id, refreshedRouted, reviewFindingBlocksOrigin(t, paths, refreshRoles))
 		if routeErr != nil {
 			return routeErr
 		}
+		refreshRoute.local = append(refreshRoute.local, refreshedLocal...)
 		if e = c.reviewFollowups(t, refreshRoute.local); e != nil {
 			return e
 		}

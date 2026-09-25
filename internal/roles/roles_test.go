@@ -204,7 +204,7 @@ func TestBuiltinPromptsKeepOrchestrationInSupervisor(t *testing.T) {
 
 func TestReviewPromptsRequirePeerIndependenceAndSupervisorEvidenceRouting(t *testing.T) {
 	prompt := Compile(config.Effective{Files: map[string]string{}}, Builtins()["qa"], "windows", &model.Task{ID: "task", Areas: []string{"src"}}, "review", "diff", `{"reviews":{}}`)
-	for _, value := range []string{"Peer reviews run concurrently and independently", "no peer approvals", "Do not wait for, require", "exact-head native evidence", "without asking a human to run tools", "missing Node, npm, Bun", "not a finding", "consequential human decision", "structured finding"} {
+	for _, value := range []string{"Peer reviews run concurrently and independently", "no peer approvals", "Do not wait for, require", "exact-head native evidence", "without asking a human to run tools", "missing Node, npm, Bun", "not a finding", "consequential human decision", "do not hunt unrelated code", "causal surface", "relevance: changed, causal, baseline, or unknown", "incidental issue is proven to reproduce at the exact base revision", "do not expand the origin review", "Uncertain relevance, any security concern"} {
 		if !strings.Contains(prompt, value) {
 			t.Fatalf("review prompt missing %q: %s", value, prompt)
 		}

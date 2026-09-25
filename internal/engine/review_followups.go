@@ -147,6 +147,8 @@ func redactedFollowupFindings(findings []model.Finding) []model.Finding {
 	for i := range redacted {
 		redacted[i].Reason = safety.Redact(redacted[i].Reason)
 		redacted[i].Resolution = safety.Redact(redacted[i].Resolution)
+		redacted[i].BaselineSHA = safety.Redact(redacted[i].BaselineSHA)
+		redacted[i].BaselineEvidence = safety.Redact(redacted[i].BaselineEvidence)
 	}
 	return redacted
 }

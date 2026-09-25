@@ -104,6 +104,31 @@ func TestReviewFollowupsRejectMalformedPersistedHistory(t *testing.T) {
 	}
 }
 
+func TestReviewFollowupsRedactBaselineFieldsFromPersistedHistory(t *testing.T) {
+	const secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+	task := &model.Task{ID: "review-baseline-redaction", Issue: 48, HeadSHA: "abc123"}
+	finding := model.Finding{
+		Severity: "medium", Role: "reviewer", Location: "src/http.ts:10",
+		Reason: "This occurs on the baseline.", Relevance: model.FindingBaseline,
+		BaselineSHA: secret, BaselineEvidence: "baseline output contained " + secret,
+	}
+	body := reviewFollowupBody(t, groupReviewFollowups(task, []model.Finding{finding})[0], task)
+	history, err := parseReviewFollowupHistory(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Reviews) != 1 || len(history.Reviews[0].Findings) != 1 {
+		t.Fatalf("missing persisted finding: %#v", history)
+	}
+	got := history.Reviews[0].Findings[0]
+	if strings.Contains(got.BaselineSHA, secret) || strings.Contains(got.BaselineEvidence, secret) {
+		t.Fatalf("persisted baseline finding retained secret: %#v", got)
+	}
+	if got.BaselineSHA != "[REDACTED]" || got.BaselineEvidence != "baseline output contained [REDACTED]" {
+		t.Fatalf("baseline fields were not redacted: %#v", got)
+	}
+}
+
 func TestReviewFollowupsSameHeadRefreshPreservesUnrefreshedRoles(t *testing.T) {
 	hub := &followupHub{issues: map[int]github.Issue{}}
 	c := &Controller{ctx: context.Background(), P: &Project{Hub: hub}}

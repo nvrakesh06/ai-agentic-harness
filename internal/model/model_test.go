@@ -324,6 +324,20 @@ func TestSchemaFiveMigratesReviewProvenanceWithoutInventingReuse(t *testing.T) {
 	}
 }
 
+func TestSchemaSevenMigratesFindingRelevanceFailClosed(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Schema = 7
+	s.Tasks["task"] = &Task{ID: "task", State: Review, Findings: []Finding{{Severity: "medium", Location: "internal/studio/base.go:12", Reason: "Historical observation."}}}
+	b, _ := json.Marshal(s)
+	migrated, changed, err := Decode(b)
+	if err != nil || !changed || migrated.Schema != StateSchema {
+		t.Fatalf("schema-7 migration failed: %#v changed=%t err=%v", migrated, changed, err)
+	}
+	if got := migrated.Tasks["task"].Findings[0].Relevance; got != FindingUnknown {
+		t.Fatalf("historical finding relevance = %q, want %q", got, FindingUnknown)
+	}
+}
+
 func TestDirectFixWaiverRoundTripsAndRejectsIncompleteIdentity(t *testing.T) {
 	s := NewSnapshot("project123")
 	base, head := fmt.Sprintf("%040x", 1), fmt.Sprintf("%040x", 2)
