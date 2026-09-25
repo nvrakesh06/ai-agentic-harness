@@ -65,7 +65,11 @@ func findingInTaskScope(task *model.Task, finding model.Finding) bool {
 }
 
 func writableOwner(state model.State) bool {
-	return state == model.Ready || state == model.Running || state == model.Fix
+	// A RUNNING writer has already captured its task input. Routing a new
+	// finding to it without a durable replay protocol could let it checkpoint
+	// and clear the finding before it observes it. Treat it as unavailable;
+	// the origin fails closed and a later bounded task can be replanned.
+	return state == model.Ready || state == model.Fix
 }
 
 func findingScopeOwner(tasks map[string]*model.Task, origin *model.Task, finding model.Finding) scopeOwner {

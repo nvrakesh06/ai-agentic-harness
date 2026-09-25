@@ -51,6 +51,11 @@ type Check struct {
 	Platforms []string `yaml:"platforms,omitempty" json:"platforms,omitempty"`
 	Timeout   int      `yaml:"timeout_seconds" json:"timeout_seconds"`
 	Class     string   `yaml:"class,omitempty" json:"class,omitempty"`
+	// FailureReport opts a check into a bounded JSON diagnostic protocol. AIH
+	// creates an external report file and exposes its path only through
+	// AIH_FAILURE_REPORT. A child report is never trusted on its own: native
+	// routing additionally requires the same report from a canonical-base run.
+	FailureReport bool `yaml:"failure_report,omitempty" json:"failure_report,omitempty"`
 }
 
 // VisualCapture declares the project adapter command. AIH supplies ephemeral
