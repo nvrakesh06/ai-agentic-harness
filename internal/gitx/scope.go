@@ -250,7 +250,11 @@ func canonicalArea(raw string) (string, bool, error) {
 }
 
 func canonicalGitPath(raw string) (string, error) {
-	p := strings.ReplaceAll(raw, `\`, "/")
+	// Git reports repository paths byte-for-byte. In particular, a backslash is
+	// a legal filename character on POSIX and must never be reinterpreted as a
+	// directory separator while validating an untrusted worker diff. Planning
+	// input is normalized separately by canonicalArea.
+	p := raw
 	if p == "" || strings.HasPrefix(p, "/") || strings.Contains(p, ":") {
 		return "", errors.New("path must be repository-relative")
 	}

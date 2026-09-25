@@ -450,6 +450,9 @@ func (c *Controller) Serve(parent context.Context) error {
 				if hasActive(active, t.ID) {
 					continue
 				}
+				if !dependenciesComplete(s, t) {
+					continue
+				}
 				switch t.State {
 				case model.Implemented, model.SyncRequired, model.Verifying, model.Review:
 					id := t.ID
@@ -530,6 +533,18 @@ func (c *Controller) Serve(parent context.Context) error {
 	}
 	log.Printf("AIH supervisor stopped: checkpoints persisted and controller lease released")
 	return nil
+}
+
+func dependenciesComplete(s *model.Snapshot, t *model.Task) bool {
+	if t == nil {
+		return false
+	}
+	for _, id := range t.Dependencies {
+		if s.Tasks[id] == nil || s.Tasks[id].State != model.Done {
+			return false
+		}
+	}
+	return true
 }
 func (c *Controller) launch(fn func()) { c.jobs.Add(1); go func() { defer c.jobs.Done(); fn() }() }
 

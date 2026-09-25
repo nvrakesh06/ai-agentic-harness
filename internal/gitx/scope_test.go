@@ -50,8 +50,11 @@ func TestClassifyAreasAtRefMakesBaseTreeIntentImmutable(t *testing.T) {
 
 	// A task owns the tracked README file, not a directory a later worker might
 	// create at that name. A classified directory does include newly-created files.
-	if err := gitx.ValidateScopePaths(areas, []string{"README.md", "planned.md", `docs\new.md`, "assets/new.svg", "windows/path/new.txt"}); err != nil {
+	if err := gitx.ValidateScopePaths(areas, []string{"README.md", "planned.md", "docs/new.md", "assets/new.svg", "windows/path/new.txt"}); err != nil {
 		t.Fatalf("allowed paths rejected: %v", err)
+	}
+	if err := gitx.ValidateScopePaths(areas, []string{`docs\new.md`}); err == nil {
+		t.Fatal("literal backslash filename bypassed directory scope")
 	}
 	err = gitx.ValidateScopePaths(areas, []string{"README.md/child", "other.txt", "docs/new.md", "other.txt"})
 	var scopeErr *gitx.ScopeError
