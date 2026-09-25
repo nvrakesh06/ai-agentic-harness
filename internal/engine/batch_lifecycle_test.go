@@ -68,6 +68,12 @@ func TestBatchNativeGateFailureDemotesOneMemberAndClearsReservation(t *testing.T
 	if s.IntegrationBatch != nil || s.Tasks["alpha"].State != model.SyncRequired || s.Tasks["alpha"].Evidence != nil || s.Tasks["bravo"].State != model.MergeReady {
 		t.Fatalf("failed batch did not leave deterministic serial fallback: alpha=%#v bravo=%#v batch=%#v", s.Tasks["alpha"], s.Tasks["bravo"], s.IntegrationBatch)
 	}
+	pulls, _ := f.Hub.Pulls()
+	for _, pull := range pulls {
+		if pull.Head.Ref == "aih/alpha" && !pull.Draft {
+			t.Fatal("demoted batch member PR remained ready")
+		}
+	}
 	var failure string
 	if err = f.P.DB.DB.QueryRow("SELECT message FROM events WHERE kind='batch_integration_failed' ORDER BY id DESC LIMIT 1").Scan(&failure); err != nil || !strings.Contains(failure, "integrated validation") {
 		t.Fatalf("missing durable batch failure diagnostic: %q %v", failure, err)

@@ -34,11 +34,12 @@ func (c *Controller) reserveBatchIntegration() (*model.IntegrationBatch, error) 
 // must refresh from main; the remaining members can proceed through the normal
 // serial path on the next scheduler tick.
 func (c *Controller) failBatch(id, diagnostic string) {
+	demoted := ""
 	batch := c.Snapshot().IntegrationBatch
 	if batch != nil && batch.ID == id && len(batch.Tasks) != 0 {
 		_ = c.P.DB.Event(batch.Tasks[0].ID, "", "", "", "batch_integration_failed", safety.Redact(diagnostic))
 	}
-	_ = c.mutate(func(s *model.Snapshot) error {
+	if err := c.mutate(func(s *model.Snapshot) error {
 		if s.IntegrationBatch == nil || s.IntegrationBatch.ID != id {
 			return nil
 		}
@@ -49,10 +50,19 @@ func (c *Controller) failBatch(id, diagnostic string) {
 				task.State = model.SyncRequired
 				task.Evidence = nil
 				task.Summary = c.portable("Batch integration deferred: " + safety.Redact(diagnostic))
+				demoted = task.ID
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		return
+	}
+	if demoted != "" {
+		// GitHub state is outside the fenced source/state transaction. A
+		// transient update failure leaves the durable task safely demoted and is
+		// reconciled by the normal next lifecycle pass.
+		_ = c.updatePR(demoted, true)
+	}
 }
 
 // batchCandidateCount is deliberately cheap. It avoids running Git diffs,
