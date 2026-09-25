@@ -138,6 +138,142 @@ func TestBatchIntegrationPublishesOneExactFullGateForBothMembers(t *testing.T) {
 	}
 }
 
+func TestBatchReservationSurvivesRestartAndLeaseTakeover(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := filepath.Join(t.TempDir(), "checks")
+	if err = os.WriteFile(counter, []byte("2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := demo.New(ctx, t.TempDir(), []string{exe, "_aih-batch-check", counter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	_, tasks := seedBatchMembers(t, ctx, f, []string{"alpha", "bravo"})
+	c := engine.New(f.P)
+	if err = engine.ExportAcquire(c, ctx); err != nil {
+		t.Fatal(err)
+	}
+	installAcceptedBatchEvidence(t, c, tasks)
+	reserved, err := engine.ExportReserveBatch(c)
+	if err != nil || reserved == nil {
+		t.Fatalf("reserve batch = %#v, %v", reserved, err)
+	}
+
+	// Simulate a crashed owner: only the durable lease expiry advances. The
+	// replacement controller must retain, rather than recreate, the manifest.
+	s, head, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Controller.Expires = time.Now().UTC().Add(-time.Minute)
+	next, err := f.P.Git.StateCommit(ctx, head, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: head, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement, err := f.Open(ctx, filepath.Join(f.Root, "machine-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.DB.Close()
+	if err = replacement.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	newController := engine.New(replacement)
+	if err = engine.ExportAcquire(newController, ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := newController.Snapshot().IntegrationBatch
+	if got == nil || got.ID != reserved.ID || len(got.Tasks) != 2 || got.Tasks[0].ID != "alpha" || got.Tasks[1].ID != "bravo" {
+		t.Fatalf("takeover lost durable reservation: got=%#v want=%#v", got, reserved)
+	}
+}
+
+func TestBatchPublicationRejectionLeavesSourceRefsUnchangedAndFallsBack(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := filepath.Join(t.TempDir(), "checks")
+	if err = os.WriteFile(counter, []byte("2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := demo.New(ctx, t.TempDir(), []string{exe, "_aih-batch-check", counter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	_, tasks := seedBatchMembers(t, ctx, f, []string{"alpha", "bravo"})
+	c := engine.New(f.P)
+	if err = engine.ExportAcquire(c, ctx); err != nil {
+		t.Fatal(err)
+	}
+	installAcceptedBatchEvidence(t, c, tasks)
+	batch, err := engine.ExportReserveBatch(c)
+	if err != nil || batch == nil {
+		t.Fatalf("reserve batch = %#v, %v", batch, err)
+	}
+	beforeMain, err := f.P.Git.RemoteHead(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeAlpha, err := f.P.Git.RemoteHead(ctx, "aih/alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeBravo, err := f.P.Git.RemoteHead(ctx, "aih/bravo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeState, err := f.P.Git.RemoteHead(ctx, "aih-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.ExportRejectNextPublish(c)
+	engine.ExportIntegrateBatch(c, batch.ID)
+	for branch, want := range map[string]string{"main": beforeMain, "aih/alpha": beforeAlpha, "aih/bravo": beforeBravo} {
+		got, e := f.P.Git.RemoteHead(ctx, branch)
+		if e != nil || got != want {
+			t.Fatalf("rejected batch advanced %s: got %s want %s err %v", branch, got, want, e)
+		}
+	}
+	afterState, err := f.P.Git.RemoteHead(ctx, "aih-state")
+	if err != nil || afterState == beforeState {
+		t.Fatalf("safe fallback was not durably recorded: before=%s after=%s err=%v", beforeState, afterState, err)
+	}
+	s := c.Snapshot()
+	if s.IntegrationBatch != nil || s.Tasks["alpha"].State != model.SyncRequired || s.Tasks["bravo"].State != model.MergeReady {
+		t.Fatalf("rejected batch did not use deterministic fallback: alpha=%#v bravo=%#v batch=%#v", s.Tasks["alpha"], s.Tasks["bravo"], s.IntegrationBatch)
+	}
+}
+
+func installAcceptedBatchEvidence(t *testing.T, c *engine.Controller, tasks []*model.Task) {
+	t.Helper()
+	if err := engine.ExportMutate(c, func(s *model.Snapshot) error {
+		for _, task := range tasks {
+			evidence, err := engine.ExportAcceptedEvidence(c, s.Tasks[task.ID], []string{"feature-" + task.ID + ".txt"})
+			if err != nil {
+				return err
+			}
+			s.Tasks[task.ID].Evidence = evidence
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func seedBatchMembers(t *testing.T, ctx context.Context, f *demo.Fixture, ids []string) (string, []*model.Task) {
 	t.Helper()
 	base, err := f.P.Git.SHA(ctx, "refs/remotes/origin/main")

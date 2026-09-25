@@ -2,9 +2,11 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 )
@@ -20,6 +22,22 @@ func ExportReserveBatch(c *Controller) (*model.IntegrationBatch, error) {
 func ExportIntegrateBatch(c *Controller, id string)                    { c.integrateBatch(id) }
 func ExportMutate(c *Controller, fn func(*model.Snapshot) error) error { return c.save(c.ctx, fn) }
 func PreflightScopeForTest(t *model.Task, e config.Effective) string   { return preflightScope(t, e) }
+
+// ExportRejectNextPublish rejects only the next batch ref transaction. Ordinary
+// state-only recovery publication remains real so tests can observe its durable
+// fallback without intercepting another controller save.
+func ExportRejectNextPublish(c *Controller) {
+	rejected := false
+	c.publish = func(ctx context.Context, updates []gitx.Update) error {
+		for _, update := range updates {
+			if update.Branch == "main" && !rejected {
+				rejected = true
+				return errors.New("injected fenced publication rejection")
+			}
+		}
+		return c.P.Git.Publish(ctx, updates)
+	}
+}
 
 func ExportAcceptedEvidence(c *Controller, task *model.Task, paths []string) (*model.Evidence, error) {
 	effective, err := c.effective(c.ctx)
