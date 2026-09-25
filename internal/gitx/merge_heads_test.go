@@ -115,6 +115,21 @@ func TestMergeHeadsRejectsConflictsAndInvalidBasesWithoutAdvancingRefs(t *testin
 			t.Fatalf("unrelated batch merge advanced refs:\nbefore %s\nafter  %s", before, after)
 		}
 	})
+	t.Run("nonadjacent shared post-base ancestor", func(t *testing.T) {
+		f := mergeHeadsFixture(t, ctx)
+		base := remoteMain(t, ctx, f)
+		shared := taskHead(t, ctx, f, "aih/shared", "shared.txt", "shared\n", base)
+		first := taskHead(t, ctx, f, "aih/first", "first.txt", "first\n", shared)
+		second := taskHead(t, ctx, f, "aih/second", "second.txt", "second\n", base)
+		third := taskHead(t, ctx, f, "aih/third", "third.txt", "third\n", shared)
+		before := refs(t, ctx, f.P.Git)
+		if _, err := f.P.Git.MergeHeads(ctx, base, []string{first, second, third}, "Batch merge"); err == nil || !strings.Contains(err.Error(), "share the verified base") {
+			t.Fatalf("nonadjacent shared ancestor error = %v", err)
+		}
+		if after := refs(t, ctx, f.P.Git); after != before {
+			t.Fatalf("invalid three-head batch merge advanced refs:\nbefore %s\nafter  %s", before, after)
+		}
+	})
 }
 
 func mergeHeadsFixture(t *testing.T, ctx context.Context) *demo.Fixture {

@@ -500,10 +500,12 @@ func (g Git) MergeHeads(ctx context.Context, base string, heads []string, messag
 			return "", fmt.Errorf("batch merge head %d is not synchronized to the verified base", i+1)
 		}
 	}
-	for i := 1; i < len(resolved); i++ {
-		mergeBase, err := g.Run(ctx, "", "merge-base", resolved[i-1], resolved[i])
-		if err != nil || mergeBase != baseSHA {
-			return "", errors.New("batch merge heads do not share the verified base")
+	for i := 0; i < len(resolved); i++ {
+		for j := i + 1; j < len(resolved); j++ {
+			mergeBase, err := g.Run(ctx, "", "merge-base", resolved[i], resolved[j])
+			if err != nil || mergeBase != baseSHA {
+				return "", errors.New("batch merge heads do not share the verified base")
+			}
 		}
 	}
 
