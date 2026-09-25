@@ -1663,12 +1663,18 @@ func (c *Controller) verifyReview(id string) error {
 			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_queued", "head="+t.HeadSHA)
 		}
 		if !visualRequested || sourceRequested {
-			checks, checkErr := c.checks(c.ctx, effective, dir, id)
+			plan, planErr := fullValidationPlan(c.ctx, effective, dir, t.HeadSHA, "reviewer requested source evidence refresh")
+			if planErr != nil {
+				return planErr
+			}
+			checks, checkErr := c.checksForPlan(c.ctx, dir, id, plan)
 			if checkErr != nil {
 				_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_failed", short(checkErr.Error(), 500))
 				return checkErr
 			}
-			evidence.Checks = checks
+			if e = applyValidationEvidence(evidence, plan, checks); e != nil {
+				return e
+			}
 		}
 		if visualRequested {
 			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_running", "head="+t.HeadSHA)

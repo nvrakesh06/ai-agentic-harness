@@ -42,6 +42,9 @@ func (c *Controller) taskValidationPlan(ctx context.Context, e config.Effective,
 	if reason != "" {
 		return fullValidationPlan(ctx, e, dir, t.HeadSHA, reason)
 	}
+	if !focusedPackagePresent(dir, pkg) {
+		return fullValidationPlan(ctx, e, dir, t.HeadSHA, "focused package is absent at validation head")
+	}
 	focused := make([]config.Check, 0, len(e.Project.Checks))
 	for _, check := range e.Project.Checks {
 		if !applicable(check) {
@@ -66,7 +69,7 @@ func focusedPackage(paths []string) (string, string) {
 		path = filepath.ToSlash(path)
 		lower := strings.ToLower(path)
 		if strings.HasPrefix(path, ".aih/") || path == "AGENTS.md" || path == "go.mod" || path == "go.sum" || path == "SECURITY.md" ||
-			strings.HasPrefix(path, "internal/engine/") || strings.HasPrefix(path, "internal/model/") || strings.HasPrefix(path, "internal/store/") || strings.HasPrefix(path, "internal/config/") || strings.HasPrefix(path, "internal/platform/") || strings.HasPrefix(path, "internal/safety/") || strings.HasPrefix(path, "internal/github/") ||
+			strings.HasPrefix(path, "cmd/") || strings.HasPrefix(path, "internal/cli/") || strings.HasPrefix(path, "internal/engine/") || strings.HasPrefix(path, "internal/gitx/") || strings.HasPrefix(path, "internal/model/") || strings.HasPrefix(path, "internal/provider/") || strings.HasPrefix(path, "internal/roles/") || strings.HasPrefix(path, "internal/store/") || strings.HasPrefix(path, "internal/config/") || strings.HasPrefix(path, "internal/platform/") || strings.HasPrefix(path, "internal/safety/") || strings.HasPrefix(path, "internal/github/") ||
 			strings.Contains(lower, "security") || strings.Contains(lower, "auth") || strings.Contains(lower, "secret") || strings.Contains(lower, "crypto") || strings.Contains(lower, "permission") || strings.Contains(lower, "network") || strings.Contains(lower, "deserial") || strings.Contains(lower, "subprocess") {
 			return "", "scheduler, schema, security, configuration, or toolchain input changed"
 		}
@@ -87,6 +90,25 @@ func focusedPackage(paths []string) (string, string) {
 		return ".", ""
 	}
 	return "./" + pkg, ""
+}
+
+// focusedPackagePresent prevents a deleted final package file from becoming a
+// focused test-input lookup error. The full gate still covers that deletion.
+func focusedPackagePresent(dir, pkg string) bool {
+	path := dir
+	if pkg != "." {
+		path = filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(pkg, "./")))
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
+			return true
+		}
+	}
+	return false
 }
 
 func focusedGoCheck(check config.Check, pkg string) (config.Check, bool) {

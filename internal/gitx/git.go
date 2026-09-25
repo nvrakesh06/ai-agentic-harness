@@ -448,7 +448,10 @@ func (g Git) Diff(ctx context.Context, base, head string) (string, []string, err
 	if e != nil {
 		return "", nil, e
 	}
-	paths, e := g.Run(ctx, "", "diff", "--name-only", base+"..."+head)
+	// A rename must remain two changed paths here. The caller uses this list for
+	// scope and validation planning, where seeing only the destination could
+	// incorrectly classify a cross-package move as a focused local change.
+	paths, e := g.Run(ctx, "", "diff", "--no-renames", "--name-only", base+"..."+head)
 	if paths == "" {
 		return d, nil, e
 	}

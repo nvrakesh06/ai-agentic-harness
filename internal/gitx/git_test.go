@@ -241,6 +241,69 @@ func TestWorktreeCheckpointAndRebase(t *testing.T) {
 	}
 }
 
+func TestDiffListsBothSidesOfCrossPackageRename(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	source := gitx.Git{Dir: f.Source}
+	old := filepath.Join(f.Source, "internal", "source", "original.go")
+	if err = os.MkdirAll(filepath.Dir(old), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(old, []byte("package source\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = source.Run(ctx, "", "add", "internal/source/original.go"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = source.Run(ctx, "", "commit", "-m", "add source package"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = source.Run(ctx, "", "push", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	base, err := f.P.Git.SHA(ctx, "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(f.P.Dir, "worktrees", "rename")
+	if err = f.P.Git.Worktree(ctx, dir, "aih/rename", base); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(filepath.Join(dir, "internal", "destination"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = (gitx.Git{Dir: dir}).Run(ctx, "", "mv", "internal/source/original.go", "internal/destination/renamed.go"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := f.P.Git.Checkpoint(ctx, dir, "rename package")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, paths, err := f.P.Git.Diff(ctx, base, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(paths, "internal/source/original.go") || !contains(paths, "internal/destination/renamed.go") {
+		t.Fatalf("rename paths = %v", paths)
+	}
+}
+
+func contains(paths []string, want string) bool {
+	for _, path := range paths {
+		if path == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCheckpointExcludesExternalWorkerScratchButNamesSourceSecretCandidate(t *testing.T) {
 	ctx := context.Background()
 	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
