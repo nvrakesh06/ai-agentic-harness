@@ -99,8 +99,12 @@ func sameNativeFailureReport(left, right *nativeFailureReport) bool {
 	return left != nil && right != nil && left.ID == right.ID && left.Path == right.Path
 }
 
+func completedNativeCheckFailure(err error) bool {
+	return err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
 func completedMatchingBaselineFailure(err error, candidate, baseline *nativeFailureReport) bool {
-	return err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && sameNativeFailureReport(candidate, baseline)
+	return completedNativeCheckFailure(err) && sameNativeFailureReport(candidate, baseline)
 }
 
 func failureReportTrackedAt(ctxErr error, files []string, report *nativeFailureReport) bool {
@@ -199,7 +203,7 @@ func (c *Controller) trackedReportAtBase(report *nativeFailureReport, base strin
 }
 
 func (c *Controller) reproduceAndRouteNativeFailure(id string, failure *checkFailure, effective config.Effective) (bool, error) {
-	if failure == nil || failure.report == nil || !failure.check.FailureReport {
+	if failure == nil || !completedNativeCheckFailure(failure.err) || failure.report == nil || !failure.check.FailureReport {
 		return false, nil
 	}
 	task := c.Snapshot().Tasks[id]

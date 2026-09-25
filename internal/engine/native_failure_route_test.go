@@ -110,14 +110,14 @@ func TestIntegrationClassifiesStructuredNativeCheckFailure(t *testing.T) {
 	}
 }
 
-func TestCompletedMatchingBaselineFailureRejectsTimeoutAndCancellation(t *testing.T) {
+func TestCompletedNativeCheckFailureRejectsTimeoutAndCancellation(t *testing.T) {
 	report := &nativeFailureReport{ID: "TS2740", Path: "src/studio/server.ts"}
-	if !completedMatchingBaselineFailure(errors.New("exit status 1"), report, report) {
+	if !completedNativeCheckFailure(errors.New("exit status 1")) || !completedMatchingBaselineFailure(errors.New("exit status 1"), report, report) {
 		t.Fatal("ordinary completed baseline failure was not eligible")
 	}
 	for _, err := range []error{context.Canceled, context.DeadlineExceeded} {
-		if completedMatchingBaselineFailure(err, report, report) {
-			t.Fatalf("non-completed baseline %v was eligible", err)
+		if completedNativeCheckFailure(err) || completedMatchingBaselineFailure(err, report, report) {
+			t.Fatalf("non-completed candidate or baseline %v was eligible", err)
 		}
 	}
 }
