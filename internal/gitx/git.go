@@ -471,3 +471,55 @@ func (g Git) MergeCommit(ctx context.Context, base, head, message string) (strin
 	}
 	return g.Run(ctx, message+"\n", "commit-tree", tree, "-p", base, "-p", head)
 }
+
+// MergeHeads builds a caller-ordered chain of two or three merge commits without
+// advancing a ref. Every head must independently descend from, and share, base.
+// Git computes each merged tree and rejects a content conflict instead of choosing
+// one head's version. The returned commit has every supplied head as an ancestor.
+func (g Git) MergeHeads(ctx context.Context, base string, heads []string, message string) (string, error) {
+	if len(heads) < 2 || len(heads) > 3 {
+		return "", errors.New("batch merge requires two or three task heads")
+	}
+	baseSHA, e := g.SHA(ctx, base)
+	if e != nil {
+		return "", e
+	}
+	resolved := make([]string, len(heads))
+	seen := make(map[string]bool, len(heads))
+	for i, head := range heads {
+		resolved[i], e = g.SHA(ctx, head)
+		if e != nil {
+			return "", fmt.Errorf("batch merge head %d: %w", i+1, e)
+		}
+		if resolved[i] == baseSHA || seen[resolved[i]] {
+			return "", errors.New("batch merge heads must be distinct descendants of the verified base")
+		}
+		seen[resolved[i]] = true
+		mergeBase, err := g.Run(ctx, "", "merge-base", baseSHA, resolved[i])
+		if err != nil || mergeBase != baseSHA {
+			return "", fmt.Errorf("batch merge head %d is not synchronized to the verified base", i+1)
+		}
+	}
+	for i := 1; i < len(resolved); i++ {
+		mergeBase, err := g.Run(ctx, "", "merge-base", resolved[i-1], resolved[i])
+		if err != nil || mergeBase != baseSHA {
+			return "", errors.New("batch merge heads do not share the verified base")
+		}
+	}
+
+	current := baseSHA
+	for i, head := range resolved {
+		tree, err := g.Run(ctx, "", "merge-tree", "--write-tree", current, head)
+		if err != nil {
+			return "", fmt.Errorf("batch merge head %d conflicts with the preceding integration tree: %w", i+1, err)
+		}
+		if !shaPattern.MatchString(tree) {
+			return "", fmt.Errorf("batch merge head %d produced an invalid tree", i+1)
+		}
+		current, err = g.Run(ctx, message+"\n", "commit-tree", tree, "-p", current, "-p", head)
+		if err != nil {
+			return "", err
+		}
+	}
+	return current, nil
+}
