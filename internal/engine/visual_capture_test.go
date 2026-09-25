@@ -850,6 +850,29 @@ func TestVisualInputClosureReattestsOnlyIdenticalDeclaredInputs(t *testing.T) {
 	if err = sealVisualEvidence(source, evidence, receipt); err != nil {
 		t.Fatal(err)
 	}
+	sealPath := filepath.Join(source, "capture-seal.json")
+	originalSeal, err := os.ReadFile(sealPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mismatched visualEvidenceSeal
+	if err = json.Unmarshal(originalSeal, &mismatched); err != nil {
+		t.Fatal(err)
+	}
+	mismatched.Closure.SourceHead = strings.Repeat("a", 40)
+	corruptSeal, err := json.Marshal(mismatched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(sealPath, corruptSeal, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = loadVisualSeal(source, "task-closure", first, effective.Hash, targets); err == nil {
+		t.Fatal("seal accepted a closure receipt from a different source head")
+	}
+	if err = os.WriteFile(sealPath, originalSeal, 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	commit := func(path string) string {
 		t.Helper()

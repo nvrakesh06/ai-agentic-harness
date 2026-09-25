@@ -640,6 +640,12 @@ func loadVisualSeal(dir, taskID, head, configHash string, targets []config.Visua
 	if seal.Evidence.Head != head || seal.Evidence.Config != configHash || seal.Evidence.SourceHead == "" {
 		return visualEvidenceSeal{}, nil, errors.New("visual seal evidence identity is incomplete")
 	}
+	if seal.Closure != nil && (seal.Closure.SourceHead != seal.Evidence.SourceHead || seal.Closure.Hash != seal.Evidence.Closure || seal.Closure.Runtime != seal.Evidence.Runtime) {
+		return visualEvidenceSeal{}, nil, errors.New("visual seal closure provenance differs from its evidence")
+	}
+	if seal.Closure == nil && seal.Evidence.Closure != "" {
+		return visualEvidenceSeal{}, nil, errors.New("visual seal closure receipt is missing")
+	}
 	current, err := loadVisualEvidenceForTargetsAt(dir, taskID, head, seal.Evidence.SourceHead, configHash, targets)
 	if err != nil {
 		return visualEvidenceSeal{}, nil, err
@@ -734,7 +740,7 @@ func (c *Controller) reattestVisualEvidence(ctx context.Context, base, output st
 		return nil, false, err
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == filepath.Base(output) || strings.HasSuffix(entry.Name(), ".corrupt") {
+		if !entry.IsDir() || entry.Name() == filepath.Base(output) || strings.HasSuffix(entry.Name(), ".corrupt") || strings.Contains(entry.Name(), ".stale-") {
 			continue
 		}
 		source := filepath.Join(base, entry.Name())
@@ -865,7 +871,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		quarantine := quarantineVisualCapture
 		provenance := "quarantined-corrupt-cache"
 		if cacheErr == nil {
-			quarantine = func(path string) error { return quarantineVisualCaptureAs(path, ".stale") }
+			quarantine = func(path string) error { return quarantineVisualCaptureAs(path, ".stale-"+model.ID()) }
 			provenance = "stale-closure-or-runtime"
 		}
 		if err := quarantine(output); err != nil {
