@@ -450,7 +450,11 @@ type ReviewDisposition struct {
 // bytes and diagnostics remain outside the portable state snapshot.
 type VisualEvidence struct {
 	Head           string           `json:"head"`
+	SourceHead     string           `json:"source_head,omitempty"`
 	Config         string           `json:"config"`
+	Closure        string           `json:"closure,omitempty"`
+	Runtime        string           `json:"runtime,omitempty"`
+	ReuseReason    string           `json:"reuse_reason,omitempty"`
 	Manifest       string           `json:"manifest"`
 	ManifestSHA256 string           `json:"manifest_sha256"`
 	Artifacts      []VisualArtifact `json:"artifacts"`
@@ -810,6 +814,12 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 				len(v.Summary) > 1000 || len(v.Artifacts) < 1 || len(v.Artifacts) > MaxVisualEvidenceArtifacts ||
 				v.Manifest != "visual-evidence/"+id+"/"+v.Head+"-"+v.Config[:16]+"/manifest.json" {
 				return nil, false, errors.New("invalid visual evidence reference")
+			}
+			if v.SourceHead != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.SourceHead) {
+				return nil, false, errors.New("invalid visual evidence source revision")
+			}
+			if (v.Closure != "" || v.ReuseReason != "") && (!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Closure) || strings.TrimSpace(v.Runtime) == "" || len(v.Runtime) > 160) {
+				return nil, false, errors.New("invalid visual evidence closure")
 			}
 			for _, artifact := range v.Artifacts {
 				if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}\.(png|jpg|jpeg|txt|json)$`).MatchString(artifact.Path) || strings.Contains(artifact.Path, "..") || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(artifact.SHA256) {

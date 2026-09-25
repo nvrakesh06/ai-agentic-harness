@@ -747,7 +747,7 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		}
 		_ = deadlineRows.Close()
 	}
-	reviewRows, reviewErr := p.DB.DB.Query("SELECT at,task,role,kind,message FROM events WHERE kind IN ('review_evidence_refresh_requested','review_evidence_refresh_completed','review_evidence_refresh_failed','review_finding_fix','human_decision_required','visual_capture_queued','visual_capture_running','visual_capture_completed','visual_capture_failed','visual_capture_unavailable') ORDER BY id DESC LIMIT 5")
+	reviewRows, reviewErr := p.DB.DB.Query("SELECT at,task,role,kind,message FROM events WHERE kind IN ('review_evidence_refresh_requested','review_evidence_refresh_completed','review_evidence_refresh_failed','review_finding_fix','human_decision_required','visual_capture_queued','visual_capture_running','visual_capture_completed','visual_capture_reattested','visual_capture_failed','visual_capture_unavailable') ORDER BY id DESC LIMIT 5")
 	if reviewErr == nil {
 		for reviewRows.Next() {
 			var at, task, role, kind, message string

@@ -644,6 +644,17 @@ func TestVisualRunnerOwnsLoopbackAndProfilePolicy(t *testing.T) {
 	}
 }
 
+func TestVisualRuntimeProbeParsesOnNode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime-probe.mjs")
+	if err := os.WriteFile(path, []byte(visualRuntimeProbe), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("node", "--check", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("runtime probe is not valid Node syntax: %v %s", err, out)
+	}
+}
+
 // A listener that did not receive this capture's certificate cannot be mistaken
 // for the adapter, even if it presents a plausible application page.
 func TestVisualGatewayRejectsStaleListenerBeforeHTTP(t *testing.T) {
@@ -779,4 +790,117 @@ func TestVisualManifestRequiresEveryConfiguredTargetAndViewport(t *testing.T) {
 	if _, err := loadVisualEvidenceForTargets(dir, "task-1", head, cfg, targets); err == nil {
 		t.Fatal("mismatched screenshot dimensions accepted")
 	}
+}
+
+func TestVisualInputClosureReattestsOnlyIdenticalDeclaredInputs(t *testing.T) {
+	ctx := context.Background()
+	repo, state := t.TempDir(), t.TempDir()
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("init")
+	run("config", "user.email", "test@example.invalid")
+	run("config", "user.name", "Test")
+	for _, name := range []string{"package-lock.json", "src/loader.ts", "assets/font.woff2", "scripts/capture.mjs"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(repo, name)), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(name+"-one"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("add", ".")
+	run("commit", "-m", "first")
+	first := run("rev-parse", "HEAD")
+	targets := []config.VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 2, Height: 2}}
+	closure := &config.VisualInputClosure{Version: 1, Runtime: "chrome-1", Targets: []config.VisualInputClosureTarget{{ID: "desktop"}}}
+	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: []string{"node", "scripts/capture.mjs"}, Timeout: 10, Targets: targets, InputClosure: closure}}}
+	c := &Controller{P: &Project{Dir: state}}
+	receipt, err := visualInputClosure(ctx, repo, effective, "test-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.SourceHead = first
+	base := filepath.Join(state, "visual-evidence", "task-closure")
+	source := filepath.Join(base, first+"-"+effective.Hash[:16])
+	if err = os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = writeVisualPNG(filepath.Join(source, "desktop.png")); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(source, "network.txt"), []byte("desktop GET 200 /"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(source, "manifest.json"), []byte(fmt.Sprintf(`{"head":%q,"summary":"clean","artifacts":["desktop.png","network.txt"],"targets":[{"id":"desktop","path":"/","width":2,"height":2,"screenshot":"desktop.png"}]}`, first)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := loadVisualEvidenceForTargets(source, "task-closure", first, effective.Hash, targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence.Closure, evidence.Runtime = receipt.Hash, receipt.Runtime
+	if err = sealVisualEvidence(source, evidence, receipt); err != nil {
+		t.Fatal(err)
+	}
+
+	commit := func(path string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, path), []byte(path+time.Now().String()), 0600); err != nil {
+			t.Fatal(err)
+		}
+		run("add", path)
+		run("commit", "-m", "change "+path)
+		return run("rev-parse", "HEAD")
+	}
+	// A routine non-closure change reattests the sealed artifact and records the
+	// old capture head instead of pretending that the manifest originated here.
+	run("commit", "--allow-empty", "-m", "sync")
+	second := run("rev-parse", "HEAD")
+	output := filepath.Join(base, second+"-"+effective.Hash[:16])
+	got, ok, err := c.reattestVisualEvidence(ctx, base, output, &model.Task{ID: "task-closure", HeadSHA: second}, effective, targets, mustVisualClosure(t, ctx, repo, effective))
+	if err != nil || !ok || got.Head != second || got.SourceHead != first || got.ReuseReason == "" {
+		t.Fatalf("identical closure was not reattested: %#v %t %v", got, ok, err)
+	}
+	for _, path := range []string{"package-lock.json", "src/loader.ts", "assets/font.woff2", "scripts/capture.mjs"} {
+		head := commit(path)
+		candidate := filepath.Join(base, head+"-"+effective.Hash[:16])
+		if _, ok, err := c.reattestVisualEvidence(ctx, base, candidate, &model.Task{ID: "task-closure", HeadSHA: head}, effective, targets, mustVisualClosure(t, ctx, repo, effective)); err != nil || ok {
+			t.Fatalf("changed closure input %s was reused: ok=%t err=%v", path, ok, err)
+		}
+	}
+	changedRuntime := effective
+	changedRuntime.Project.VisualCapture = &config.VisualCapture{Server: effective.Project.VisualCapture.Server, Timeout: 10, Targets: targets, InputClosure: &config.VisualInputClosure{Version: 1, Runtime: "chrome-2", Targets: closure.Targets}}
+	if _, ok, err := c.reattestVisualEvidence(ctx, base, filepath.Join(base, "runtime"), &model.Task{ID: "task-closure", HeadSHA: run("rev-parse", "HEAD")}, changedRuntime, targets, mustVisualClosure(t, ctx, repo, changedRuntime)); err != nil || ok {
+		t.Fatalf("changed runtime identity was reused: ok=%t err=%v", ok, err)
+	}
+	if _, ok, err := c.reattestVisualEvidence(ctx, base, filepath.Join(base, "browser-runtime"), &model.Task{ID: "task-closure", HeadSHA: run("rev-parse", "HEAD")}, effective, targets, mustVisualClosureWithRuntime(t, ctx, repo, effective, "test-runtime-2")); err != nil || ok {
+		t.Fatalf("changed actual browser runtime was reused: ok=%t err=%v", ok, err)
+	}
+	changedConfig := effective
+	changedConfig.Hash = strings.Repeat("c", 64)
+	if _, ok, err := c.reattestVisualEvidence(ctx, base, filepath.Join(base, "config"), &model.Task{ID: "task-closure", HeadSHA: run("rev-parse", "HEAD")}, changedConfig, targets, mustVisualClosure(t, ctx, repo, changedConfig)); err != nil || ok {
+		t.Fatalf("changed capture configuration was reused: ok=%t err=%v", ok, err)
+	}
+}
+
+func mustVisualClosure(t *testing.T, ctx context.Context, dir string, effective config.Effective) *visualClosureReceipt {
+	t.Helper()
+	return mustVisualClosureWithRuntime(t, ctx, dir, effective, "test-runtime")
+}
+
+func mustVisualClosureWithRuntime(t *testing.T, ctx context.Context, dir string, effective config.Effective, runtime string) *visualClosureReceipt {
+	t.Helper()
+	closure, err := visualInputClosure(ctx, dir, effective, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return closure
 }

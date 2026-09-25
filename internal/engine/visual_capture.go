@@ -48,7 +48,7 @@ const (
 const visualReadyPrefix = "AIH_VISUAL_READY "
 
 const (
-	visualSealVersion     = 2
+	visualSealVersion     = 3
 	visualSealEnvironment = "detached-checkout-v1"
 )
 
@@ -466,6 +466,13 @@ func loadVisualEvidence(dir, taskID, head, configHash string) (*model.VisualEvid
 }
 
 func loadVisualEvidenceForTargets(dir, taskID, head, configHash string, targets []config.VisualCaptureTarget) (*model.VisualEvidence, error) {
+	return loadVisualEvidenceForTargetsAt(dir, taskID, head, head, configHash, targets)
+}
+
+// loadVisualEvidenceForTargetsAt keeps a reattestation's current head separate
+// from the immutable source manifest head. Reused bytes are never relabelled as
+// originally captured at the newer head.
+func loadVisualEvidenceForTargetsAt(dir, taskID, head, manifestHead, configHash string, targets []config.VisualCaptureTarget) (*model.VisualEvidence, error) {
 	manifestPath := filepath.Join(dir, "manifest.json")
 	info, err := os.Lstat(manifestPath)
 	if err != nil {
@@ -485,7 +492,7 @@ func loadVisualEvidenceForTargets(dir, taskID, head, configHash string, targets 
 	if err = json.Unmarshal(body, &m); err != nil {
 		return nil, err
 	}
-	if m.Head != head {
+	if m.Head != manifestHead {
 		return nil, errors.New("visual manifest captured head differs from reviewed head")
 	}
 	if len(m.Summary) > 1000 || len(m.Artifacts) == 0 || len(m.Artifacts) > visualArtifactLimit {
@@ -523,7 +530,7 @@ func loadVisualEvidenceForTargets(dir, taskID, head, configHash string, targets 
 		return nil, err
 	}
 	manifestHash := sha256.Sum256(body)
-	return &model.VisualEvidence{Head: head, Config: configHash, Manifest: filepath.ToSlash(filepath.Join("visual-evidence", taskID, head+"-"+configHash[:16], "manifest.json")), ManifestSHA256: hex.EncodeToString(manifestHash[:]), Artifacts: artifacts, Summary: m.Summary}, nil
+	return &model.VisualEvidence{Head: head, SourceHead: manifestHead, Config: configHash, Manifest: filepath.ToSlash(filepath.Join("visual-evidence", taskID, head+"-"+configHash[:16], "manifest.json")), ManifestSHA256: hex.EncodeToString(manifestHash[:]), Artifacts: artifacts, Summary: m.Summary}, nil
 }
 
 func validateVisualManifestTargets(m visualManifest, expected []config.VisualCaptureTarget, images map[string]image.Config) error {
@@ -562,21 +569,34 @@ func validateVisualManifestTargets(m visualManifest, expected []config.VisualCap
 	return nil
 }
 
-// The supervisor writes this seal after validation. Version 2 binds reuse to
-// the detached-checkout capture environment. Older seals predate that boundary
-// and must be quarantined and recaptured rather than being treated as proof.
+// The supervisor writes this seal after validation. Version 3 binds reuse to
+// the detached-checkout capture environment and a separate closure receipt.
+// Older seals predate that boundary and must be recaptured rather than proof.
 type visualEvidenceSeal struct {
-	Version     int                  `json:"version"`
-	Environment string               `json:"environment"`
-	Evidence    model.VisualEvidence `json:"evidence"`
+	Version     int                   `json:"version"`
+	Environment string                `json:"environment"`
+	Evidence    model.VisualEvidence  `json:"evidence"`
+	Closure     *visualClosureReceipt `json:"closure,omitempty"`
 }
 
-func sealVisualEvidence(dir string, evidence *model.VisualEvidence) error {
+// visualClosureReceipt is local sealed provenance. The hash covers one
+// declared closure per target and the configured runtime identity. It is
+// deliberately absent unless a project explicitly opts in.
+type visualClosureReceipt struct {
+	Version    int                          `json:"version"`
+	Hash       string                       `json:"hash"`
+	Runtime    string                       `json:"runtime"`
+	SourceHead string                       `json:"source_head"`
+	Tree       string                       `json:"tree"`
+	Targets    []config.VisualCaptureTarget `json:"targets"`
+}
+
+func sealVisualEvidence(dir string, evidence *model.VisualEvidence, closure *visualClosureReceipt) error {
 	f, err := os.OpenFile(filepath.Join(dir, "capture-seal.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
-	err = json.NewEncoder(f).Encode(visualEvidenceSeal{Version: visualSealVersion, Environment: visualSealEnvironment, Evidence: *evidence})
+	err = json.NewEncoder(f).Encode(visualEvidenceSeal{Version: visualSealVersion, Environment: visualSealEnvironment, Evidence: *evidence, Closure: closure})
 	closeErr := f.Close()
 	if err != nil {
 		return err
@@ -588,25 +608,7 @@ func loadSealedVisualEvidence(dir, taskID, head, configHash string) (*model.Visu
 }
 
 func loadSealedVisualEvidenceForTargets(dir, taskID, head, configHash string, targets []config.VisualCaptureTarget) (*model.VisualEvidence, error) {
-	info, err := os.Lstat(filepath.Join(dir, "capture-seal.json"))
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() || info.Size() > 32<<10 {
-		return nil, errors.New("visual capture seal must be a regular file <= 32 KiB")
-	}
-	body, err := os.ReadFile(filepath.Join(dir, "capture-seal.json"))
-	if err != nil {
-		return nil, err
-	}
-	var seal visualEvidenceSeal
-	if err = json.Unmarshal(body, &seal); err != nil {
-		return nil, err
-	}
-	if seal.Version != visualSealVersion || seal.Environment != visualSealEnvironment {
-		return nil, errLegacyVisualSeal
-	}
-	current, err := loadVisualEvidenceForTargets(dir, taskID, head, configHash, targets)
+	seal, current, err := loadVisualSeal(dir, taskID, head, configHash, targets)
 	if err != nil {
 		return nil, err
 	}
@@ -616,11 +618,167 @@ func loadSealedVisualEvidenceForTargets(dir, taskID, head, configHash string, ta
 	return current, nil
 }
 
+func loadVisualSeal(dir, taskID, head, configHash string, targets []config.VisualCaptureTarget) (visualEvidenceSeal, *model.VisualEvidence, error) {
+	info, err := os.Lstat(filepath.Join(dir, "capture-seal.json"))
+	if err != nil {
+		return visualEvidenceSeal{}, nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 32<<10 {
+		return visualEvidenceSeal{}, nil, errors.New("visual capture seal must be a regular file <= 32 KiB")
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "capture-seal.json"))
+	if err != nil {
+		return visualEvidenceSeal{}, nil, err
+	}
+	var seal visualEvidenceSeal
+	if err = json.Unmarshal(body, &seal); err != nil {
+		return visualEvidenceSeal{}, nil, err
+	}
+	if seal.Version != visualSealVersion || seal.Environment != visualSealEnvironment {
+		return visualEvidenceSeal{}, nil, errLegacyVisualSeal
+	}
+	if seal.Evidence.Head != head || seal.Evidence.Config != configHash || seal.Evidence.SourceHead == "" {
+		return visualEvidenceSeal{}, nil, errors.New("visual seal evidence identity is incomplete")
+	}
+	current, err := loadVisualEvidenceForTargetsAt(dir, taskID, head, seal.Evidence.SourceHead, configHash, targets)
+	if err != nil {
+		return visualEvidenceSeal{}, nil, err
+	}
+	current.Closure, current.Runtime, current.ReuseReason = seal.Evidence.Closure, seal.Evidence.Runtime, seal.Evidence.ReuseReason
+	return seal, current, nil
+}
+
+func visualInputClosure(ctx context.Context, dir string, e config.Effective, actualRuntime string) (*visualClosureReceipt, error) {
+	capture := e.Project.VisualCapture
+	if capture == nil || capture.InputClosure == nil {
+		return nil, nil
+	}
+	closure := capture.InputClosure
+	git := gitx.Git{Dir: dir}
+	tree, treeErr := git.Run(ctx, "", "rev-parse", "HEAD^{tree}")
+	if treeErr != nil || !visualRevision.MatchString(strings.TrimSpace(tree)) {
+		return nil, errors.New("visual input closure needs a committed full tracked tree")
+	}
+	body, err := json.Marshal(struct {
+		Version                                      int
+		Config, DeclaredRuntime, ActualRuntime, Tree string
+	}{closure.Version, e.Hash, closure.Runtime, actualRuntime, strings.TrimSpace(tree)})
+	if err != nil {
+		return nil, err
+	}
+	h := sha256.Sum256(body)
+	return &visualClosureReceipt{Version: closure.Version, Hash: hex.EncodeToString(h[:]), Runtime: actualRuntime, SourceHead: "", Tree: strings.TrimSpace(tree), Targets: capture.CaptureTargets()}, nil
+}
+
+const visualRuntimeProbe = `(async()=>{const p=require('node:path'),m=process.argv[1],{chromium}=require(m),b=await chromium.launch({channel:'chrome',headless:true});try{console.log(JSON.stringify({node:process.version,playwright:require(p.join(m,'package.json')).version,browser:b.version()}));}finally{await b.close();}})().catch(e=>{console.error(e);process.exit(1)})`
+
+func visualRuntimeIdentity(ctx context.Context, module string) (string, error) {
+	out, err := platform.Run(ctx, "", cleanEnvironment(), "", "node", "-e", visualRuntimeProbe, module)
+	if err != nil {
+		return "", &visualCaptureUnavailableError{fmt.Errorf("probe browser runtime: %w", err)}
+	}
+	identity := strings.TrimSpace(out)
+	var runtime struct{ Node, Playwright, Browser string }
+	if len(identity) == 0 || len(identity) > 500 || json.Unmarshal([]byte(identity), &runtime) != nil || runtime.Node == "" || runtime.Playwright == "" || runtime.Browser == "" {
+		return "", &visualCaptureUnavailableError{errors.New("browser runtime probe returned an incomplete identity")}
+	}
+	return identity, nil
+}
+
+func sameVisualClosure(receipt *visualClosureReceipt, closure *visualClosureReceipt, targets []config.VisualCaptureTarget) bool {
+	return receipt != nil && closure != nil && receipt.Hash == closure.Hash && receipt.Runtime == closure.Runtime && receipt.Tree == closure.Tree && receipt.Version == closure.Version && reflect.DeepEqual(receipt.Targets, targets)
+}
+
+func copyVisualEvidence(source, destination string, evidence *model.VisualEvidence) error {
+	if err := os.Mkdir(destination, 0700); err != nil {
+		return err
+	}
+	files := []string{"manifest.json", "capture-seal.json"}
+	for _, artifact := range evidence.Artifacts {
+		files = append(files, artifact.Path)
+	}
+	for _, name := range files {
+		in, err := os.Open(filepath.Join(source, name))
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(filepath.Join(destination, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			_, err = io.Copy(out, io.LimitReader(in, visualFileLimit+32<<10))
+			closeErr := out.Close()
+			if err == nil {
+				err = closeErr
+			}
+		}
+		_ = in.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return os.Remove(filepath.Join(destination, "capture-seal.json"))
+}
+
+// reattestVisualEvidence accepts only a complete, sealed prior capture whose
+// declared content closure matches this exact new head. It copies the sealed
+// artifacts into a new-head directory and writes a distinct receipt; review
+// dispositions are deliberately outside this path.
+func (c *Controller) reattestVisualEvidence(ctx context.Context, base, output string, task *model.Task, e config.Effective, targets []config.VisualCaptureTarget, closure *visualClosureReceipt) (*model.VisualEvidence, bool, error) {
+	if closure == nil {
+		return nil, false, nil
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == filepath.Base(output) || strings.HasSuffix(entry.Name(), ".corrupt") {
+			continue
+		}
+		source := filepath.Join(base, entry.Name())
+		body, err := os.ReadFile(filepath.Join(source, "capture-seal.json"))
+		if err != nil {
+			continue
+		}
+		var raw visualEvidenceSeal
+		if json.Unmarshal(body, &raw) != nil || raw.Version != visualSealVersion || raw.Environment != visualSealEnvironment || raw.Closure == nil || raw.Closure.Hash != closure.Hash || raw.Closure.Runtime != closure.Runtime || raw.Closure.Tree != closure.Tree || raw.Closure.Version != closure.Version || !reflect.DeepEqual(raw.Closure.Targets, targets) || raw.Closure.SourceHead != raw.Evidence.SourceHead || raw.Evidence.SourceHead == task.HeadSHA || raw.Evidence.Config != e.Hash {
+			continue
+		}
+		_, sourceEvidence, err := loadVisualSeal(source, task.ID, raw.Evidence.Head, raw.Evidence.Config, targets)
+		if err != nil || !reflect.DeepEqual(raw.Evidence, *sourceEvidence) {
+			continue
+		}
+		if err = copyVisualEvidence(source, output, sourceEvidence); err != nil {
+			return nil, false, err
+		}
+		reattested, err := loadVisualEvidenceForTargetsAt(output, task.ID, task.HeadSHA, sourceEvidence.SourceHead, e.Hash, targets)
+		if err != nil {
+			_ = os.RemoveAll(output)
+			return nil, false, err
+		}
+		receipt := *closure
+		receipt.SourceHead = sourceEvidence.SourceHead
+		reattested.Closure, reattested.Runtime, reattested.ReuseReason = receipt.Hash, receipt.Runtime, "identical declared visual input closure"
+		if err = sealVisualEvidence(output, reattested, &receipt); err != nil {
+			_ = os.RemoveAll(output)
+			return nil, false, err
+		}
+		if c.P.DB != nil {
+			_ = c.P.DB.Event(task.ID, task.RunID, "verification", "native", "visual_capture_reattested", "head="+task.HeadSHA+" source_head="+sourceEvidence.SourceHead+" closure="+receipt.Hash[:16])
+		}
+		return reattested, true, nil
+	}
+	return nil, false, nil
+}
+
 // quarantineVisualCapture preserves one rejected cache for local diagnosis,
 // then permits one clean recapture at the same head/config. A second corrupt
 // cache is terminal so cache damage cannot create an endless recapture loop.
 func quarantineVisualCapture(output string) error {
-	quarantine := output + ".corrupt"
+	return quarantineVisualCaptureAs(output, ".corrupt")
+}
+
+func quarantineVisualCaptureAs(output, suffix string) error {
+	quarantine := output + suffix
 	if _, err := os.Lstat(quarantine); err == nil {
 		return errors.New("visual capture cache was already recaptured once")
 	} else if !os.IsNotExist(err) {
@@ -645,6 +803,28 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	sha, err := (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
 	if err != nil || sha != task.HeadSHA {
 		return nil, &checkFailure{name: "visual capture", command: "node", err: errors.New("worktree is not at the reviewed head")}
+	}
+	var closure *visualClosureReceipt
+	var playwright string
+	if capture.InputClosure != nil {
+		playwright, err = playwrightModule(c.P.Home)
+		if err != nil {
+			return nil, err
+		}
+		probeSeconds := 15
+		if capture.Timeout < probeSeconds {
+			probeSeconds = capture.Timeout
+		}
+		probeCtx, probeCancel := context.WithTimeout(ctx, time.Duration(probeSeconds)*time.Second)
+		runtimeIdentity, runtimeErr := visualRuntimeIdentity(probeCtx, playwright)
+		probeCancel()
+		if runtimeErr != nil {
+			return nil, runtimeErr
+		}
+		closure, err = visualInputClosure(ctx, dir, e, runtimeIdentity)
+		if err != nil {
+			return nil, &checkFailure{name: "visual capture", command: "git", err: err}
+		}
 	}
 	parent, parentErr := os.Lstat(c.P.Dir)
 	if parentErr != nil || !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 {
@@ -671,30 +851,45 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return nil, errors.New("visual evidence path is not a directory")
 		}
-		if cached, err := loadSealedVisualEvidenceForTargets(output, task.ID, task.HeadSHA, e.Hash, targets); err == nil {
+		seal, cached, cacheErr := loadVisualSeal(output, task.ID, task.HeadSHA, e.Hash, targets)
+		if cacheErr == nil && (closure == nil || sameVisualClosure(seal.Closure, closure, targets)) && reflect.DeepEqual(seal.Evidence, *cached) {
 			cached.Summary = safety.Portable(cached.Summary, c.P.Dir, dir)
 			if task.Evidence != nil && task.Evidence.Visual != nil && !reflect.DeepEqual(*task.Evidence.Visual, *cached) {
 				return nil, errors.New("cached visual capture differs from durable review evidence")
 			}
 			return cached, nil
 		}
-		if err := quarantineVisualCapture(output); err != nil {
+		quarantine := quarantineVisualCapture
+		provenance := "quarantined-corrupt-cache"
+		if cacheErr == nil {
+			quarantine = func(path string) error { return quarantineVisualCaptureAs(path, ".stale") }
+			provenance = "stale-closure-or-runtime"
+		}
+		if err := quarantine(output); err != nil {
 			return nil, &checkFailure{name: "visual capture", command: "node", err: fmt.Errorf("cached artifacts are invalid and cannot be recaptured: %w", err)}
 		}
 		if c.P.DB != nil {
-			_ = c.P.DB.Event(task.ID, task.RunID, "verification", "native", "visual_capture_recaptured", "head="+task.HeadSHA+" config="+e.Hash[:16]+" provenance=quarantined-corrupt-cache")
+			_ = c.P.DB.Event(task.ID, task.RunID, "verification", "native", "visual_capture_recaptured", "head="+task.HeadSHA+" config="+e.Hash[:16]+" provenance="+provenance)
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, err
+	}
+	if reattested, ok, reuseErr := c.reattestVisualEvidence(ctx, base, output, task, e, targets, closure); reuseErr != nil {
+		return nil, reuseErr
+	} else if ok {
+		reattested.Summary = safety.Portable(reattested.Summary, c.P.Dir, dir)
+		return reattested, nil
 	}
 	temporary, err := os.MkdirTemp(base, ".capture-")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(temporary)
-	playwright, err := playwrightModule(c.P.Home)
-	if err != nil {
-		return nil, err
+	if playwright == "" {
+		playwright, err = playwrightModule(c.P.Home)
+		if err != nil {
+			return nil, err
+		}
 	}
 	runner := filepath.Join(temporary, "aih-visual-runner.mjs")
 	if err := os.WriteFile(runner, []byte(visualRunner), 0600); err != nil {
@@ -785,7 +980,11 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	if err != nil {
 		return nil, &checkFailure{name: "visual capture", command: "node", err: err}
 	}
-	if err = sealVisualEvidence(temporary, visual); err != nil {
+	if closure != nil {
+		closure = &visualClosureReceipt{Version: closure.Version, Hash: closure.Hash, Runtime: closure.Runtime, SourceHead: task.HeadSHA, Tree: closure.Tree, Targets: closure.Targets}
+		visual.Closure, visual.Runtime = closure.Hash, closure.Runtime
+	}
+	if err = sealVisualEvidence(temporary, visual, closure); err != nil {
 		return nil, err
 	}
 	if err = os.Rename(temporary, output); err != nil {
