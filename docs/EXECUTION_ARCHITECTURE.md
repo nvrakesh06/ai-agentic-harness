@@ -51,6 +51,45 @@ proof that a scheduler rejected two eligible writers.
 These observations justify a delivery-loop revision. They do not justify a
 claimed speed multiplier, removing review, or an unsupported completion ETA.
 
+### Live rollout finding: provider contract is a delivery prerequisite
+
+After the proposal, PR138 merged and its exact accepted tree was selected as
+binary `5ddaf5a`. The complete release passed, including all 213 engine tests,
+real provisioned browser tests, vet and five cross-builds. Consumer policy PR172
+merged, nine bounded task contracts were recovered through the public CLI, and
+the selected supervisor resumed at epoch 30.
+
+The actual Codex Designer (`gpt-6-sol`) and Implementer (`gpt-5.6-terra`) then
+failed before useful work with HTTP 400 `invalid_json_schema`. The shared finding
+schema declared `baseline_sha` and `baseline_evidence` without including them in
+`required`. The mock-provider release suite did not exercise upstream strict
+schema acceptance. Generic failure routing retried; tasks #6 and #140 reached
+`BLOCKED_HUMAN`. The public stop completed at revision 4936 with no owner or live
+workers. This is a shared AIH failure, tracked in #141, not a product-source
+defect or evidence of successful live throughput.
+
+This establishes a concrete mismatch between the intended architecture and
+execution: CLI flag availability, passing adapter mocks and an active worker
+record are insufficient to establish useful provider capability. Fix the strict
+schema, add recursive schema contract checks and prove acceptance with one
+bounded, read-only supported CLI call before the next activation. Baseline proof
+requirements remain in force; empty proof strings represent non-baseline findings.
+
+Provider-wide rejection handling is a separate unfinished contract. Extend #131's
+existing failure ownership work with an authoritative typed request/schema
+rejection, checked before planning, preflight, source FIX and review retry budget
+paths. Persist a provider admission hold through the existing controller; bind it
+to canonical request identity and require repaired identity or explicit supported
+retry to reopen admission. Keep native verification and already-accepted merge
+work eligible. Do not infer an outage from quoted repository/model text or add a
+second scheduler. Tests must prove zero source/Advisor/planning budget consumption,
+restart suppression, repaired-identity recovery and retained mixed peer findings.
+
+Deployment acceptance now explicitly requires: schema accepted by the actual
+provider, selected supervisor identity confirmed, useful independent work admitted,
+and an accepted task reaching DONE. Only then measure delivered work and critical
+path delay. An active process or a release PASS alone is not that acceptance.
+
 ## Component decisions
 
 | Component | Existing mechanism | Revision or operational obligation |
