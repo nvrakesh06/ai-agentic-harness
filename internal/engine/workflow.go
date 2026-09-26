@@ -1408,13 +1408,13 @@ func (c *Controller) work(id string, write bool) {
 }
 
 func (c *Controller) handleVerificationError(id string, err error) {
+	if isProviderAdmissionHeld(err) {
+		return
+	}
 	if provider.IsAuthenticationFailure(err) {
 		// Review calls have already placed the task in Review, so resume that
 		// same gate after the operator restores the provider session.
 		c.providerAuthenticationBlock(id, "review", model.Review)
-		return
-	}
-	if isProviderAdmissionHeld(err) {
 		return
 	}
 	var unavailableTool *validationToolUnavailableError
@@ -1530,15 +1530,15 @@ func (c *Controller) implement(id string) bool {
 		}
 		return false
 	}
+	if isProviderAdmissionHeld(e) {
+		return false
+	}
 	if provider.IsAuthenticationFailure(e) {
 		if ce := c.checkpointAuthenticationFailure(id); ce != nil {
 			c.block(id, "Resolve checkpoint failure; local work is preserved.", ce.Error(), model.Ready)
 			return false
 		}
 		c.providerAuthenticationBlock(id, "implementer", model.Ready)
-		return false
-	}
-	if isProviderAdmissionHeld(e) {
 		return false
 	}
 	if ce := c.checkpoint(c.ctx, id); ce != nil {
@@ -2337,11 +2337,11 @@ func (c *Controller) verifyReview(id string) error {
 	if e = c.preserveReviewFindings(id, assessment.findings); e != nil {
 		return e
 	}
-	if reviewAuthenticationFailure(outcomes) {
-		c.providerAuthenticationBlock(id, "review", model.Review)
+	if reviewProviderAdmissionFailure(outcomes) {
 		return nil
 	}
-	if reviewProviderAdmissionFailure(outcomes) {
+	if reviewAuthenticationFailure(outcomes) {
+		c.providerAuthenticationBlock(id, "review", model.Review)
 		return nil
 	}
 	for i, role := range activeRequired {
@@ -2448,11 +2448,11 @@ func (c *Controller) verifyReview(id string) error {
 		if e = c.preserveReviewFindings(id, refreshAssessment.findings); e != nil {
 			return e
 		}
-		if reviewAuthenticationFailure(refreshed) {
-			c.providerAuthenticationBlock(id, "review", model.Review)
+		if reviewProviderAdmissionFailure(refreshed) {
 			return nil
 		}
-		if reviewProviderAdmissionFailure(refreshed) {
+		if reviewAuthenticationFailure(refreshed) {
+			c.providerAuthenticationBlock(id, "review", model.Review)
 			return nil
 		}
 		for i, role := range refreshRoles {

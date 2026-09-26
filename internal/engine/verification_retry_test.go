@@ -587,7 +587,7 @@ func TestImplementationFailureKeepsNormalFixLoop(t *testing.T) {
 	}
 }
 
-func TestProviderAuthenticationFailurePreservesTaskBudgetAndSkipsAdvisor(t *testing.T) {
+func TestProviderAuthenticationFailureCreatesSharedHoldWithoutTaskBudget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
@@ -597,12 +597,23 @@ func TestProviderAuthenticationFailurePreservesTaskBudgetAndSkipsAdvisor(t *test
 	defer f.P.DB.Close()
 	f.Provider.AuthFailures = map[string]int{"auth-blocked": 1}
 	seedReadyTask(t, ctx, f, "auth-blocked")
-	task := runUntilTaskState(t, ctx, f, "auth-blocked", model.Blocked)
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- engine.New(f.P).Serve(runCtx) }()
+	snapshot := waitProviderAdmissionHold(t, ctx, f)
+	stop()
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	task := snapshot.Tasks["auth-blocked"]
 	if task.Attempts != 0 || len(task.FixCycles) != 0 || task.AdvisorUsed {
 		t.Fatalf("authentication failure consumed task recovery budget: %+v", task)
 	}
-	if task.Blocker == nil || task.Blocker.Origin != model.BlockerOriginProviderAuthentication || task.Blocker.Resume != model.Ready {
-		t.Fatalf("authentication failure did not preserve implementer stage: %+v", task.Blocker)
+	if task.State != model.Ready || task.Blocker != nil {
+		t.Fatalf("authentication failure did not preserve schedulable implementer checkpoint: %+v", task)
+	}
+	if len(snapshot.ProviderAdmissionHolds) != 1 {
+		t.Fatalf("authentication failure did not create shared provider hold: %#v", snapshot.ProviderAdmissionHolds)
 	}
 	if got := f.Provider.ImplementationCount("auth-blocked"); got != 1 {
 		t.Fatalf("implementer calls = %d, want one failed provider invocation", got)
