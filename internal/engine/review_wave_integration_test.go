@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,11 +22,14 @@ import (
 )
 
 type reviewWaveProvider struct {
-	auditedReviewer atomic.Int32
-	auditedSecurity atomic.Int32
-	auditedQA       atomic.Int32
-	independent     atomic.Int32
-	qaPeerFailure   atomic.Value
+	auditedReviewer    atomic.Int32
+	auditedSecurity    atomic.Int32
+	auditedQA          atomic.Int32
+	independent        atomic.Int32
+	independentStarted chan struct{}
+	releaseIndependent chan struct{}
+	independentOnce    sync.Once
+	qaPeerFailure      atomic.Value
 }
 
 type mixedReviewDeadlineProvider struct {
@@ -71,7 +75,7 @@ func (p *mixedReviewDeadlineProvider) Run(ctx context.Context, request provider.
 func (*reviewWaveProvider) Name() string                   { return "codex" }
 func (*reviewWaveProvider) Validate(context.Context) error { return nil }
 
-func (p *reviewWaveProvider) Run(_ context.Context, request provider.Request) (provider.Result, error) {
+func (p *reviewWaveProvider) Run(ctx context.Context, request provider.Request) (provider.Result, error) {
 	task, err := demo.Task(request.Prompt)
 	if err != nil {
 		return provider.Result{}, err
@@ -82,6 +86,16 @@ func (p *reviewWaveProvider) Run(_ context.Context, request provider.Request) (p
 		}
 		if task.Title == "independent" {
 			p.independent.Add(1)
+			if p.independentStarted != nil {
+				p.independentOnce.Do(func() { close(p.independentStarted) })
+			}
+			if p.releaseIndependent != nil {
+				select {
+				case <-p.releaseIndependent:
+				case <-ctx.Done():
+					return provider.Result{}, ctx.Err()
+				}
+			}
 		}
 		return provider.Result{Schema: 1, Status: "completed", Summary: "implemented " + task.Title}, nil
 	}
@@ -108,7 +122,7 @@ func (p *reviewWaveProvider) Run(_ context.Context, request provider.Request) (p
 }
 
 func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
 	if err != nil {
@@ -117,6 +131,10 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 	defer f.P.DB.Close()
 	f.P.Config.Project.MaxWriters = 2
 	f.P.Config.Project.MaxReaders = 2
+	f.Project.MaxWriters = 2
+	f.Project.MaxReaders = 2
+	f.Project.WorkerSeconds = 120
+	configureFixtureRoleTimeouts(t, ctx, f, config.RoleTimeouts{})
 	seedReadyTask(t, ctx, f, "audited")
 	seedReadyTask(t, ctx, f, "independent")
 	snapshot, stateHead, err := f.P.Git.Load(ctx)
@@ -131,15 +149,23 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateHead, New: next}}); err != nil {
 		t.Fatal(err)
 	}
-	workers := &reviewWaveProvider{}
+	workers := &reviewWaveProvider{independentStarted: make(chan struct{}), releaseIndependent: make(chan struct{})}
 	f.P.Provider = workers
 	done := make(chan error, 1)
 	go func() { done <- engine.New(f.P).Serve(ctx) }()
 	stopped := false
+	releaseIndependent := func() {
+		select {
+		case <-workers.releaseIndependent:
+		default:
+			close(workers.releaseIndependent)
+		}
+	}
 	defer func() {
 		if stopped {
 			return
 		}
+		releaseIndependent()
 		cancel()
 		select {
 		case <-done:
@@ -147,7 +173,7 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 			t.Errorf("supervisor did not stop after QA fixture failure")
 		}
 	}()
-	deadline := time.NewTimer(45 * time.Second)
+	deadline := time.NewTimer(90 * time.Second)
 	defer deadline.Stop()
 	var last *model.Task
 	for {
@@ -182,6 +208,12 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 	if workers.independent.Load() != 1 {
 		t.Fatalf("independent writer did not remain runnable while audited review queued: %d", workers.independent.Load())
 	}
+	select {
+	case <-workers.independentStarted:
+	default:
+		t.Fatal("independent writer was not occupied while audited QA completed")
+	}
+	releaseIndependent()
 	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
 		t.Fatal(err)
 	}
