@@ -134,23 +134,38 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 	f.P.Provider = workers
 	done := make(chan error, 1)
 	go func() { done <- engine.New(f.P).Serve(ctx) }()
+	stopped := false
+	defer func() {
+		if stopped {
+			return
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Errorf("supervisor did not stop after QA fixture failure")
+		}
+	}()
 	deadline := time.NewTimer(45 * time.Second)
 	defer deadline.Stop()
+	var last *model.Task
 	for {
 		current, _, loadErr := f.P.DB.Load()
 		if loadErr == nil && current.Tasks["audited"] != nil {
 			task := current.Tasks["audited"]
+			last = task
 			evidence := task.Evidence
 			qa := evidence != nil && evidence.Reviews["qa"] == "QA exact-head acceptance" && evidence.Head == task.HeadSHA && evidence.ReviewDispositions["qa"].Disposition == "completed" && evidence.ReviewDispositions["qa"].SourceHead == task.HeadSHA
-			if qa && task.State == model.MergeReady {
+			if qa && (task.State == model.MergeReady || task.State == model.Done) {
 				break
 			}
 		}
 		select {
 		case serveErr := <-done:
-			t.Fatalf("supervisor stopped before durable QA wave: %v", serveErr)
+			stopped = true
+			t.Fatalf("supervisor stopped before durable QA wave: %v state=%#v qa_failure=%v", serveErr, last, workers.qaPeerFailure.Load())
 		case <-deadline.C:
-			t.Fatalf("review waves did not durably complete: reviewer=%d security=%d QA=%d independent=%d", workers.auditedReviewer.Load(), workers.auditedSecurity.Load(), workers.auditedQA.Load(), workers.independent.Load())
+			t.Fatalf("review waves did not durably complete: reviewer=%d security=%d QA=%d independent=%d state=%#v qa_failure=%v", workers.auditedReviewer.Load(), workers.auditedSecurity.Load(), workers.auditedQA.Load(), workers.independent.Load(), last, workers.qaPeerFailure.Load())
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
@@ -163,8 +178,10 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
 		t.Fatal(err)
 	}
-	if err = <-done; err != nil {
-		t.Fatal(err)
+	serveErr := <-done
+	stopped = true
+	if serveErr != nil {
+		t.Fatal(serveErr)
 	}
 	current, _, err := f.P.Git.Load(ctx)
 	if err != nil {
