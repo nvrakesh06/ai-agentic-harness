@@ -53,6 +53,29 @@ Three read-only `git ls-remote` probes took 1,520, 1,476 and 1,482 ms. This is
 network-command latency only. It does not prove actual push or controller-lock
 duration, and multiplying it by publication count is not a delivery-time estimate.
 
+## Measured validation repair
+
+A CPU profile of 100 snapshot decodes at the audited source attributed 70.8% of
+sampled cumulative CPU to `regexp.MustCompile`. Several validation helpers
+compiled identical patterns for every visited record. The candidate now compiles
+those private immutable patterns once, preserving their literals and every
+validation predicate. This changes neither schema nor accepted inputs.
+
+A second comparison used the identical 540,726-byte snapshot, 30 warm samples,
+`GOMAXPROCS=1`, and no active release gate. Baseline `49b1c3b` ran first, followed
+by repair `ec7e63d`:
+
+| Operation | Before median / p95 | After median / p95 |
+| --- | ---: | ---: |
+| Decode, migrate and validate | 14.58 / 20.15 ms | 3.52 / 4.52 ms |
+| SQLite read plus decode/validation | 18.73 / 24.59 ms | 5.43 / 9.89 ms |
+
+Host/GC variance remains: unchanged clone code also measured 8.95 ms before and
+5.00 ms after. The profile and tests support removing repeated compilation;
+these sequential measurements do not establish a precise end-to-end speedup.
+Model tests passed and scoped review found no material regression. The complete
+integrated release and deployed consumer observation remain required.
+
 ## Repeated work in current code
 
 `model.Clone` marshals and unmarshals the entire state. The 400 ms scheduler tick
@@ -122,5 +145,17 @@ publication-lock analysis coordinated with #103.
 Read-only probes and sanitized results are preserved in the operator candidate's
 ignored `.cache/persistenceprobe`, `.cache/publicationprobe` and measurement JSON.
 They contain no committed live snapshot or credential data. Opt-in phase profiling
-is being implemented separately; history compaction, scheduler copy changes and
-publication coalescing are proposals, not active optimizations.
+and the validation repair are implemented in the reviewed restoration candidate,
+not yet deployed. `AIH_PERSISTENCE_PROFILE=1` enables a fixed-size local aggregate
+for the six existing persistence phases. It adds one local runtime-record write
+after the controller mutex is released, with no new remote publication, schema
+field or authority change. Counts mean publications containing a phase; repeated
+clone work in one publication is summed. The aggregate exposes mean and maximum,
+not percentiles. Record writes are serialized independently of publication.
+Opt-in, malformed-record, concurrent aggregation and real Git lease/fencing
+fixtures passed after review corrections. Its own local write is outside the
+phase timings; whole-operation overhead still needs deployed measurement.
+
+History compaction, scheduler copy changes and publication coalescing remain
+proposals. Production phase measurements and useful delivery are the next evidence
+boundary, rather than a claim that the measured decode gain fixes all throughput.
