@@ -28,6 +28,7 @@ flowchart LR
   R[94 and 3: reader budgets and review waves] --> C[Combined candidate]
   N[Transient native checks: one supervisor retry] --> C
   M[88: transition accounting and run provenance] --> C
+  T[45: complete bounded release test inventory] --> C
   I --> C
   C --> O[Operational fixtures and scoped review]
   O --> G[One combined full release gate]
@@ -91,6 +92,21 @@ duration; round-trip/migration preserves legacy snapshots; repeated unchanged-he
 review is visible; no-op persistence stays a no-op. Report cumulative provider
 seconds separately from elapsed time and do not add overlapping roles into wall time.
 
+## 4. Complete bounded release inventory — issue 45
+
+The frozen `9278fb4` gate failed at the engine package's 900-second aggregate
+deadline. It had completed 180 top-level tests, totaling 880.53 recorded seconds,
+and was still advancing through scope recovery fixtures. No earlier assertion
+failure occurred. This is failed validation, not permission to merge the batch.
+
+Discover all packages and runnable engine tests through Go's native inventory,
+then execute every engine test in deterministic serial groups of sixteen. Preserve
+uncached execution, fail-fast behavior, fixture deadlines, and each group's
+fifteen-minute bound. Require a terminal pass/skip event for every planned test.
+Record the complete planned inventory; never imply that unexecuted groups passed.
+Tests prove exact-once grouping, rejection of incomplete/unsafe inventories, and
+failure when a subprocess exits successfully without covering a planned test.
+
 ## Completion gate and resumption
 
 Use focused checks on each changed contract, then scoped independent review. Run
@@ -108,8 +124,9 @@ resumption. More sessions, open issues, or checkpoint commits are not success.
 
 General stack-PR machinery, automatic binary draining, configurable review DAGs,
 external shell resource reservation, and a broader task-contract rewrite are not
-part of this pass. Windows fixture lanes are conditional on a real quiet-gate
-failure. Do not create more infrastructure simply because an audit proposed it.
+part of this pass. Broader Windows fixture resource lanes require a demonstrated
+fixture-contention failure beyond the observed aggregate timeout. Do not create
+more infrastructure simply because an audit proposed it.
 The existing batch already repairs publication timeout recovery, deadlock,
 history-preserving synchronization, focused/shared validation, sealed visual
 reattestation, provider-auth handling, and explicit scope/task recovery.
