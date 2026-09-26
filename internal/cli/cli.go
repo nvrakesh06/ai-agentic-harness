@@ -236,6 +236,44 @@ func New() *cobra.Command {
 	guide.Flags().BoolVar(&operatorGuidance, "operator", false, "operator guidance scoped to the target's current head and policy")
 	guide.Flags().StringVar(&guidanceFile, "file", "", "UTF-8 correction text file (maximum 1600 bytes)")
 	root.AddCommand(guide)
+	var recoveryFile string
+	var recoveryPreview bool
+	scope := &cobra.Command{Use: "scope", Short: "Inspect or repair durable task ownership"}
+	recoverScope := &cobra.Command{Use: "recover", Short: "Apply an explicit legacy task-scope reauthorization", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if recoveryFile == "" {
+			return errors.New("scope recover requires --file")
+		}
+		input, err := os.Open(recoveryFile)
+		if err != nil {
+			return err
+		}
+		defer input.Close()
+		manifest, err := engine.DecodeScopeRecoveryManifest(input)
+		if err != nil {
+			return err
+		}
+		p, err := o.open(cmd.Context(), false)
+		if err != nil {
+			return err
+		}
+		defer p.DB.Close()
+		if recoveryPreview {
+			if err = engine.PreviewScopeRecovery(cmd.Context(), p, manifest); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Scope recovery manifest %s passed read-only validation; no lease or remote state was published.\n", manifest.CommandID)
+			return nil
+		}
+		if err = engine.RecoverScope(cmd.Context(), p, manifest); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Applied explicit scope recovery command %s. Re-run aih resume when ready; fresh preflight and verification remain required.\n", manifest.CommandID)
+		return nil
+	}}
+	recoverScope.Flags().StringVar(&recoveryFile, "file", "", "schema-1 JSON recovery manifest")
+	recoverScope.Flags().BoolVar(&recoveryPreview, "preview", false, "validate the manifest without taking a lease or publishing state")
+	scope.AddCommand(recoverScope)
+	root.AddCommand(scope)
 	for _, name := range []string{"stop", "handoff"} {
 		name := name
 		root.AddCommand(&cobra.Command{Use: name, Short: "Stop scheduling, checkpoint workers, and release the lease", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
