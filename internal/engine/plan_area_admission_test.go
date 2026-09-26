@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/demo"
-	"github.com/nvrakesh06/ai-agentic-harness/internal/engine"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
@@ -42,17 +41,25 @@ func TestMalformedNewPlanAreasPublishNoTasksOwnershipOrIssues(t *testing.T) {
 	planner := &malformedPlanProvider{started: make(chan struct{})}
 	f.P.Provider = planner
 
-	controller := engine.New(f.P)
-	done := make(chan error, 1)
-	go func() { done <- controller.Serve(ctx) }()
+	supervisor := newFixtureSupervisor(ctx, f.P)
+	drained := false
+	defer func() {
+		if !drained {
+			if cleanupErr := supervisor.drain("malformed plan admission fixture cleanup"); cleanupErr != nil {
+				t.Errorf("malformed plan admission supervisor drain: %v", cleanupErr)
+			}
+			drained = true
+		}
+	}()
 	waitStarted(t, f.P)
 	if err = f.P.DB.Submit(store.Command{ID: "bad-plan", Kind: "run", Payload: "Create the studio planner."}); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case <-planner.started:
-	case err = <-done:
-		t.Fatalf("controller stopped before plan admission: %v", err)
+	case <-supervisor.completion():
+		drained = true
+		t.Fatalf("controller stopped before plan admission: %v", supervisor.completedResult())
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
@@ -81,7 +88,8 @@ func TestMalformedNewPlanAreasPublishNoTasksOwnershipOrIssues(t *testing.T) {
 	if err = f.P.DB.Submit(store.Command{ID: "stop-bad-plan", Kind: "handoff"}); err != nil {
 		t.Fatal(err)
 	}
-	if err = <-done; err != nil {
+	if err = supervisor.waitHandoff("malformed plan admission success handoff"); err != nil {
 		t.Fatal(err)
 	}
+	drained = true
 }
