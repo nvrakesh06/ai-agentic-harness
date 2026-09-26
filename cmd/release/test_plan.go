@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,7 +17,7 @@ import (
 
 // No fixture is removed or made parallel: grouping prevents the aggregate
 // package deadline from terminating a healthy growing integration inventory.
-const releaseIntegrationGroupSize = 16
+const releaseIntegrationGroupSize = 4
 
 var runnableTestName = regexp.MustCompile(`^(Test|Example|Fuzz)[A-Za-z0-9_]*$`)
 
@@ -63,9 +64,9 @@ func releaseTestGroups(packages []string, integration string, tests []string, si
 	}
 	names := append([]string(nil), tests...)
 	sort.Strings(names)
-	groups := []releaseTestGroup{}
-	if len(normal) > 0 {
-		groups = append(groups, releaseTestGroup{Packages: normal})
+	groups := make([]releaseTestGroup, 0, len(normal)+(len(names)+size-1)/size)
+	for _, pkg := range normal {
+		groups = append(groups, releaseTestGroup{Packages: []string{pkg}})
 	}
 	for start := 0; start < len(names); start += size {
 		end := min(start+size, len(names))
@@ -117,19 +118,11 @@ func runCompleteReleaseTests(ctx context.Context) error {
 	}
 	// This local artifact records the complete planned inventory even if a
 	// group fails. It is not evidence that unexecuted groups passed.
-	head, err := platform.Run(discovery, "", nil, "", "git", "rev-parse", "HEAD")
+	identity, err := releaseReceiptIdentityFor(discovery, groups)
 	if err != nil {
-		return fmt.Errorf("record release inventory source: %w", err)
+		return err
 	}
-	tree, err := platform.Run(discovery, "", nil, "", "git", "rev-parse", "HEAD^{tree}")
-	if err != nil {
-		return fmt.Errorf("record release inventory tree: %w", err)
-	}
-	status, err := platform.Run(discovery, "", nil, "", "git", "status", "--porcelain")
-	if err != nil {
-		return fmt.Errorf("record release inventory worktree status: %w", err)
-	}
-	manifest, err := json.MarshalIndent(releaseTestInventory{Schema: 1, Head: strings.TrimSpace(head), Tree: strings.TrimSpace(tree), WorktreeDirty: strings.TrimSpace(status) != "", Groups: groups}, "", "  ")
+	manifest, err := json.MarshalIndent(releaseTestInventory{Schema: 1, Head: identity.Head, Tree: identity.Tree, WorktreeDirty: false, Groups: groups}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -140,11 +133,45 @@ func runCompleteReleaseTests(ctx context.Context) error {
 		return err
 	}
 	fmt.Printf("release test inventory: %d packages, %d engine tests, %d serial groups\n", len(packages), len(tests), len(groups))
+	receipts := filepath.Join("dist", "release-test-receipts")
 	for index, group := range groups {
 		fmt.Printf("release test group %d/%d\n", index+1, len(groups))
+		current, identityErr := releaseReceiptIdentityFor(ctx, groups)
+		if identityErr != nil || current != identity {
+			if identityErr != nil {
+				return fmt.Errorf("release test group %d/%d identity: %w", index+1, len(groups), identityErr)
+			}
+			return fmt.Errorf("release test group %d/%d identity changed; refusing receipt reuse", index+1, len(groups))
+		}
+		if releaseBrowserSensitive(group) {
+			fmt.Println("release test group browser/visual: rerunning; receipt reuse disabled")
+		} else if loadReleaseGroupReceipt(receipts, identity, group) {
+			fmt.Printf("release test group %d/%d: cached exact-identity receipt\n", index+1, len(groups))
+			continue
+		}
 		if err := runReleaseTestCommand(ctx, "go", releaseGroupArgs(group), group.Tests); err != nil {
 			return fmt.Errorf("release test group %d/%d: %w", index+1, len(groups), err)
 		}
+		// An interrupted group reaches neither this line nor the receipt write.
+		if !releaseBrowserSensitive(group) {
+			current, identityErr = releaseReceiptIdentityFor(ctx, groups)
+			if identityErr != nil || current != identity {
+				if identityErr != nil {
+					return fmt.Errorf("release test group %d/%d final identity: %w", index+1, len(groups), identityErr)
+				}
+				return fmt.Errorf("release test group %d/%d changed source or runtime; refusing receipt", index+1, len(groups))
+			}
+			if err := saveReleaseGroupReceipt(ctx, receipts, identity, group); err != nil {
+				return fmt.Errorf("record release test group %d/%d: %w", index+1, len(groups), err)
+			}
+		}
+	}
+	current, identityErr := releaseReceiptIdentityFor(ctx, groups)
+	if identityErr != nil || current != identity {
+		if identityErr != nil {
+			return fmt.Errorf("release test final identity: %w", identityErr)
+		}
+		return errors.New("release test final identity changed")
 	}
 	return nil
 }

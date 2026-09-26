@@ -15,11 +15,11 @@ func TestReleaseTestGroupsCoverInventoryExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) != 3 || len(groups[0].Tests) != 0 || len(groups[0].Packages) != 2 {
+	if len(groups) != 4 || len(groups[0].Tests) != 0 || len(groups[0].Packages) != 1 || len(groups[1].Tests) != 0 || len(groups[1].Packages) != 1 {
 		t.Fatalf("unexpected plan: %+v", groups)
 	}
 	seen := map[string]int{}
-	for _, group := range groups[1:] {
+	for _, group := range groups[2:] {
 		if len(group.Tests) != 2 || len(group.Packages) != 1 || group.Packages[0] != engine {
 			t.Fatalf("invalid bounded integration group: %+v", group)
 		}

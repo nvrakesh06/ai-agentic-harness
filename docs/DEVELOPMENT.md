@@ -28,15 +28,19 @@ integration fixtures keep their own shorter context deadlines.
 Run native tests on macOS before claiming macOS runtime validation.
 
 The release runner discovers all packages and the complete native engine test
-inventory. It runs ordinary packages serially, then every engine test in serial
-groups of at most sixteen top-level tests. Subtests and fuzz seed cases remain
-included. Each group keeps the fifteen-minute deadline, uncached execution and
-fail-fast behavior. A missing terminal pass/skip event fails the gate, even if
-the process exits successfully. `dist/test-inventory.json` records planned
-coverage and reference Git identities, with an explicit dirty-worktree flag;
-it does not mean unexecuted groups passed or that uncommitted edits match the
-reference tree. Grouping avoids losing the
-tail of a growing Windows integration suite to a package-wide aggregate timeout.
+inventory. It runs ordinary packages individually, then every engine test in
+serial groups of at most four top-level tests. Subtests and fuzz seed cases
+remain included. Each group keeps the fifteen-minute deadline, uncached
+execution and fail-fast behavior. A missing terminal pass/skip event fails the
+gate, even if the process exits successfully. `dist/test-inventory.json`
+records planned coverage and reference Git identities. Completed non-browser
+groups also receive local, hashed receipts only after their full inventory
+passes. A resumed gate reuses those receipts only for the same clean HEAD/tree,
+inventory, toolchains, fixed test environment, and runner resources; missing,
+malformed, dirty, or mismatched receipts rerun. Browser, Playwright, and native
+visual groups always rerun. Vet, cross-builds, and checksums never reuse test
+receipts. Grouping avoids losing the tail of a growing Windows integration suite
+to a package-wide aggregate timeout.
 
 ## Application configuration
 
