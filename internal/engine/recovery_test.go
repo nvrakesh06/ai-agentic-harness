@@ -69,7 +69,10 @@ func TestPartialGraphRecoversWithoutLocalProject(t *testing.T) {
 	states := []model.State{model.Done, model.Running, model.Review, model.Blocked, model.Ready}
 	for i, state := range states {
 		id := string(rune('a' + i))
-		task := &model.Task{ID: id, ObjectiveID: "objective", Title: id, State: state, HeadSHA: base, Branch: "aih/" + id, FixCycles: map[string]int{}}
+		// This fixture exercises ordinary interrupted-task recovery, not the
+		// legacy fail-closed route below. Seed the same immutable README boundary
+		// each recovered worktree actually contains.
+		task := &model.Task{ID: id, ObjectiveID: "objective", Title: id, Areas: []string{"README.md"}, AssignedAreas: []string{"README.md"}, AssignedAreaKinds: map[string]string{"README.md": model.AreaFile}, State: state, BaseSHA: base, HeadSHA: base, Branch: "aih/" + id, FixCycles: map[string]int{}}
 		if state == model.Blocked {
 			model.Block(task, "Choose", "decision", model.Ready)
 		}
@@ -278,20 +281,22 @@ func TestDeadlineCheckpointAndHandoffRecoverTogetherAfterMachineLoss(t *testing.
 	}
 	snapshot.Objectives["deadline-objective"] = &model.Objective{ID: "deadline-objective", Text: "recover timeout work", Planned: true}
 	snapshot.Tasks["deadline"] = &model.Task{
-		ID:          "deadline",
-		ObjectiveID: "deadline-objective",
-		Title:       "deadline",
-		Objective:   "Write recovered.txt and preserve it across the deadline.",
-		Acceptance:  []string{"recovered.txt is durable"},
-		Areas:       []string{"recovered.txt"},
-		Domains:     []string{"deadline-fixture"},
-		Risk:        "low",
-		State:       model.Ready,
-		Branch:      "aih/deadline",
-		BaseSHA:     base,
-		HeadSHA:     base,
-		Rotations:   23,
-		FixCycles:   map[string]int{},
+		ID:                "deadline",
+		ObjectiveID:       "deadline-objective",
+		Title:             "deadline",
+		Objective:         "Write recovered.txt and preserve it across the deadline.",
+		Acceptance:        []string{"recovered.txt is durable"},
+		Areas:             []string{"recovered.txt"},
+		AssignedAreas:     []string{"recovered.txt"},
+		AssignedAreaKinds: map[string]string{"recovered.txt": model.AreaFile},
+		Domains:           []string{"deadline-fixture"},
+		Risk:              "low",
+		State:             model.Ready,
+		Branch:            "aih/deadline",
+		BaseSHA:           base,
+		HeadSHA:           base,
+		Rotations:         23,
+		FixCycles:         map[string]int{},
 	}
 	nextState, err := f.P.Git.StateCommit(ctx, stateHead, snapshot)
 	if err != nil {

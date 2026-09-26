@@ -101,7 +101,7 @@ func TestPreflightEvidenceLoopAdmitsOneFixWithoutRepeatingDesigner(t *testing.T)
 		t.Fatal(err)
 	}
 	base := effective.BaseSHA
-	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: base}
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, AssignedAreas: []string{"src/labels.tsx"}, AssignedAreaKinds: map[string]string{"src/labels.tsx": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: base}
 	s.Tasks[task.ID] = task
 	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, base); err != nil {
 		t.Fatal(err)
@@ -159,7 +159,7 @@ func TestPreflightEvidenceLoopBlocksProductDecisionWithoutImplementer(t *testing
 		t.Fatal(err)
 	}
 	base := effective.BaseSHA
-	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Fix, Branch: "aih/ui", BaseSHA: base, HeadSHA: base, Attempts: 1}
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, AssignedAreas: []string{"src/labels.tsx"}, AssignedAreaKinds: map[string]string{"src/labels.tsx": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Fix, Branch: "aih/ui", BaseSHA: base, HeadSHA: base, Attempts: 1}
 	s.Tasks[task.ID] = task
 	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, base); err != nil {
 		t.Fatal(err)
@@ -232,7 +232,7 @@ func TestRecoveredCompletedDesignerIsNotRunAgain(t *testing.T) {
 	}
 	base := effective.BaseSHA
 	s.Tasks["ui"] = &model.Task{ID: "ui", Title: "ui", Objective: "Fixture UI", Acceptance: []string{"works"},
-		Areas: []string{"ui"}, Domains: []string{"ui"}, Risk: "low", UI: true,
+		Areas: []string{"ui"}, AssignedAreas: []string{"ui"}, AssignedAreaKinds: map[string]string{"ui": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true,
 		State: model.Ready, Branch: "aih/ui", BaseSHA: base, HeadSHA: base,
 		Preflight: &model.Preflight{Phase: "waiting", BaseSHA: base, HeadSHA: base,
 			Config: effective.Hash, Rules: roles.Hash(), Completed: []string{"designer"}}}
@@ -360,7 +360,7 @@ func TestImplementerCheckpointContinuesWithoutRepeatingPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: effective.BaseSHA}
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"checkpoint-continuation.txt"}, AssignedAreas: []string{"checkpoint-continuation.txt"}, AssignedAreaKinds: map[string]string{"checkpoint-continuation.txt": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: effective.BaseSHA}
 	s.Tasks[task.ID] = task
 	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, effective.BaseSHA); err != nil {
 		t.Fatal(err)
@@ -413,7 +413,7 @@ func TestRecoveredDeadlineCheckpointContinuesWithoutRepeatingPreflight(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: effective.BaseSHA}
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"checkpoint-continuation.txt"}, AssignedAreas: []string{"checkpoint-continuation.txt"}, AssignedAreaKinds: map[string]string{"checkpoint-continuation.txt": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: effective.BaseSHA}
 	s.Tasks[task.ID] = task
 	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, effective.BaseSHA); err != nil {
 		t.Fatal(err)

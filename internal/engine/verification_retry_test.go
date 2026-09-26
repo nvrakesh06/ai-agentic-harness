@@ -33,7 +33,9 @@ func seedReadyTask(t *testing.T, ctx context.Context, f *demo.Fixture, title str
 	snapshot.Tasks[title] = &model.Task{
 		ID: title, ObjectiveID: "objective", Issue: 1, Title: title,
 		Objective: "Create the fixture and verify it", Acceptance: []string{"fixture exists"},
-		Areas: []string{title}, Domains: []string{title}, Risk: "low", State: model.Ready,
+		// demo.Worker writes feature-<title>.txt. This remains an unstarted
+		// fixture so normal canonical hydration classifies the explicit file.
+		Areas: []string{"feature-" + title + ".txt"}, Domains: []string{title}, Risk: "low", State: model.Ready,
 		Branch: "aih/" + title, FixCycles: map[string]int{},
 	}
 	next, err := f.P.Git.StateCommit(ctx, head, snapshot)
