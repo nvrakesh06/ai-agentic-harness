@@ -93,6 +93,31 @@ func TestReplanContractPreservesRiskRolesAndDependencies(t *testing.T) {
 	}
 }
 
+func TestReplanContractCollapsesInternalDependenciesAndPreservesKnownScope(t *testing.T) {
+	request := validReplanRequest()
+	request.Originals = append(request.Originals, ReplanOriginal{TaskID: "queued", State: model.Ready})
+	request.Replacement.Dependencies = []string{"external"}
+	started := &model.Task{ID: "old", Objective: "repair", Dependencies: []string{"queued", "external"}, Areas: []string{"legacy/known.go"}, AssignedAreas: []string{"legacy/known.go"}, AssignedAreaKinds: map[string]string{"legacy/known.go": model.AreaFile}, Risk: "medium"}
+	queued := &model.Task{ID: "queued", Objective: "repair", Dependencies: []string{"old", "external"}, Areas: []string{"(new)"}, Risk: "low"}
+	next, err := mergeReplanContract(request, []*model.Task{started, queued})
+	if err != nil || strings.Join(next.Dependencies, ",") != "external" || !containsReplanArea(next.Areas, "legacy/known.go") || containsReplanArea(next.Areas, "(new)") {
+		t.Fatalf("replacement did not retain external prerequisites and known scope only: %#v err=%v", next, err)
+	}
+	request.Replacement.Dependencies = []string{"old"}
+	if _, err = mergeReplanContract(request, []*model.Task{started, queued}); err == nil {
+		t.Fatal("explicit dependency on superseded original accepted")
+	}
+}
+
+func containsReplanArea(areas []string, want string) bool {
+	for _, area := range areas {
+		if area == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestReplanDependencyCycleFailsClosed(t *testing.T) {
 	s := model.NewSnapshot("project123")
 	s.Tasks["a"] = &model.Task{ID: "a", Dependencies: []string{"replacement"}}
