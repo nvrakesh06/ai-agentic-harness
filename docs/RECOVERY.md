@@ -110,8 +110,13 @@ remain blocked; other unmerged recovered tasks return to `READY` and must comple
 fresh preflight and verification. Reuse the same command ID only for an
 idempotent retry.
 
-Historical planned-reference restoration is intentionally future work. This
-phase records explicit operator authorization only.
+A manifest may instead declare both `base_sha` and `head_sha` as empty for a
+strictly proven never-started `PLANNED` or `READY` task. Both fields must be
+empty together. AIH then requires no durable lifecycle or history, no prior
+assignment, no remote task branch, and no retained task worktree; it still
+classifies the new areas at the canonical base and applies the same ownership,
+dependency, and cycle checks. This authorizes a new immutable contract only;
+it does not restore or infer a historical checkpoint.
 
 ## Network or permission failures
 
