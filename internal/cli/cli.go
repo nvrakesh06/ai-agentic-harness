@@ -610,6 +610,7 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		supervisorBuild.StateSchema != invokedBuild.StateSchema ||
 		(supervisorBuild.Commit != "" && invokedBuild.Commit != "" &&
 			(supervisorBuild.Commit != invokedBuild.Commit || supervisorBuild.Dirty != invokedBuild.Dirty)))
+	persistenceProfile := engine.LocalPersistenceProfile(p.DB)
 	if asJSON {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -619,17 +620,18 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		}
 		return enc.Encode(struct {
 			*model.Snapshot
-			MachineMaxHeavyChecks int                      `json:"machine_max_heavy_checks"`
-			LocalSupervisorActive bool                     `json:"local_supervisor_active"`
-			LocalActiveWriters    int                      `json:"local_active_writers"`
-			LocalActiveReaders    int                      `json:"local_active_readers"`
-			LocalActivePreflights int                      `json:"local_active_preflights"`
-			ActiveSupervisorBuild *buildinfo.Identity      `json:"active_supervisor_build,omitempty"`
-			InvokedBinaryBuild    buildinfo.Identity       `json:"invoked_binary_build"`
-			BuildsDiffer          bool                     `json:"builds_differ"`
-			LocalSupervisorHealth *engine.SupervisorHealth `json:"local_supervisor_health,omitempty"`
-			Admission             engine.AdmissionReport   `json:"admission"`
-		}{s, machineHeavy, localActive, localCount(localActive, s.Capacity.ActiveWriters), localCount(localActive, s.Capacity.ActiveReaders), localCount(localActive, s.Capacity.ActivePreflights), supervisorBuild, invokedBuild, buildsDiffer, health, admission})
+			MachineMaxHeavyChecks   int                        `json:"machine_max_heavy_checks"`
+			LocalSupervisorActive   bool                       `json:"local_supervisor_active"`
+			LocalActiveWriters      int                        `json:"local_active_writers"`
+			LocalActiveReaders      int                        `json:"local_active_readers"`
+			LocalActivePreflights   int                        `json:"local_active_preflights"`
+			ActiveSupervisorBuild   *buildinfo.Identity        `json:"active_supervisor_build,omitempty"`
+			InvokedBinaryBuild      buildinfo.Identity         `json:"invoked_binary_build"`
+			BuildsDiffer            bool                       `json:"builds_differ"`
+			LocalSupervisorHealth   *engine.SupervisorHealth   `json:"local_supervisor_health,omitempty"`
+			Admission               engine.AdmissionReport     `json:"admission"`
+			LocalPersistenceProfile *engine.PersistenceProfile `json:"local_persistence_profile,omitempty"`
+		}{s, machineHeavy, localActive, localCount(localActive, s.Capacity.ActiveWriters), localCount(localActive, s.Capacity.ActiveReaders), localCount(localActive, s.Capacity.ActivePreflights), supervisorBuild, invokedBuild, buildsDiffer, health, admission, persistenceProfile})
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Project %s · durable revision %d (%s)\n", s.Project, s.Revision, shortSHA(h))
 	fmt.Fprintf(cmd.OutOrStdout(), "Controller: %s · durable heartbeat %s · lease expires %s\n", s.Controller.Machine, s.Controller.Heartbeat.Format(time.RFC3339), s.Controller.Expires.Format(time.RFC3339))
@@ -664,6 +666,25 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 	}
 	if message := p.DB.Get("last_error"); message != "" {
 		fmt.Fprintln(cmd.OutOrStdout(), "Last supervisor error:", message)
+	}
+	if persistenceProfile != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "Local persistence profile: %d publication sample(s); mean is total/count, no percentile estimate; opt-in profile write excluded\n", persistenceProfile.Samples)
+		for _, phase := range []struct {
+			name   string
+			timing engine.PersistencePhaseTiming
+		}{
+			{"mutex wait", persistenceProfile.MutexWait},
+			{"clone", persistenceProfile.Clone},
+			{"redact", persistenceProfile.Redact},
+			{"state commit", persistenceProfile.StateCommit},
+			{"publish", persistenceProfile.Publish},
+			{"SQLite save", persistenceProfile.SQLiteSave},
+		} {
+			if phase.timing.Count == 0 {
+				continue
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s: last %dms, mean %dms, max %dms (%d sample(s))\n", phase.name, phase.timing.LastMS, phase.timing.MeanMS(), phase.timing.MaximumMS, phase.timing.Count)
+		}
 	}
 	capacity := s.Capacity
 	fmt.Fprintf(cmd.OutOrStdout(), "Writers: %d active / %d target / %d max\n", localCount(localActive, capacity.ActiveWriters), capacity.TargetWriters, capacity.MaxWriters)

@@ -240,8 +240,17 @@ func (c *Controller) save(ctx context.Context, fn func(*model.Snapshot) error, u
 // pulses and duplicate mutations do not create remote history.
 func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error, updates ...gitx.Update) (bool, error) {
 	c.traceStage("persist: waiting for controller mutex")
+	profile := newPersistencePublicationTiming()
+	waitStarted := time.Now()
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	profile.phase("mutex_wait", waitStarted)
+	recordProfile := false
+	defer func() {
+		c.mu.Unlock()
+		if recordProfile {
+			profile.record(c.P.DB)
+		}
+	}()
 	if c.s == nil {
 		return false, ErrLease
 	}
@@ -249,7 +258,9 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 	if c.s.Controller.Owner != c.owner || !c.s.Controller.Expires.After(now) {
 		return false, ErrLease
 	}
+	cloneStarted := time.Now()
 	next := model.Clone(c.s)
+	profile.phase("clone", cloneStarted)
 	if e := fn(next); e != nil {
 		return false, e
 	}
@@ -258,9 +269,11 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 		if !due {
 			return false, nil
 		}
-		return c.renewLeaseLocked(ctx, now)
+		recordProfile = true
+		return c.renewLeaseLocked(ctx, now, profile)
 	}
 	// Keep runtime paths out of portable diagnostic/result text.
+	redactStarted := time.Now()
 	portable, e := json.Marshal(next)
 	if e != nil {
 		return false, e
@@ -268,11 +281,13 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 	if e = json.Unmarshal([]byte(c.portable(string(portable))), next); e != nil {
 		return false, e
 	}
+	profile.phase("redact", redactStarted)
 	if len(updates) == 0 && reflect.DeepEqual(c.s, next) {
 		if !due {
 			return false, nil
 		}
-		return c.renewLeaseLocked(ctx, now)
+		recordProfile = true
+		return c.renewLeaseLocked(ctx, now, profile)
 	}
 	if next.Controller.Owner == c.owner {
 		next.Controller.Heartbeat = now
@@ -281,7 +296,10 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 	model.AccountTaskTransitions(c.s, next, now)
 	next.Revision = c.s.Revision + 1
 	c.traceStage("persist: committing state")
+	recordProfile = true
+	commitStarted := time.Now()
 	newHead, e := c.P.Git.StateCommit(ctx, c.head, next)
+	profile.phase("state_commit", commitStarted)
 	if e != nil {
 		return false, e
 	}
@@ -292,9 +310,12 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 		return false, contextErr
 	}
 	defer publishCancel()
+	publishStarted := time.Now()
 	if e = c.publishUpdates(publishCtx, all); e != nil {
+		profile.phase("publish", publishStarted)
 		return false, e
 	}
+	profile.phase("publish", publishStarted)
 	for id, task := range next.Tasks {
 		if old := c.s.Tasks[id]; old == nil || old.State != task.State {
 			from := ""
@@ -307,9 +328,12 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 	c.s = next
 	c.head = newHead
 	c.traceStage("persist: saving local state")
+	saveStarted := time.Now()
 	if e = c.P.DB.Save(newHead, next); e != nil {
+		profile.phase("sqlite_save", saveStarted)
 		return true, e
 	}
+	profile.phase("sqlite_save", saveStarted)
 	_ = c.P.DB.Set(LocalLeaseHeartbeatKey, now.Format(time.RFC3339Nano))
 	c.traceStage("persist: complete")
 	return true, nil
@@ -318,12 +342,16 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 // renewLeaseLocked publishes a dedicated lease commit while c.mu is held. The
 // cached snapshot adopts the authoritative renewed lease without changing its
 // user-significant state revision.
-func (c *Controller) renewLeaseLocked(ctx context.Context, now time.Time) (bool, error) {
+func (c *Controller) renewLeaseLocked(ctx context.Context, now time.Time, profile *persistencePublicationTiming) (bool, error) {
+	cloneStarted := time.Now()
 	next := model.Clone(c.s)
+	profile.phase("clone", cloneStarted)
 	next.Controller.Heartbeat = now
 	next.Controller.Expires = now.Add(c.leaseDuration())
 	c.traceStage("lease: committing renewal")
+	commitStarted := time.Now()
 	newHead, e := c.P.Git.LeaseCommit(ctx, c.head, next)
+	profile.phase("state_commit", commitStarted)
 	if e != nil {
 		return false, e
 	}
@@ -333,15 +361,21 @@ func (c *Controller) renewLeaseLocked(ctx context.Context, now time.Time) (bool,
 		return false, contextErr
 	}
 	defer publishCancel()
+	publishStarted := time.Now()
 	if e = c.publishUpdates(publishCtx, []gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}); e != nil {
+		profile.phase("publish", publishStarted)
 		return false, e
 	}
+	profile.phase("publish", publishStarted)
 	c.s = next
 	c.head = newHead
 	c.traceStage("lease: saving local state")
+	saveStarted := time.Now()
 	if e = c.P.DB.Save(newHead, next); e != nil {
+		profile.phase("sqlite_save", saveStarted)
 		return true, e
 	}
+	profile.phase("sqlite_save", saveStarted)
 	_ = c.P.DB.Set(LocalLeaseHeartbeatKey, now.Format(time.RFC3339Nano))
 	c.traceStage("lease: complete")
 	return true, nil

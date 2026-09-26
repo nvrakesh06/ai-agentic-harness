@@ -116,6 +116,15 @@ release_repo: nvrakesh06/ai-agentic-harness
 pulse of at most 30 seconds and a remote half-life renewal from that one value;
 there is no second cadence that can be misconfigured beyond the lease expiry.
 
+Set `AIH_PERSISTENCE_PROFILE=1` before starting the supervisor to record local,
+bounded timings for each attempted state or lease publication. `aih status` and
+`aih status --json` then show mutex wait, snapshot clone/redaction, state commit,
+publication, and SQLite-save totals, last values, and maxima. Mean is
+`total/count`; the aggregate cannot establish a percentile. This profile is local
+SQLite observability only and never changes portable state, revisions, lease
+fencing, Git publication, or source updates. Its one local profile write per
+publication is intentionally outside the reported phase timings.
+
 Checks optionally declare `platforms: [windows]`, `[darwin]` or `[linux]`. At least one must
 apply. They run in the candidate worktree, with credential-like environment keys
 filtered. Output is bounded; failures are redacted before portable recording.

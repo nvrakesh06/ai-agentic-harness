@@ -39,6 +39,7 @@ func leaseTestProject(t *testing.T, ctx context.Context, root, remote, machine s
 func TestLeasePulsesCoalesceRemoteWritesAndFenceTakeover(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	t.Setenv(persistenceProfileEnv, "1")
 	root := t.TempDir()
 	remote := filepath.Join(root, "origin.git")
 	if err := os.MkdirAll(remote, 0700); err != nil {
@@ -149,6 +150,10 @@ func TestLeasePulsesCoalesceRemoteWritesAndFenceTakeover(t *testing.T) {
 	}
 	if renewed.Controller.Expires != now.Add(time.Minute) {
 		t.Fatalf("renewal expiry = %s, want %s", renewed.Controller.Expires, now.Add(time.Minute))
+	}
+	profile := LocalPersistenceProfile(a.DB)
+	if profile == nil || profile.Samples != 2 || profile.MutexWait.Count != 2 || profile.Clone.Count != 3 || profile.Redact.Count != 1 || profile.StateCommit.Count != 2 || profile.Publish.Count != 2 || profile.SQLiteSave.Count != 2 {
+		t.Fatalf("meaningful and lease publication timings = %#v", profile)
 	}
 
 	b := leaseTestProject(t, ctx, root, remote, "machine-b", project)

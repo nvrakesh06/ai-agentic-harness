@@ -446,6 +446,13 @@ func TestStatusShowsMachineReadableCapacityAndHumanReason(t *testing.T) {
 	if err = db.Save("0123456789abcdef", snapshot); err != nil {
 		t.Fatal(err)
 	}
+	profile, err := json.Marshal(engine.PersistenceProfile{Version: 1, Samples: 1, Publish: engine.PersistencePhaseTiming{Count: 1, TotalMS: 12, LastMS: 12, MaximumMS: 12}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Set(engine.LocalPersistenceProfileKey, string(profile)); err != nil {
+		t.Fatal(err)
+	}
 	p := &engine.Project{DB: db, Dir: dir}
 	var human bytes.Buffer
 	cmd := New()
@@ -453,7 +460,7 @@ func TestStatusShowsMachineReadableCapacityAndHumanReason(t *testing.T) {
 	if err = showStatus(cmd, p, false, false); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Local supervisor: stopped", "Local work is stopped", "Writers: 0 active / 2 target / 3 max", "Readers: 0 active / 4 max", "Durable in-flight snapshot: 1 writer(s), 2 reader(s), 1 preflight(s)", "Checks: 0 heavy / 1 project max / 1 machine max", "WAITING_CHECK_CAPACITY", "waiting for a verification slot", "Preflights: 0 active", "Admission (durable eligibility, not live): 0 dependency-blocked, 1 preflight-pending, 0 decision-blocked; unavailable without active reservations: active_reservations, prepared_admittable, domain_blocked", "PREFLIGHT_WAITING", "reused unchanged bounded FIX guidance", "dependencies", "Next safe work: task-b after task-a"} {
+	for _, want := range []string{"Local supervisor: stopped", "Local work is stopped", "Writers: 0 active / 2 target / 3 max", "Readers: 0 active / 4 max", "Durable in-flight snapshot: 1 writer(s), 2 reader(s), 1 preflight(s)", "Checks: 0 heavy / 1 project max / 1 machine max", "WAITING_CHECK_CAPACITY", "waiting for a verification slot", "Preflights: 0 active", "Admission (durable eligibility, not live): 0 dependency-blocked, 1 preflight-pending, 0 decision-blocked; unavailable without active reservations: active_reservations, prepared_admittable, domain_blocked", "PREFLIGHT_WAITING", "reused unchanged bounded FIX guidance", "dependencies", "Next safe work: task-b after task-a", "Local persistence profile: 1 publication sample(s)", "publish: last 12ms, mean 12ms, max 12ms (1 sample(s))"} {
 		if !strings.Contains(human.String(), want) {
 			t.Fatalf("human status omitted %q: %s", want, human.String())
 		}
@@ -463,7 +470,7 @@ func TestStatusShowsMachineReadableCapacityAndHumanReason(t *testing.T) {
 	if err = showStatus(cmd, p, false, true); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(machine.String(), `"target_active_writers": 2`) || !strings.Contains(machine.String(), `"underutilization_reason_code": "dependencies"`) || !strings.Contains(machine.String(), `"phase": "queued"`) || !strings.Contains(machine.String(), `"machine_max_heavy_checks": 1`) || !strings.Contains(machine.String(), `"local_supervisor_active": false`) || !strings.Contains(machine.String(), `"local_active_writers": 0`) || !strings.Contains(machine.String(), `"admission": {`) || !strings.Contains(machine.String(), `"availability": "durable_eligibility"`) || !strings.Contains(machine.String(), `"durable_counts": {`) || !strings.Contains(machine.String(), `"active_reservations"`) {
+	if !strings.Contains(machine.String(), `"target_active_writers": 2`) || !strings.Contains(machine.String(), `"underutilization_reason_code": "dependencies"`) || !strings.Contains(machine.String(), `"phase": "queued"`) || !strings.Contains(machine.String(), `"machine_max_heavy_checks": 1`) || !strings.Contains(machine.String(), `"local_supervisor_active": false`) || !strings.Contains(machine.String(), `"local_active_writers": 0`) || !strings.Contains(machine.String(), `"admission": {`) || !strings.Contains(machine.String(), `"availability": "durable_eligibility"`) || !strings.Contains(machine.String(), `"durable_counts": {`) || !strings.Contains(machine.String(), `"active_reservations"`) || !strings.Contains(machine.String(), `"local_persistence_profile": {`) || !strings.Contains(machine.String(), `"publish": {`) {
 		t.Fatalf("JSON status omitted capacity fields: %s", machine.String())
 	}
 }
