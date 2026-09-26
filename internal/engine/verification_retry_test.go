@@ -263,7 +263,13 @@ func TestWriterCheckpointMakesPreflightExactForMissingCapabilityContinuation(t *
 	snapshot.Tasks["writer-checkpoint"].UI = true
 	snapshot.Tasks["writer-checkpoint"].Areas = []string{"feature-writer-checkpoint.txt"}
 	task := snapshot.Tasks["writer-checkpoint"]
-	task.BaseSHA = head
+	// StateCommit uses the aih-state revision as its CAS parent, but task scope
+	// must be based on the code revision used to create the worktree.
+	base, err := f.P.Git.RemoteHead(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.BaseSHA = base
 	task.AssignedAreas = []string{"feature-writer-checkpoint.txt"}
 	task.AssignedAreaKinds = map[string]string{"feature-writer-checkpoint.txt": model.AreaFile}
 	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, "refs/remotes/origin/main"); err != nil {
