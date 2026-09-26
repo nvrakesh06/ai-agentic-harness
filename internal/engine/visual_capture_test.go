@@ -363,6 +363,12 @@ func TestCaptureVisualDoesNotRunIgnoredWriterRenderer(t *testing.T) {
 	if visual == nil || len(visual.Artifacts) != 3 {
 		t.Fatalf("full capture did not produce every target: %#v", visual)
 	}
+	evidenceDir := filepath.Join(c.P.Dir, filepath.FromSlash(filepath.Dir(visual.Manifest)))
+	for _, name := range []string{"adapter-cert.pem", "adapter-key.pem", "aih-visual-runner.mjs"} {
+		if _, err := os.Stat(filepath.Join(evidenceDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("temporary visual capture file was retained as evidence: %s (%v)", name, err)
+		}
+	}
 	if got, err := os.ReadFile(prepareMarker); err != nil || string(got) != "1" {
 		t.Fatalf("prepare did not run exactly once for multi-target capture: %q %v", got, err)
 	}
@@ -421,7 +427,7 @@ func TestNativeVisualAdapter(t *testing.T) {
 				return
 			}
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte(`<!doctype html><div id="root"></div><img src="https://outside.invalid/pixel.png"><img src="/redirect-pixel"><script>new WebSocket('ws://outside.invalid/socket')</script><script src="/api-client.ts"></script>`))
+			_, _ = w.Write([]byte(`<!doctype html><main><h1>AIH native visual capture</h1><p>loopback adapter fixture</p></main><img src="https://outside.invalid/pixel.png"><img src="/redirect-pixel"><script>new WebSocket('ws://outside.invalid/socket')</script><script src="/api-client.ts"></script>`))
 		case "/detail":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(`<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:rgb(17,34,51)}</style><main>detail state</main>`))
@@ -592,6 +598,129 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	}
 }
 
+// TestNativeVisualCaptureReattestsIdenticalTree runs the production browser
+// runner against the disposable TLS adapter. It is opt-in because it needs a
+// locally provisioned Chrome channel and the supervisor-owned Playwright
+// module; ordinary tests continue to cover the same protocol with fixtures.
+func TestNativeVisualCaptureReattestsIdenticalTree(t *testing.T) {
+	if runtime.GOOS != "windows" || os.Getenv("AIH_REAL_PLAYWRIGHT") != "1" {
+		t.Skip("real Playwright fixture runs on an explicitly provisioned Windows browser host")
+	}
+	home, err := config.Home("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := filepath.Join(home, "tools", "node_modules", "playwright")
+	t.Setenv("AIH_PLAYWRIGHT_MODULE", module)
+	module, err = fixturePlaywrightModule(home)
+	if err != nil {
+		t.Skipf("supervisor Playwright capability unavailable: %v", err)
+	}
+	t.Setenv("AIH_VISUAL_SERVER_HELPER", "1")
+
+	c, task, _, source, run := visualCheckoutFixture(t)
+	c.P.Home = home
+	targets := []config.VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 640, Height: 360}}
+	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{
+		Server:       []string{os.Args[0], "-test.run=^TestNativeVisualAdapter$"},
+		Timeout:      30,
+		Targets:      targets,
+		InputClosure: &config.VisualInputClosure{Version: 1, Runtime: "chrome-playwright", Targets: []config.VisualInputClosureTarget{{ID: "desktop"}}},
+	}}}
+	first, err := c.captureVisual(context.Background(), effective, task, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SourceHead != task.HeadSHA || first.Closure == "" || first.Runtime == "" || first.ReuseReason != "" {
+		t.Fatalf("fresh capture provenance = %#v", first)
+	}
+	firstDir := filepath.Join(c.P.Dir, filepath.FromSlash(filepath.Dir(first.Manifest)))
+	firstImage, err := os.Open(filepath.Join(firstDir, "desktop.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstConfig, _, decodeErr := image.DecodeConfig(firstImage)
+	closeErr := firstImage.Close()
+	if decodeErr != nil || closeErr != nil || firstConfig.Width != 640 || firstConfig.Height != 360 {
+		t.Fatalf("production runner did not create a 640x360 screenshot: %#v %v %v", firstConfig, decodeErr, closeErr)
+	}
+	if _, _, err = loadVisualSeal(firstDir, task.ID, task.HeadSHA, effective.Hash, targets); err != nil {
+		t.Fatalf("fresh capture was not sealed: %v", err)
+	}
+	for _, name := range []string{"adapter-cert.pem", "adapter-key.pem", "aih-visual-runner.mjs"} {
+		if _, err := os.Stat(filepath.Join(firstDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("temporary visual capture file was retained as evidence: %s (%v)", name, err)
+		}
+	}
+
+	// This changes commit identity but preserves the complete committed tree.
+	run(source, "commit", "--allow-empty", "-m", "history-only sync")
+	secondHead := run(source, "rev-parse", "HEAD")
+	run(source, "push", "control", "HEAD:refs/heads/aih/task")
+	task.HeadSHA = secondHead
+	task.Evidence = &model.Evidence{
+		Reviews: map[string]string{"designer": "review from the source head"},
+		ReviewDispositions: map[string]model.ReviewDisposition{
+			"designer": {Disposition: "completed", SourceHead: first.Head, Runtime: "native"},
+		},
+	}
+	beforeReviews, err := json.Marshal(task.Evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := c.captureVisual(context.Background(), effective, task, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Head != secondHead || second.SourceHead != first.Head || second.Closure != first.Closure || second.Runtime != first.Runtime || second.ReuseReason != "identical declared visual input closure" {
+		t.Fatalf("identical-tree reattestation provenance = %#v", second)
+	}
+	afterReviews, err := json.Marshal(task.Evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterReviews) != string(beforeReviews) {
+		t.Fatalf("artifact reattestation modified or copied review disposition: before=%s after=%s", beforeReviews, afterReviews)
+	}
+	secondDir := filepath.Join(c.P.Dir, filepath.FromSlash(filepath.Dir(second.Manifest)))
+	seal, _, err := loadVisualSeal(secondDir, task.ID, secondHead, effective.Hash, targets)
+	if err != nil || seal.Closure == nil || seal.Closure.SourceHead != first.Head || seal.Evidence.SourceHead != first.Head {
+		t.Fatalf("reattested capture did not retain source-head provenance: %#v %v", seal, err)
+	}
+	if root := os.Getenv("AIH_LIVE_VISUAL_ARTIFACT_ROOT"); root != "" {
+		destination := filepath.Join(root, "visual-evidence")
+		if err := os.CopyFS(destination, os.DirFS(filepath.Join(c.P.Dir, "visual-evidence"))); err != nil {
+			t.Fatalf("retain live visual artifacts: %v", err)
+		}
+		t.Logf("retained live visual artifacts at %s", destination)
+	}
+
+	// A tracked-file change produces a different full-tree receipt and cannot
+	// reuse the sealed screenshot, even though target/config/runtime match.
+	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("changed tree"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	run(source, "add", "tracked.txt")
+	run(source, "commit", "-m", "tracked change")
+	thirdHead := run(source, "rev-parse", "HEAD")
+	run(source, "push", "control", "HEAD:refs/heads/aih/task")
+	runtimeIdentity, err := visualRuntimeIdentity(context.Background(), module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closure, err := visualInputClosure(context.Background(), source, effective, runtimeIdentity, thirdHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdOutput := filepath.Join(c.P.Dir, "visual-evidence", task.ID, thirdHead+"-"+effective.Hash[:16])
+	if _, ok, err := c.reattestVisualEvidence(context.Background(), filepath.Join(c.P.Dir, "visual-evidence", task.ID), thirdOutput, &model.Task{ID: task.ID, HeadSHA: thirdHead}, effective, targets, closure); err != nil || ok {
+		t.Fatalf("changed full tree reused a sealed capture: ok=%t err=%v", ok, err)
+	}
+	if _, err := os.Stat(thirdOutput); !os.IsNotExist(err) {
+		t.Fatalf("changed full tree left a reattested artifact: %v", err)
+	}
+}
+
 func fixturePlaywrightModule(home string) (string, error) {
 	return playwrightModule(home)
 }
@@ -641,6 +770,17 @@ func TestVisualRunnerOwnsLoopbackAndProfilePolicy(t *testing.T) {
 		if !strings.Contains(visualRunner, want) {
 			t.Fatalf("AIH runner omitted required policy %q", want)
 		}
+	}
+}
+
+func TestVisualRuntimeProbeParsesOnNode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime-probe.mjs")
+	if err := os.WriteFile(path, []byte(visualRuntimeProbe), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("node", "--check", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("runtime probe is not valid Node syntax: %v %s", err, out)
 	}
 }
 
@@ -779,4 +919,150 @@ func TestVisualManifestRequiresEveryConfiguredTargetAndViewport(t *testing.T) {
 	if _, err := loadVisualEvidenceForTargets(dir, "task-1", head, cfg, targets); err == nil {
 		t.Fatal("mismatched screenshot dimensions accepted")
 	}
+}
+
+func TestVisualInputClosureReattestsOnlyIdenticalDeclaredInputs(t *testing.T) {
+	ctx := context.Background()
+	repo, state := t.TempDir(), t.TempDir()
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("init")
+	run("config", "user.email", "test@example.invalid")
+	run("config", "user.name", "Test")
+	for _, name := range []string{"package-lock.json", "src/loader.ts", "assets/font.woff2", "scripts/capture.mjs"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(repo, name)), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(name+"-one"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("add", ".")
+	run("commit", "-m", "first")
+	first := run("rev-parse", "HEAD")
+	targets := []config.VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 2, Height: 2}}
+	closure := &config.VisualInputClosure{Version: 1, Runtime: "chrome-1", Targets: []config.VisualInputClosureTarget{{ID: "desktop"}}}
+	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: []string{"node", "scripts/capture.mjs"}, Timeout: 10, Targets: targets, InputClosure: closure}}}
+	c := &Controller{P: &Project{Dir: state}}
+	receipt, err := visualInputClosure(ctx, repo, effective, "test-runtime", first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.SourceHead = first
+	base := filepath.Join(state, "visual-evidence", "task-closure")
+	source := filepath.Join(base, first+"-"+effective.Hash[:16])
+	if err = os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = writeVisualPNG(filepath.Join(source, "desktop.png")); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(source, "network.txt"), []byte("desktop GET 200 /"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(source, "manifest.json"), []byte(fmt.Sprintf(`{"head":%q,"summary":"clean","artifacts":["desktop.png","network.txt"],"targets":[{"id":"desktop","path":"/","width":2,"height":2,"screenshot":"desktop.png"}]}`, first)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := loadVisualEvidenceForTargets(source, "task-closure", first, effective.Hash, targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence.Closure, evidence.Runtime = receipt.Hash, receipt.Runtime
+	if err = sealVisualEvidence(source, evidence, receipt); err != nil {
+		t.Fatal(err)
+	}
+	sealPath := filepath.Join(source, "capture-seal.json")
+	originalSeal, err := os.ReadFile(sealPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mismatched visualEvidenceSeal
+	if err = json.Unmarshal(originalSeal, &mismatched); err != nil {
+		t.Fatal(err)
+	}
+	mismatched.Closure.SourceHead = strings.Repeat("a", 40)
+	corruptSeal, err := json.Marshal(mismatched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(sealPath, corruptSeal, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = loadVisualSeal(source, "task-closure", first, effective.Hash, targets); err == nil {
+		t.Fatal("seal accepted a closure receipt from a different source head")
+	}
+	if err = os.WriteFile(sealPath, originalSeal, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	commit := func(path string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, path), []byte(path+time.Now().String()), 0600); err != nil {
+			t.Fatal(err)
+		}
+		run("add", path)
+		run("commit", "-m", "change "+path)
+		return run("rev-parse", "HEAD")
+	}
+	// A routine non-closure change reattests the sealed artifact and records the
+	// old capture head instead of pretending that the manifest originated here.
+	run("commit", "--allow-empty", "-m", "sync")
+	second := run("rev-parse", "HEAD")
+	output := filepath.Join(base, second+"-"+effective.Hash[:16])
+	got, ok, err := c.reattestVisualEvidence(ctx, base, output, &model.Task{ID: "task-closure", HeadSHA: second}, effective, targets, mustVisualClosure(t, ctx, repo, effective))
+	if err != nil || !ok || got.Head != second || got.SourceHead != first || got.ReuseReason == "" {
+		t.Fatalf("identical closure was not reattested: %#v %t %v", got, ok, err)
+	}
+	for _, path := range []string{"package-lock.json", "src/loader.ts", "assets/font.woff2", "scripts/capture.mjs"} {
+		head := commit(path)
+		candidate := filepath.Join(base, head+"-"+effective.Hash[:16])
+		if _, ok, err := c.reattestVisualEvidence(ctx, base, candidate, &model.Task{ID: "task-closure", HeadSHA: head}, effective, targets, mustVisualClosure(t, ctx, repo, effective)); err != nil || ok {
+			t.Fatalf("changed closure input %s was reused: ok=%t err=%v", path, ok, err)
+		}
+	}
+	// The reviewed head is immutable even if the worktree branch advances
+	// while the browser runtime probe is running.
+	original, err := visualInputClosure(ctx, repo, effective, "test-runtime", first)
+	if err != nil || original.Hash != receipt.Hash || original.Tree != receipt.Tree {
+		t.Fatalf("closure followed moving HEAD instead of reviewed head: %#v %v", original, err)
+	}
+	changedRuntime := effective
+	changedRuntime.Project.VisualCapture = &config.VisualCapture{Server: effective.Project.VisualCapture.Server, Timeout: 10, Targets: targets, InputClosure: &config.VisualInputClosure{Version: 1, Runtime: "chrome-2", Targets: closure.Targets}}
+	if _, ok, err := c.reattestVisualEvidence(ctx, base, filepath.Join(base, "runtime"), &model.Task{ID: "task-closure", HeadSHA: run("rev-parse", "HEAD")}, changedRuntime, targets, mustVisualClosure(t, ctx, repo, changedRuntime)); err != nil || ok {
+		t.Fatalf("changed runtime identity was reused: ok=%t err=%v", ok, err)
+	}
+	if _, ok, err := c.reattestVisualEvidence(ctx, base, filepath.Join(base, "browser-runtime"), &model.Task{ID: "task-closure", HeadSHA: run("rev-parse", "HEAD")}, effective, targets, mustVisualClosureWithRuntime(t, ctx, repo, effective, "test-runtime-2")); err != nil || ok {
+		t.Fatalf("changed actual browser runtime was reused: ok=%t err=%v", ok, err)
+	}
+	changedConfig := effective
+	changedConfig.Hash = strings.Repeat("c", 64)
+	if _, ok, err := c.reattestVisualEvidence(ctx, base, filepath.Join(base, "config"), &model.Task{ID: "task-closure", HeadSHA: run("rev-parse", "HEAD")}, changedConfig, targets, mustVisualClosure(t, ctx, repo, changedConfig)); err != nil || ok {
+		t.Fatalf("changed capture configuration was reused: ok=%t err=%v", ok, err)
+	}
+}
+
+func mustVisualClosure(t *testing.T, ctx context.Context, dir string, effective config.Effective) *visualClosureReceipt {
+	t.Helper()
+	return mustVisualClosureWithRuntime(t, ctx, dir, effective, "test-runtime")
+}
+
+func mustVisualClosureWithRuntime(t *testing.T, ctx context.Context, dir string, effective config.Effective, runtime string) *visualClosureReceipt {
+	t.Helper()
+	head, err := (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closure, err := visualInputClosure(ctx, dir, effective, runtime, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return closure
 }

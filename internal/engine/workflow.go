@@ -1884,7 +1884,11 @@ func (c *Controller) verifyReview(id string) error {
 				return visualErr
 			}
 			evidence.Visual = visual
-			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_completed", "head="+t.HeadSHA+" manifest="+visual.Manifest)
+			message := "head=" + t.HeadSHA + " manifest=" + visual.Manifest
+			if visual.ReuseReason != "" {
+				message += " provenance=reattested source_head=" + visual.SourceHead + " closure=" + visual.Closure[:16]
+			}
+			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_completed", message)
 		}
 		evidence.At = time.Now().UTC()
 		if e = c.publishReviewProgress(id, evidence); e != nil {
@@ -2082,6 +2086,13 @@ func (c *Controller) prBody(t *model.Task) string {
 		}
 		for _, n := range e.Checks {
 			b.WriteString("- passed: " + n + "\n")
+		}
+		if v := e.Visual; v != nil {
+			if v.ReuseReason == "" {
+				fmt.Fprintf(&b, "- visual capture: captured at `%s`\n", v.SourceHead)
+			} else {
+				fmt.Fprintf(&b, "- visual capture: reattested for `%s` from source head `%s` via `%s` (closure `%s`)\n", v.Head, v.SourceHead, v.ReuseReason, v.Closure[:16])
+			}
 		}
 		names := []string{}
 		for n := range e.Reviews {

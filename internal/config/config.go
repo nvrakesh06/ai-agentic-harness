@@ -69,6 +69,20 @@ type VisualCapture struct {
 	Server         []string              `yaml:"server" json:"server"`
 	Timeout        int                   `yaml:"timeout_seconds" json:"timeout_seconds"`
 	Targets        []VisualCaptureTarget `yaml:"targets,omitempty" json:"targets,omitempty"`
+	// InputClosure is an explicit, versioned declaration of every tracked input
+	// needed to render each target. Omitting it keeps the conservative exact-head
+	// cache behavior; it never guesses dependencies from an adapter command.
+	InputClosure *VisualInputClosure `yaml:"input_closure,omitempty" json:"input_closure,omitempty"`
+}
+
+type VisualInputClosure struct {
+	Version int                        `yaml:"version" json:"version"`
+	Runtime string                     `yaml:"runtime_identity" json:"runtime_identity"`
+	Targets []VisualInputClosureTarget `yaml:"targets" json:"targets"`
+}
+
+type VisualInputClosureTarget struct {
+	ID string `yaml:"id" json:"id"`
 }
 
 // VisualCaptureTarget is a same-origin application route and the viewport at
@@ -358,6 +372,22 @@ func (p Project) Validate() error {
 		}
 		if len(p.VisualCapture.Targets) > maxVisualCaptureTargets {
 			return fmt.Errorf("visual_capture targets must contain at most %d entries", maxVisualCaptureTargets)
+		}
+		if closure := p.VisualCapture.InputClosure; closure != nil {
+			if closure.Version != 1 || strings.TrimSpace(closure.Runtime) == "" || len(closure.Runtime) > 160 {
+				return errors.New("visual_capture input_closure needs version 1 and a bounded runtime_identity")
+			}
+			targets := p.VisualCapture.CaptureTargets()
+			if len(closure.Targets) != len(targets) {
+				return errors.New("visual_capture input_closure must cover every capture target exactly once")
+			}
+			seenClosure := map[string]bool{}
+			for i, declared := range closure.Targets {
+				if declared.ID != targets[i].ID || seenClosure[declared.ID] {
+					return errors.New("visual_capture input_closure must cover every capture target exactly once")
+				}
+				seenClosure[declared.ID] = true
+			}
 		}
 		seen := map[string]bool{}
 		pixels := 0
