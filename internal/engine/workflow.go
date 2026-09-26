@@ -836,17 +836,6 @@ func (c *Controller) plan(id string) {
 		}
 		return
 	}
-	if o.Issue == 0 {
-		issue, e := c.P.Hub.EnsureIssue(c.ctx, id, "AIH: "+short(o.Text, 100), o.Text)
-		if e != nil {
-			c.planFailure(id, e)
-			return
-		}
-		if e = c.mutate(func(s *model.Snapshot) error { s.Objectives[id].Issue = issue; return nil }); e != nil {
-			return
-		}
-		o = c.Snapshot().Objectives[id]
-	}
 	effective, e := c.effective(c.ctx)
 	if e != nil {
 		c.planFailure(id, e)
@@ -884,6 +873,12 @@ func (c *Controller) plan(id string) {
 		c.planFailure(id, e)
 		return
 	}
+	for _, p := range r.Plan {
+		if validateErr := c.P.Git.ValidateNewPlanAreasAtRef(c.ctx, effective.BaseSHA, p.Areas); validateErr != nil {
+			c.planFailure(id, fmt.Errorf("validate planned areas for %s: %w", p.Key, validateErr))
+			return
+		}
+	}
 	all, e := roles.Load(effective.Files)
 	if e != nil {
 		c.planFailure(id, e)
@@ -905,6 +900,16 @@ func (c *Controller) plan(id string) {
 			return
 		}
 		plannedAreas[p.Key] = classified
+	}
+	if o.Issue == 0 {
+		issue, issueErr := c.P.Hub.EnsureIssue(c.ctx, id, "AIH: "+short(o.Text, 100), o.Text)
+		if issueErr != nil {
+			c.planFailure(id, issueErr)
+			return
+		}
+		if e = c.mutate(func(s *model.Snapshot) error { s.Objectives[id].Issue = issue; return nil }); e != nil {
+			return
+		}
 	}
 	e = c.mutate(func(s *model.Snapshot) error {
 		for _, p := range r.Plan {

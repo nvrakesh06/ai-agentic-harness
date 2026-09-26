@@ -107,6 +107,62 @@ func (g Git) ClassifyAreasAtRef(ctx context.Context, ref string, areas []string)
 	return classified, nil
 }
 
+// ValidateNewPlanAreasAtRef rejects planner prose that would otherwise be
+// classified as a future filename. It applies only while admitting a new plan:
+// persisted assignments retain their immutable interpretation and are never
+// rewritten or reclassified here.
+func (g Git) ValidateNewPlanAreasAtRef(ctx context.Context, ref string, areas []string) error {
+	base, err := g.SHA(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("resolve task-area base %q: %w", ref, err)
+	}
+	for _, raw := range areas {
+		pattern, _, err := canonicalArea(raw)
+		if err != nil {
+			return err
+		}
+		_, exists, err := g.baseTreeObjectType(ctx, base, pattern)
+		if err != nil {
+			return &AreaError{Area: raw, Reason: "read base tree: " + err.Error()}
+		}
+		// A tracked literal filename can contain spaces, parentheses, or words
+		// such as "and". Preserve that exact assignment rather than guessing.
+		if exists {
+			continue
+		}
+		if planAreaAnnotation(raw) {
+			return &AreaError{Area: raw, Reason: "planner annotations are not path syntax; use the literal path"}
+		}
+		if planAreaConjunction(raw) {
+			return &AreaError{Area: raw, Reason: "multiple paths or prose are not one literal path"}
+		}
+	}
+	return nil
+}
+
+func planAreaAnnotation(raw string) bool {
+	lower := strings.ToLower(raw)
+	for _, suffix := range []string{"(new)", "(reuse)", "(comments only)"} {
+		for rest := lower; ; {
+			index := strings.Index(rest, suffix)
+			if index < 0 {
+				break
+			}
+			tail := strings.TrimSpace(rest[index+len(suffix):])
+			if tail == "" || strings.HasPrefix(tail, ",") || strings.HasPrefix(tail, ";") || strings.HasPrefix(tail, "and ") || strings.HasPrefix(tail, "or ") {
+				return true
+			}
+			rest = rest[index+len(suffix):]
+		}
+	}
+	return false
+}
+
+func planAreaConjunction(raw string) bool {
+	lower := strings.ToLower(raw)
+	return strings.Contains(lower, " and ") || strings.Contains(lower, " or ")
+}
+
 // ValidateScopePaths verifies both tracked and newly-created paths against a
 // prior classification. It makes no filesystem stat calls, which avoids a
 // worker changing an on-disk path after it was classified.
