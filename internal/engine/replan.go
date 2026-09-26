@@ -625,7 +625,9 @@ func (c *Controller) acquireReplan(ctx context.Context, expectedStateRef string)
 	if s.Controller.Owner != "" && s.Controller.Expires.Add(5*time.Second).After(now) {
 		return fmt.Errorf("%w: held by %s until %s", ErrLease, s.Controller.Machine, s.Controller.Expires)
 	}
+	before := model.Clone(s)
 	s.Controller = model.Lease{Machine: c.P.Machine.ID, Owner: c.owner, Epoch: s.Controller.Epoch + 1, Heartbeat: now, Expires: now.Add(c.leaseDuration())}
+	model.AccountTaskTransitions(before, s, now)
 	s.Revision++
 	next, err := c.P.Git.StateCommit(ctx, head, s)
 	if err != nil {

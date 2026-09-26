@@ -56,6 +56,7 @@ func New() *cobra.Command {
 	root.AddCommand(&cobra.Command{Use: "version", Args: cobra.NoArgs, Run: func(cmd *cobra.Command, _ []string) {
 		fmt.Fprintf(cmd.OutOrStdout(), "AIH %s · state %d · roles %d · rules %d\n", model.Version, model.StateSchema, model.RoleSchema, model.RulesVersion)
 	}})
+	root.AddCommand(throughputCommand(o))
 	root.AddCommand(&cobra.Command{Use: "install", Short: "Initialize this machine's AIH workspace", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		_, h, e := o.paths()
 		if e != nil {

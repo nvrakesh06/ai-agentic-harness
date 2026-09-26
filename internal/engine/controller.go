@@ -45,21 +45,33 @@ const (
 )
 
 type Controller struct {
-	P                *Project
-	mu               sync.Mutex
-	gitMu            sync.Mutex
-	s                *model.Snapshot
-	head, owner      string
-	ctx              context.Context
-	cancel           context.CancelFunc
-	fatal            chan error
-	readers          chan struct{}
-	heavyChecks      chan struct{}
-	lightChecks      chan struct{}
-	jobs             sync.WaitGroup
-	now              func() time.Time
-	publish          func(context.Context, []gitx.Update) error
-	commandEffective func(context.Context) (config.Effective, error)
+	P                    *Project
+	mu                   sync.Mutex
+	gitMu                sync.Mutex
+	s                    *model.Snapshot
+	head, owner          string
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	fatal                chan error
+	readers              chan struct{}
+	heavyChecks          chan struct{}
+	lightChecks          chan struct{}
+	jobs                 sync.WaitGroup
+	now                  func() time.Time
+	publish              func(context.Context, []gitx.Update) error
+	commandEffective     func(context.Context) (config.Effective, error)
+	interruptedDurations map[string]int64
+}
+
+// Preserve observed invocation exits until orderly shutdown can publish them
+// with the released lease. This local buffer grants no publication authority.
+func (c *Controller) recordInterruptedDuration(id string, duration int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.interruptedDurations == nil {
+		c.interruptedDurations = map[string]int64{}
+	}
+	c.interruptedDurations[id] = duration
 }
 
 func New(p *Project) *Controller {
@@ -140,8 +152,15 @@ func (c *Controller) acquire(ctx context.Context) error {
 	if s.Controller.Owner != "" && s.Controller.Expires.Add(5*time.Second).After(now) {
 		return fmt.Errorf("%w: held by %s until %s", ErrLease, s.Controller.Machine, s.Controller.Expires)
 	}
+	before := model.Clone(s)
+	interruptedAt := now
+	if s.Controller.Owner != "" && s.Controller.Expires.Before(interruptedAt) {
+		interruptedAt = s.Controller.Expires
+	}
+	model.FinalizeInterruptedRuns(s, interruptedAt, true)
 	s.Controller = model.Lease{Machine: c.P.Machine.ID, Owner: c.owner, Epoch: s.Controller.Epoch + 1, Heartbeat: now, Expires: now.Add(c.leaseDuration())}
 	s.Capacity = configuredCapacity(c.P.Config.Project, s.Capacity)
+	model.AccountTaskTransitions(before, s, now)
 	s.Revision++
 	next, e := c.P.Git.StateCommit(ctx, h, s)
 	if e != nil {
@@ -259,6 +278,7 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 		next.Controller.Heartbeat = now
 		next.Controller.Expires = now.Add(c.leaseDuration())
 	}
+	model.AccountTaskTransitions(c.s, next, now)
 	next.Revision = c.s.Revision + 1
 	c.traceStage("persist: committing state")
 	newHead, e := c.P.Git.StateCommit(ctx, c.head, next)
@@ -582,6 +602,7 @@ func (c *Controller) Serve(parent context.Context) error {
 	}
 	c.cancel()
 	c.jobs.Wait()
+	workersStoppedAt := c.nowUTC()
 	// Shutdown checkpoints only after all writers exited. If authority was lost,
 	// leave edits local and report them; never publish using a stale epoch.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -604,6 +625,14 @@ func (c *Controller) Serve(parent context.Context) error {
 		hbCancel()
 		<-hbDone
 		e = c.save(ctx, func(s *model.Snapshot) error {
+			model.FinalizeInterruptedRuns(s, workersStoppedAt, true)
+			for i := range s.Runs {
+				if duration, observed := c.interruptedDurations[s.Runs[i].ID]; observed && s.Runs[i].Outcome == "interrupted" {
+					s.Runs[i].DurationMS = duration
+					s.Runs[i].DurationRecorded = true
+					s.Runs[i].DurationEstimated = false
+				}
+			}
 			s.Controller.Owner = ""
 			s.Controller.Expires = time.Now().UTC()
 			s.Capacity.ActiveWriters = 0

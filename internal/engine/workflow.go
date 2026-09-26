@@ -395,7 +395,21 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 		if t != nil {
 			s.Tasks[t.ID].RunID = id
 		}
-		s.Runs = append(s.Runs, model.Run{ID: id, Task: taskID, Role: r.Name, Provider: e.Project.Provider, Capability: resolved.Capability, EffectiveModel: resolved.EffectiveModel, Version: model.Version, RulesHash: roles.Hash(), Started: started, Epoch: s.Controller.Epoch, Outcome: "running"})
+		head, stage := "", r.Stage
+		var state model.State
+		if t != nil {
+			current := s.Tasks[t.ID]
+			head, state = current.HeadSHA, current.State
+			if r.Name != "implementer" && current.Preflight != nil && (state == model.Ready || state == model.Fix) {
+				stage = "pre-implementation"
+			}
+			if r.Name != "implementer" {
+				if ref, err := readOnlyCheckoutRef(current, e, explicitReadRef); err == nil {
+					head = ref
+				}
+			}
+		}
+		s.Runs = append(s.Runs, model.Run{ID: id, Task: taskID, Role: r.Name, Provider: e.Project.Provider, Capability: resolved.Capability, EffectiveModel: resolved.EffectiveModel, Version: model.Version, RulesHash: roles.Hash(), Started: started, Epoch: s.Controller.Epoch, Outcome: "running", Context: &model.RunContext{Base: e.BaseSHA, Head: head, Policy: e.Hash, Rules: roles.Hash(), Stage: stage, TaskState: state}})
 		return nil
 	}); err != nil {
 		return provider.Result{}, err
@@ -489,6 +503,9 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 	if err != nil {
 		outcome = "failed"
 	}
+	if ctx.Err() != nil {
+		c.recordInterruptedDuration(id, time.Since(started).Milliseconds())
+	}
 	if ctx.Err() == nil {
 		saveErr := c.mutate(func(s *model.Snapshot) error {
 			// A failed provider call has no durable acceptance acknowledgement, so
@@ -500,6 +517,7 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 			for i := range s.Runs {
 				if s.Runs[i].ID == id {
 					s.Runs[i].DurationMS = time.Since(started).Milliseconds()
+					s.Runs[i].DurationRecorded = true
 					s.Runs[i].Outcome = outcome
 				}
 			}
