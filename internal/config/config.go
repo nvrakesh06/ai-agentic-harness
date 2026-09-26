@@ -32,6 +32,7 @@ type Project struct {
 	VisualCapture  *VisualCapture    `yaml:"visual_capture,omitempty" json:"visual_capture,omitempty"`
 	ReviewReuse    ReviewReuse       `yaml:"review_reuse,omitempty" json:"review_reuse,omitempty"`
 	WorkerSeconds  int               `yaml:"worker_timeout_seconds" json:"worker_timeout_seconds"`
+	RoleTimeouts   *RoleTimeouts     `yaml:"role_timeouts_seconds,omitempty" json:"role_timeouts_seconds,omitempty"`
 	LeaseSeconds   int               `yaml:"lease_seconds" json:"lease_seconds"`
 	ReleaseRepo    string            `yaml:"release_repo" json:"release_repo"`
 	Scheduling     Scheduling        `yaml:"scheduling" json:"scheduling"`
@@ -40,6 +41,16 @@ type Scheduling struct {
 	TargetWriters                int    `yaml:"target_active_writers" json:"target_active_writers"`
 	UnderutilizationGraceSeconds int    `yaml:"underutilization_grace_seconds" json:"underutilization_grace_seconds"`
 	BacklogSource                string `yaml:"backlog_source" json:"backlog_source"`
+}
+
+// RoleTimeouts bounds read-only provider work separately from the implementer
+// checkpoint budget. Zero retains worker_timeout_seconds for compatibility.
+// The fields deliberately follow the three role stages AIH owns; custom roles
+// inherit their stage's bound instead of adding a second policy language.
+type RoleTimeouts struct {
+	Planning  int `yaml:"planning,omitempty" json:"planning,omitempty"`
+	Preflight int `yaml:"preflight,omitempty" json:"preflight,omitempty"`
+	Review    int `yaml:"review,omitempty" json:"review,omitempty"`
 }
 type Resources struct {
 	MaxHeavyChecks int `yaml:"max_heavy_checks" json:"max_heavy_checks"`
@@ -178,6 +189,26 @@ func (p Project) ResolveModel(role, fallback string) ModelResolution {
 		return ModelResolution{Capability: capability, EffectiveModel: requested, RequestModel: requested}
 	}
 	return ModelResolution{Capability: capability, EffectiveModel: ProviderDefaultModel}
+}
+
+// RoleTimeout returns the configured stage bound, falling back to the legacy
+// worker timeout when a project has not opted into a read-only-specific value.
+func (p Project) RoleTimeout(stage string) int {
+	var configured int
+	if p.RoleTimeouts != nil {
+		switch stage {
+		case "planning":
+			configured = p.RoleTimeouts.Planning
+		case "pre-implementation":
+			configured = p.RoleTimeouts.Preflight
+		case "review":
+			configured = p.RoleTimeouts.Review
+		}
+	}
+	if configured != 0 {
+		return configured
+	}
+	return p.WorkerSeconds
 }
 
 // ModelMappingWarnings identifies every configured role whose provider model is
@@ -327,6 +358,13 @@ func (p Project) Validate() error {
 	}
 	if p.WorkerSeconds < 10 || p.LeaseSeconds < 60 {
 		return errors.New("worker timeout must be >=10s and lease >=60s")
+	}
+	if p.RoleTimeouts != nil {
+		for _, budget := range []int{p.RoleTimeouts.Planning, p.RoleTimeouts.Preflight, p.RoleTimeouts.Review} {
+			if budget != 0 && (budget < 10 || budget > p.WorkerSeconds) {
+				return errors.New("role timeout must be 0 or between 10s and worker_timeout_seconds")
+			}
+		}
 	}
 	if len(p.ReviewReuse.SecurityDataOnlyPaths) > 8 {
 		return errors.New("review_reuse may declare at most 8 data-only paths")
