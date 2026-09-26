@@ -108,6 +108,10 @@ func (p *providerHoldPeerWaveProvider) Run(ctx context.Context, request provider
 		// Keep the reservation occupied while the other independent role starts
 		// and waits on MaxReaders. This tests the post-reservation hold check,
 		// not just the scheduler's next tick.
+		// runReviewAttempt launches both independent roles concurrently, but this
+		// fixture intentionally has no controller-internal semaphore probe. The
+		// 200ms reservation window gives that peer a scheduling opportunity;
+		// the one-call assertion is the only behavioral boundary available here.
 		select {
 		case <-time.After(200 * time.Millisecond):
 		case <-ctx.Done():
@@ -283,9 +287,9 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 }
 
 func TestProviderAdmissionHoldRechecksQueuedReviewPeerAfterReaderReservation(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	setupCtx, cancelSetup := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancelSetup()
+	f, err := demo.New(setupCtx, t.TempDir(), []string{"git", "diff", "--exit-code"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,32 +298,44 @@ func TestProviderAdmissionHoldRechecksQueuedReviewPeerAfterReaderReservation(t *
 	// wave to one reader so security queues behind the initial reviewer.
 	f.P.Config.Project.MaxReaders = 1
 	f.Project.MaxReaders = 1
-	configureFixtureRoleTimeouts(t, ctx, f, config.RoleTimeouts{})
-	seedReadyTask(t, ctx, f, "held-peer-wave")
-	snapshot, stateHead, err := f.P.Git.Load(ctx)
+	configureFixtureRoleTimeouts(t, setupCtx, f, config.RoleTimeouts{})
+	seedReadyTask(t, setupCtx, f, "held-peer-wave")
+	snapshot, stateHead, err := f.P.Git.Load(setupCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	snapshot.Tasks["held-peer-wave"].Risk = "high"
-	next, err := f.P.Git.StateCommit(ctx, stateHead, snapshot)
+	next, err := f.P.Git.StateCommit(setupCtx, stateHead, snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateHead, New: next}}); err != nil {
+	if err = f.P.Git.Publish(setupCtx, []gitx.Update{{Branch: "aih-state", Old: stateHead, New: next}}); err != nil {
 		t.Fatal(err)
 	}
+	cancelSetup()
+	workflowCtx, cancelWorkflow := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancelWorkflow()
 	workers := &providerHoldPeerWaveProvider{firstReader: make(chan struct{})}
 	f.P.Provider = workers
-	done := make(chan error, 1)
-	go func() { done <- engine.New(f.P).Serve(ctx) }()
+	supervisor := newFixtureSupervisor(workflowCtx, f.P)
+	drained := false
+	defer func() {
+		if drained {
+			return
+		}
+		if drainErr := supervisor.drain("queued provider admission review fixture cleanup"); drainErr != nil {
+			t.Errorf("queued provider admission review fixture supervisor drain: %v", drainErr)
+		}
+	}()
 	select {
 	case <-workers.firstReader:
-	case serveErr := <-done:
-		t.Fatalf("supervisor stopped before first independent reader rejection: %v", serveErr)
-	case <-time.After(30 * time.Second):
-		t.Fatal("reviewer/security wave did not start")
+	case <-supervisor.completion():
+		drained = true
+		t.Fatalf("supervisor stopped before first independent reader rejection: %v", supervisor.completedResult())
+	case <-workflowCtx.Done():
+		t.Fatalf("reviewer/security wave did not start within bounded workflow budget: %v", workflowCtx.Err())
 	}
-	_ = waitProviderAdmissionHold(t, ctx, f)
+	_ = waitProviderAdmissionHold(t, workflowCtx, f)
 	// Let a few scheduling ticks run after the hold. A role that passed the
 	// pre-semaphore check must still be suppressed after it receives the slot.
 	time.Sleep(250 * time.Millisecond)
@@ -332,7 +348,9 @@ func TestProviderAdmissionHoldRechecksQueuedReviewPeerAfterReaderReservation(t *
 	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
 		t.Fatal(err)
 	}
-	if err = <-done; err != nil {
+	err = supervisor.waitHandoff("queued provider admission review fixture handoff")
+	drained = true
+	if err != nil {
 		t.Fatal(err)
 	}
 }

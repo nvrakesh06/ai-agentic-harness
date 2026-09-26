@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/demo"
-	"github.com/nvrakesh06/ai-agentic-harness/internal/engine"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"gopkg.in/yaml.v3"
@@ -55,6 +54,7 @@ func waitProviderAdmissionHold(t *testing.T, ctx context.Context, f *demo.Fixtur
 
 func TestProviderAdmissionHoldSuppressesWriterAndRestartWithoutBudgets(t *testing.T) {
 	setupCtx, cancelSetup := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancelSetup()
 	f, err := demo.New(setupCtx, t.TempDir(), []string{"git", "diff", "--exit-code"})
 	if err != nil {
 		t.Fatal(err)
@@ -68,18 +68,14 @@ func TestProviderAdmissionHoldSuppressesWriterAndRestartWithoutBudgets(t *testin
 
 	firstCtx, cancelFirst := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancelFirst()
-	firstDone := make(chan error, 1)
-	go func() { firstDone <- engine.New(f.P).Serve(firstCtx) }()
-	firstStopped := false
+	firstSupervisor := newFixtureSupervisor(firstCtx, f.P)
+	firstDrained := false
 	defer func() {
-		if firstStopped {
+		if firstDrained {
 			return
 		}
-		_ = f.P.DB.Submit(storeCommand("handoff"))
-		select {
-		case <-firstDone:
-		case <-time.After(10 * time.Second):
-			t.Error("first provider-admission fixture supervisor did not drain")
+		if drainErr := firstSupervisor.drain("provider admission first phase"); drainErr != nil {
+			t.Errorf("first provider-admission fixture supervisor drain: %v", drainErr)
 		}
 	}()
 	s := waitProviderAdmissionHold(t, firstCtx, f)
@@ -103,30 +99,22 @@ func TestProviderAdmissionHoldSuppressesWriterAndRestartWithoutBudgets(t *testin
 	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err = <-firstDone:
-		firstStopped = true
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-firstCtx.Done():
-		t.Fatalf("first provider-admission fixture phase did not hand off: %v", firstCtx.Err())
+	err = firstSupervisor.waitHandoff("provider admission first phase")
+	firstDrained = true
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancelSecond()
-	secondDone := make(chan error, 1)
-	go func() { secondDone <- engine.New(f.P).Serve(secondCtx) }()
-	secondStopped := false
+	secondSupervisor := newFixtureSupervisor(secondCtx, f.P)
+	secondDrained := false
 	defer func() {
-		if secondStopped {
+		if secondDrained {
 			return
 		}
-		_ = f.P.DB.Submit(storeCommand("handoff"))
-		select {
-		case <-secondDone:
-		case <-time.After(10 * time.Second):
-			t.Error("restart provider-admission fixture supervisor did not drain")
+		if drainErr := secondSupervisor.drain("provider admission restart phase"); drainErr != nil {
+			t.Errorf("restart provider-admission fixture supervisor drain: %v", drainErr)
 		}
 	}()
 	time.Sleep(1200 * time.Millisecond)
@@ -139,14 +127,10 @@ func TestProviderAdmissionHoldSuppressesWriterAndRestartWithoutBudgets(t *testin
 	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err = <-secondDone:
-		secondStopped = true
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-secondCtx.Done():
-		t.Fatalf("restart provider-admission fixture phase did not hand off: %v", secondCtx.Err())
+	err = secondSupervisor.waitHandoff("provider admission restart phase")
+	secondDrained = true
+	if err != nil {
+		t.Fatal(err)
 	}
 	if s, _, loadErr := f.P.DB.Load(); loadErr != nil || len(s.ProviderAdmissionHolds) != 1 {
 		t.Fatalf("restart lost portable hold: holds=%#v err=%v", s.ProviderAdmissionHolds, loadErr)
