@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -223,6 +225,33 @@ func TestCapacitySnapshotMatchesFullCloneEmptyCollections(t *testing.T) {
 	if !reflect.DeepEqual(got, want) || got.Verification != nil || got.Transitions != nil {
 		t.Fatalf("capacity empty collection normalization = %#v, full clone = %#v", got, want)
 	}
+}
+
+func TestCapacitySnapshotSerializesConcurrentCapacityMutation(t *testing.T) {
+	snapshot, _, _ := capacityFixture()
+	snapshot.Capacity.Verification = []model.VerificationCheck{{Check: "0"}}
+	snapshot.Capacity.Transitions = []model.CapacityTransition{{Objective: "0"}}
+	controller := &Controller{s: snapshot}
+	const mutations = 500
+	var writer sync.WaitGroup
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		for index := 1; index <= mutations; index++ {
+			value := strconv.Itoa(index)
+			controller.mu.Lock()
+			controller.s.Capacity.Verification = []model.VerificationCheck{{Check: value}}
+			controller.s.Capacity.Transitions = []model.CapacityTransition{{Objective: value}}
+			controller.mu.Unlock()
+		}
+	}()
+	for index := 0; index < mutations; index++ {
+		capacity := controller.capacitySnapshot()
+		if len(capacity.Verification) != 1 || len(capacity.Transitions) != 1 || capacity.Verification[0].Check != capacity.Transitions[0].Objective {
+			t.Fatalf("capacity snapshot observed a torn mutation: %#v", capacity)
+		}
+	}
+	writer.Wait()
 }
 
 func BenchmarkCapacitySnapshotCopy(b *testing.B) {
