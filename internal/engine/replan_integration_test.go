@@ -287,7 +287,8 @@ func replanFixture(t *testing.T, ctx context.Context) (*demo.Fixture, engine.Rep
 	// This accepted plan has never received a worktree, source ref, worker
 	// attempt, or approval. It is superseded with its started siblings but does
 	// not contribute a source checkpoint to replay.
-	s.Tasks["queued"] = &model.Task{ID: "queued", ObjectiveID: "batch", Title: "queued", Objective: "fixture", Acceptance: []string{"done"}, Areas: []string{"feature-queued.txt"}, AssignedAreas: []string{"feature-queued.txt"}, AssignedAreaKinds: map[string]string{"feature-queued.txt": model.AreaFile}, Domains: []string{"queued"}, Risk: "low", State: model.Ready, Branch: "aih/queued", FixCycles: map[string]int{}}
+	s.Tasks["queued"] = &model.Task{ID: "queued", ObjectiveID: "batch", Title: "queued", Objective: "fixture", Acceptance: []string{"done"}, Dependencies: []string{"alpha", "bravo", "external"}, Areas: []string{"feature-queued.txt"}, AssignedAreas: []string{"feature-queued.txt"}, AssignedAreaKinds: map[string]string{"feature-queued.txt": model.AreaFile}, Domains: []string{"queued"}, Risk: "low", State: model.Ready, Branch: "aih/queued", FixCycles: map[string]int{}}
+	s.Tasks["external"] = &model.Task{ID: "external", ObjectiveID: "batch", Title: "external", Objective: "fixture", Acceptance: []string{"done"}, Areas: []string{"feature-external.txt"}, AssignedAreas: []string{"feature-external.txt"}, AssignedAreaKinds: map[string]string{"feature-external.txt": model.AreaFile}, Domains: []string{"external"}, Risk: "low", State: model.Done, Branch: "aih/external", FixCycles: map[string]int{}}
 	next, err := f.P.Git.StateCommit(ctx, stateHead, s)
 	if err != nil {
 		t.Fatal(err)
@@ -355,6 +356,9 @@ func assertPublishedReplan(t *testing.T, ctx context.Context, f *demo.Fixture, s
 	}
 	if old := snapshot.Tasks["alpha"]; old.Blocker == nil || old.Preflight == nil {
 		t.Fatalf("started source checkpoint lost its historical approval: %#v", old)
+	}
+	if !reflect.DeepEqual(next.Dependencies, []string{"external"}) {
+		t.Fatalf("successor did not collapse internal dependencies and retain its external predecessor: %#v", next.Dependencies)
 	}
 	remote, err := f.P.Git.RemoteHead(ctx, next.Branch)
 	if err != nil || remote != next.HeadSHA {

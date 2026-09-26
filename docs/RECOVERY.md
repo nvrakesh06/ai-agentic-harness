@@ -118,6 +118,11 @@ on an original resolves through its `SUPERSEDED` successor. Unknown started
 ownership and every concurrent overlap fail closed. A resolved operator candidate head is permitted only when it descends from
 canonical main, contains every declared source checkpoint, and validates entirely
 within the replacement's immutable areas. It never waives native checks or review.
+Inherited dependencies inside the selected group collapse into the successor while
+external predecessors remain required; an explicit replacement dependency may not
+name an original. Known immutable assignments transfer into the successor scope.
+An unstarted legacy task without a classified assignment contributes no mutable
+scope prose: the bounded replacement areas are authoritative.
 
 `aih answer TASK_ID "decision"` (or a task's issue number) records the answer remotely
 before rescheduling. Planning blockers use the objective ID shown by status.

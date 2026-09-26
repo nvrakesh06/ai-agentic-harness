@@ -202,16 +202,27 @@ func replanPolicyRequired(s *model.Snapshot, request ReplanRequest) (bool, error
 }
 
 func mergeReplanContract(r ReplanRequest, originals []*model.Task) (model.Task, error) {
+	originalSet := make(map[string]bool, len(originals))
+	for _, old := range originals {
+		if old != nil {
+			originalSet[old.ID] = true
+		}
+	}
+	for _, dependency := range r.Replacement.Dependencies {
+		if originalSet[dependency] {
+			return model.Task{}, errors.New("replacement cannot explicitly depend on a superseded original")
+		}
+	}
 	next := model.Task{ID: r.Replacement.ID, Title: r.Replacement.Title, Objective: r.Replacement.Objective, Acceptance: uniqueStrings(r.Replacement.Acceptance), Areas: uniqueStrings(r.Replacement.Areas), Domains: uniqueStrings(r.Replacement.Domains), Roles: uniqueStrings(r.Replacement.Roles), Risk: r.Replacement.Risk, UI: r.Replacement.UI, Security: r.Replacement.Security, Dependencies: uniqueStrings(r.Replacement.Dependencies), State: model.Ready, Branch: "aih/" + r.Replacement.ID, FixCycles: map[string]int{}}
 	if len(next.Acceptance) != len(r.Replacement.Acceptance) || len(next.Areas) != len(r.Replacement.Areas) || len(next.Domains) != len(r.Replacement.Domains) {
 		return next, errors.New("replacement has duplicate contract entries")
 	}
 	for _, old := range originals {
 		// A known immutable boundary is part of the original authorization and
-		// cannot be silently narrowed by the replacement contract. Legacy tasks
-		// with no assignment remain eligible only because the transferred patch is
-		// later checked against this explicit successor scope.
-		if areas, ok := model.ImmutableAreas(old); ok {
+		// cannot be silently narrowed by the replacement contract. An unstarted
+		// legacy placeholder with no classified assignment has no trustworthy
+		// source boundary; its explicit replacement contract supplies one instead.
+		if areas, ok := replanTransferredAreas(r, old); ok {
 			next.Areas = unionStrings(next.Areas, areas)
 		}
 		if !r.Replacement.ReplaceContract && old.Objective != next.Objective {
@@ -219,7 +230,11 @@ func mergeReplanContract(r ReplanRequest, originals []*model.Task) (model.Task, 
 		}
 		next.Acceptance = unionStrings(next.Acceptance, old.Acceptance)
 		next.Roles = unionStrings(next.Roles, old.Roles)
-		next.Dependencies = unionStrings(next.Dependencies, old.Dependencies)
+		for _, dependency := range old.Dependencies {
+			if !originalSet[dependency] {
+				next.Dependencies = unionStrings(next.Dependencies, []string{dependency})
+			}
+		}
 		if riskRank(old.Risk) > riskRank(next.Risk) {
 			next.Risk = old.Risk
 		}
@@ -227,6 +242,42 @@ func mergeReplanContract(r ReplanRequest, originals []*model.Task) (model.Task, 
 		next.Security = next.Security || old.Security
 	}
 	return next, nil
+}
+
+func replanTransferredAreas(request ReplanRequest, task *model.Task) ([]string, bool) {
+	areas, ok := model.ImmutableAreas(task)
+	if !ok {
+		return nil, false
+	}
+	if len(task.AssignedAreas) != 0 {
+		for _, kind := range model.ImmutableAreaKinds(task) {
+			if kind != model.AreaUnknown {
+				continue
+			}
+			// A started task's historical assignment remains an authorization
+			// boundary even if a legacy runtime could not classify its kind.
+			if !replanRequestMarksUnstarted(request, task.ID) {
+				return areas, true
+			}
+			return nil, false
+		}
+		return areas, true
+	}
+	// The only assignment-free fallback is an explicitly unstarted original.
+	// Its mutable legacy Areas prose must not be promoted into the successor.
+	if replanRequestMarksUnstarted(request, task.ID) {
+		return nil, false
+	}
+	return areas, true
+}
+
+func replanRequestMarksUnstarted(request ReplanRequest, id string) bool {
+	for _, original := range request.Originals {
+		if original.TaskID == id {
+			return original.HeadSHA == ""
+		}
+	}
+	return false
 }
 
 func riskRank(value string) int {
