@@ -154,10 +154,15 @@ func replanActive(s *model.Snapshot, t *model.Task) bool {
 // not a wildcard: it is accepted only for this narrow, never-started shape.
 func replanUnstarted(s *model.Snapshot, t *model.Task) bool {
 	if t == nil || t.BaseSHA != "" || t.HeadSHA != "" || t.MergeSHA != "" || t.PostVerifySHA != "" || t.SyncBase != "" ||
-		t.Attempts != 0 || t.Rotations != 0 || t.AdvisorUsed || t.RunID != "" || t.Preflight != nil || t.Verification != nil ||
+		t.RecoveryRequired || t.Attempts != 0 || t.Rotations != 0 || t.AdvisorUsed || t.RunID != "" || t.Preflight != nil || t.Verification != nil ||
 		t.Evidence != nil || t.VisualRequired != nil || t.Blocker != nil || t.PR != 0 || len(t.Findings) != 0 || len(t.Summary) != 0 ||
 		len(t.ReportedTests) != 0 || len(t.Risks) != 0 || len(t.Decisions) != 0 || len(t.ReviewProvenance) != 0 {
 		return false
+	}
+	for _, cycles := range t.FixCycles {
+		if cycles != 0 {
+			return false
+		}
 	}
 	for _, run := range s.Runs {
 		if run.Task == t.ID {
