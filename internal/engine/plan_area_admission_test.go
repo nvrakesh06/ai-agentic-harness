@@ -64,7 +64,6 @@ func TestMalformedNewPlanAreasPublishNoTasksOwnershipOrIssues(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
 	for {
 		snapshot, _, loadErr := f.P.DB.Load()
 		if loadErr != nil {
@@ -80,10 +79,14 @@ func TestMalformedNewPlanAreasPublishNoTasksOwnershipOrIssues(t *testing.T) {
 			}
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("malformed plan did not reach admission failure")
+		select {
+		case <-supervisor.completion():
+			drained = true
+			t.Fatalf("controller stopped before plan admission failure: %v", supervisor.completedResult())
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(20 * time.Millisecond):
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
 	if err = f.P.DB.Submit(store.Command{ID: "stop-bad-plan", Kind: "handoff"}); err != nil {
 		t.Fatal(err)
