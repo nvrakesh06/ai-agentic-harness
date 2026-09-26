@@ -252,6 +252,9 @@ func TestDeadlineCheckpointAndHandoffRecoverTogetherAfterMachineLoss(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A fatal assertion must also release SQLite before TempDir cleanup. The
+	// normal path explicitly closes it before simulating machine loss below.
+	t.Cleanup(func() { _ = f.P.DB.Close() })
 	f.Project.WorkerSeconds = 10
 	projectYAML, _ := yaml.Marshal(f.Project)
 	if err = os.WriteFile(filepath.Join(f.Source, ".aih", "project.yaml"), projectYAML, 0600); err != nil {
@@ -308,7 +311,22 @@ func TestDeadlineCheckpointAndHandoffRecoverTogetherAfterMachineLoss(t *testing.
 	worker := &deadlineHandoffProvider{}
 	f.P.Provider = worker
 	done := make(chan error, 1)
-	go func() { done <- engine.New(f.P).Serve(ctx) }()
+	// The worker still has its authored 10-second deadline. Give setup, the
+	// supervisor workflow and reconstruction independent bounded contexts so
+	// slow fixture Git setup cannot spend the reconstruction phase's budget.
+	serveCtx, stopServe := context.WithTimeout(context.Background(), 45*time.Second)
+	stopped := false
+	t.Cleanup(func() {
+		stopServe()
+		if !stopped {
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("deadline fixture supervisor did not stop during cleanup")
+			}
+		}
+	})
+	go func() { done <- engine.New(f.P).Serve(serveCtx) }()
 
 	for {
 		current, _, loadErr := f.P.DB.Load()
@@ -320,18 +338,29 @@ func TestDeadlineCheckpointAndHandoffRecoverTogetherAfterMachineLoss(t *testing.
 		}
 		select {
 		case serveErr := <-done:
+			stopped = true
 			t.Fatal("supervisor exited before recovered checkpoint publication", serveErr)
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
+		case <-serveCtx.Done():
+			t.Fatal(serveCtx.Err())
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
 	if err = f.P.DB.Submit(store.Command{ID: model.ID(), Kind: "handoff"}); err != nil {
 		t.Fatal(err)
 	}
-	if err = <-done; err != nil {
-		t.Fatal(err)
+	select {
+	case err = <-done:
+		stopped = true
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-serveCtx.Done():
+		t.Fatal(serveCtx.Err())
 	}
+	stopServe()
+	verifyCtx, stopVerify := context.WithTimeout(context.Background(), 45*time.Second)
+	defer stopVerify()
+	ctx = verifyCtx
 
 	remote, _, err := f.P.Git.Load(ctx)
 	if err != nil {
