@@ -190,6 +190,10 @@ func releaseReceiptIdentityFor(ctx context.Context, groups []releaseTestGroup) (
 	if err != nil {
 		return releaseReceiptIdentity{}, err
 	}
+	effectiveGoFlags, err := run("go", "env", "GOFLAGS")
+	if err != nil {
+		return releaseReceiptIdentity{}, err
+	}
 	gitVersion, err := run("git", "--version")
 	if err != nil {
 		return releaseReceiptIdentity{}, err
@@ -201,14 +205,18 @@ func releaseReceiptIdentityFor(ctx context.Context, groups []releaseTestGroup) (
 	if err = releaseWorkspaceAllowed(goWork); err != nil {
 		return releaseReceiptIdentity{}, err
 	}
-	if err = releaseGoFlagsAllowed(os.Getenv("GOFLAGS")); err != nil {
+	if err = releaseGoFlagsAllowed(effectiveGoFlags); err != nil {
 		return releaseReceiptIdentity{}, err
 	}
 	keys := append([]string(nil), releaseTestEnvironmentKeys...)
 	sort.Strings(keys)
 	environment := make([]string, 0, len(keys))
 	for _, key := range keys {
-		environment = append(environment, key+"="+os.Getenv(key))
+		value := os.Getenv(key)
+		if key == "GOFLAGS" {
+			value = effectiveGoFlags
+		}
+		environment = append(environment, key+"="+value)
 	}
 	plan, err := json.Marshal(groups)
 	if err != nil {

@@ -103,6 +103,10 @@ func TestReleaseWorkspaceAndModfileAuthorityAreRejected(t *testing.T) {
 			t.Fatalf("external modfile was accepted: %q", flags)
 		}
 	}
+	t.Setenv("GOFLAGS", "")
+	if err := releaseGoFlagsAllowed("-modfile=from-goenv.mod"); err == nil {
+		t.Fatal("effective GOENV flags were accepted when process GOFLAGS was empty")
+	}
 }
 
 func TestReleaseYieldCancellationPreservesOnlyYieldedCancellation(t *testing.T) {
