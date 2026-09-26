@@ -439,6 +439,8 @@ type Verification struct {
 	SourceEnvironment string `json:"source_environment,omitempty"`
 	HeadSHA           string `json:"head_sha"`
 	Fingerprint       string `json:"fingerprint"`
+	CheckID           string `json:"check_id,omitempty"`
+	Classification    string `json:"classification,omitempty"`
 	Attempts          int    `json:"attempts"`
 	NativeOnly        bool   `json:"native_only"`
 }

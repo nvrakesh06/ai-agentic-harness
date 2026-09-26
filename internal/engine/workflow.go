@@ -341,6 +341,51 @@ func verificationFingerprint(environment, reason string) string {
 	return fmt.Sprintf("%x", hash)
 }
 
+const (
+	transientNativeTimeout  = "timeout"
+	transientWindowsNPMLock = "windows-npm-eperm-unlink"
+)
+
+var (
+	npmEPERMCodeLine   = regexp.MustCompile(`(?mi)^npm (?:ERR!|error) code EPERM\s*$`)
+	npmUnlinkLine      = regexp.MustCompile(`(?mi)^npm (?:ERR!|error) syscall unlink\s*$`)
+	npmNodeModulesPath = regexp.MustCompile(`(?mi)^npm (?:ERR!|error) path .*[\\/]node_modules(?:[\\/]|$)`)
+)
+
+func nativeCheckIdentity(check config.Check) string {
+	sum := sha256.Sum256([]byte(check.Name + "\x00" + strings.Join(check.Command, "\x00")))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+// transientNativeFailure identifies only failures that do not establish a
+// source defect. A timeout is emitted by the supervisor-owned check context.
+// The Windows install-lock signature is deliberately conjunctive so compiler
+// and assertion diagnostics continue through the ordinary bounded FIX path.
+func transientNativeFailure(failure *checkFailure) string {
+	if failure == nil || errors.Is(failure, context.Canceled) {
+		return ""
+	}
+	if errors.Is(failure, context.DeadlineExceeded) {
+		return transientNativeTimeout
+	}
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	if npmEPERMCodeLine.MatchString(failure.output) &&
+		npmUnlinkLine.MatchString(failure.output) &&
+		npmNodeModulesPath.MatchString(failure.output) {
+		return transientWindowsNPMLock
+	}
+	return ""
+}
+
+func sameTransientVerification(guard *model.Verification, environment, head string) bool {
+	// Environment carries the canonical policy hash and applicable native plan.
+	// One plan-level retry prevents checks from alternating their way around the
+	// same exact-head allowance; CheckID remains diagnostic evidence only.
+	return guard != nil && guard.Attempts > 0 && guard.Classification != "" && guard.Environment == environment && guard.HeadSHA == head
+}
+
 func (c *Controller) effective(ctx context.Context) (config.Effective, error) {
 	if e := c.fetch(ctx); e != nil {
 		return config.Effective{}, e
@@ -1366,10 +1411,51 @@ func (c *Controller) verificationFailure(id string, failure *checkFailure) {
 	}
 	environment := nativeEnvironment(effective)
 	guard := task.Verification
+	if classification := transientNativeFailure(failure); classification != "" {
+		checkID := nativeCheckIdentity(failure.check)
+		repeated := sameTransientVerification(guard, environment, task.HeadSHA)
+		attempts := 1
+		storedClassification := classification
+		if repeated {
+			attempts = guard.Attempts + 1
+			storedClassification = guard.Classification
+		}
+		reason := c.portable(fmt.Sprintf("Transient supervisor-native verification failure (classification=%s check=%s command_id=%s head=%s).\n%s", classification, failure.check.Name, checkID[:12], task.HeadSHA, failure.Error()))
+		if repeated && guard.Classification != classification {
+			reason = c.portable(fmt.Sprintf("%s\nFirst transient classification at this exact verification identity: %s.", reason, guard.Classification))
+		}
+		source, nativeOnly := "", false
+		if guard != nil {
+			source, nativeOnly = guard.SourceEnvironment, guard.NativeOnly
+		}
+		next := &model.Verification{Environment: environment, SourceEnvironment: source, HeadSHA: task.HeadSHA, Fingerprint: verificationFingerprint(environment+"/"+checkID, reason), CheckID: checkID, Classification: storedClassification, Attempts: attempts, NativeOnly: nativeOnly}
+		if repeated {
+			if c.mutate(func(s *model.Snapshot) error {
+				t := s.Tasks[id]
+				t.Verification = next
+				model.BlockWithOrigin(t, "Supervisor-native verification hit the same transient environment failure twice. Repair the environment, then retry verification.", reason, model.SyncRequired, model.BlockerOriginVerificationOnly)
+				return nil
+			}) == nil {
+				_ = c.P.DB.Event(id, task.RunID, "verification", "native", "transient_retry_suppressed", classification+" check="+failure.check.Name+" head="+task.HeadSHA)
+				c.mirror(id)
+			}
+			return
+		}
+		if c.mutate(func(s *model.Snapshot) error {
+			t := s.Tasks[id]
+			t.Verification = next
+			t.State = model.SyncRequired
+			return nil
+		}) == nil {
+			_ = c.P.DB.Event(id, task.RunID, "verification", "native", "transient_retry_queued", classification+" check="+failure.check.Name+" head="+task.HeadSHA)
+			c.mirror(id)
+		}
+		return
+	}
 	// A NativeOnly handoff is a request for the first supervisor-owned check,
 	// not a prior native failure. Only a guard with a recorded native attempt can
 	// suppress another check at the same revision.
-	repeated := guard != nil && guard.Attempts > 0 && guard.Environment == environment && guard.HeadSHA == task.HeadSHA
+	repeated := guard != nil && guard.Classification == "" && guard.Attempts > 0 && guard.Environment == environment && guard.HeadSHA == task.HeadSHA
 	nativeOnly := guard != nil && guard.NativeOnly
 	capabilityMissing := errors.Is(failure, exec.ErrNotFound)
 	attempts := 1
@@ -1700,11 +1786,28 @@ func (c *Controller) preserveReviewFindings(id string, findings []model.Finding)
 }
 
 func (c *Controller) verifyReview(id string) error {
-	effective, e := c.syncTask(c.ctx, id)
+	t := c.Snapshot().Tasks[id]
+	if t == nil {
+		return errors.New("task disappeared before verification")
+	}
+	// A queued transient retry rechecks the failed durable head exactly once.
+	// Do not route it through synchronization: a newly advanced main could
+	// rebase that head and convert an environment retry into a new source input.
+	// Fetch canonical policy before deciding to bypass sync. The recorded native
+	// environment includes that policy's complete native-check plan, so a policy
+	// or command change is a fresh identity and must follow ordinary sync.
+	effective, e := c.effective(c.ctx)
 	if e != nil {
 		return e
 	}
-	t := c.Snapshot().Tasks[id]
+	exactTransientRetry := t.Verification != nil && t.Verification.Attempts == 1 && t.Verification.Classification != "" && t.Verification.HeadSHA == t.HeadSHA && t.Verification.Environment == nativeEnvironment(effective)
+	if !exactTransientRetry {
+		effective, e = c.syncTask(c.ctx, id)
+	}
+	if e != nil {
+		return e
+	}
+	t = c.Snapshot().Tasks[id]
 	dir := c.P.TaskPath(t)
 	diff, paths, e := c.P.Git.Diff(c.ctx, t.BaseSHA, t.HeadSHA)
 	if e != nil {
