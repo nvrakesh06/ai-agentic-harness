@@ -300,7 +300,7 @@ func QueueGuidance(target, source *Task, commandID, message string) error {
 	if target.State != Ready && target.State != Running && target.State != Fix {
 		return errors.New("guidance target must be READY, RUNNING, or FIX")
 	}
-	if !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(source.HeadSHA) {
+	if !stateRevisionPattern.MatchString(source.HeadSHA) {
 		return errors.New("guidance source needs a durable code checkpoint")
 	}
 	message = strings.TrimSpace(message)
@@ -329,7 +329,7 @@ func QueueRoutedFinding(target, source *Task, commandID, message string) error {
 	if target.State != Ready && target.State != Running && target.State != Fix {
 		return errors.New("routed finding target must be READY, RUNNING, or FIX")
 	}
-	if !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(source.HeadSHA) {
+	if !stateRevisionPattern.MatchString(source.HeadSHA) {
 		return errors.New("routed finding source needs a durable code checkpoint")
 	}
 	message = strings.TrimSpace(message)
@@ -363,7 +363,7 @@ func QueueOperatorGuidance(target *Task, commandID, head, baseSHA, configHash, r
 	if scopeHead == "" {
 		scopeHead = target.BaseSHA
 	}
-	if (target.State != Ready && target.State != Running && target.State != Fix && target.State != SyncRequired) || scopeHead != head || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(head) || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(baseSHA) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(configHash) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(rules) {
+	if (target.State != Ready && target.State != Running && target.State != Fix && target.State != SyncRequired) || scopeHead != head || !stateRevisionPattern.MatchString(head) || !stateRevisionPattern.MatchString(baseSHA) || !stateHashPattern.MatchString(configHash) || !stateHashPattern.MatchString(rules) {
 		return errors.New("operator guidance requires a READY, RUNNING, FIX, or SYNC_REQUIRED exact task head and policy scope")
 	}
 	message = strings.TrimSpace(message)
@@ -886,7 +886,7 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		}
 		s.Schema = StateSchema
 	}
-	if !regexp.MustCompile(`^[a-zA-Z0-9_-]{8,80}$`).MatchString(s.Project) {
+	if !stateProjectPattern.MatchString(s.Project) {
 		return nil, false, errors.New("remote state has no project identity")
 	}
 	if s.Tasks == nil {
@@ -908,19 +908,19 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		s.Replans = map[string]ReplanReceipt{}
 	}
 	for id, receipt := range s.Replans {
-		if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(id) || !s.Applied[id] || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(receipt.Digest) || !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(receipt.ReplacementID) || s.Tasks[receipt.ReplacementID] == nil {
+		if !stateIdentifierPattern.MatchString(id) || !s.Applied[id] || !stateHashPattern.MatchString(receipt.Digest) || !stateIdentifierPattern.MatchString(receipt.ReplacementID) || s.Tasks[receipt.ReplacementID] == nil {
 			return nil, false, errors.New("invalid replan receipt")
 		}
 	}
 	for id, t := range s.Tasks {
-		if t == nil || t.ID != id || !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(id) {
+		if t == nil || t.ID != id || !stateIdentifierPattern.MatchString(id) {
 			return nil, false, errors.New("invalid task identity")
 		}
-		if t.Branch != "" && !regexp.MustCompile(`^aih/[a-zA-Z0-9_-]+$`).MatchString(t.Branch) {
+		if t.Branch != "" && !stateBranchPattern.MatchString(t.Branch) {
 			return nil, false, errors.New("unsafe task branch")
 		}
 		for _, sha := range []string{t.HeadSHA, t.BaseSHA, t.MergeSHA, t.SyncBase, t.PostVerifySHA} {
-			if sha != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(sha) {
+			if sha != "" && !stateRevisionPattern.MatchString(sha) {
 				return nil, false, errors.New("invalid task revision")
 			}
 		}
@@ -934,10 +934,10 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			return nil, false, errors.New("blocked task has no question")
 		}
 		if v := t.Verification; v != nil {
-			if v.Environment == "" || v.Attempts < 0 || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Fingerprint) {
+			if v.Environment == "" || v.Attempts < 0 || !stateHashPattern.MatchString(v.Fingerprint) {
 				return nil, false, errors.New("invalid verification retry guard")
 			}
-			if v.HeadSHA != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.HeadSHA) {
+			if v.HeadSHA != "" && !stateRevisionPattern.MatchString(v.HeadSHA) {
 				return nil, false, errors.New("invalid verification retry revision")
 			}
 		}
@@ -945,21 +945,21 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			return nil, false, errors.New("too many read-only retry guards")
 		}
 		for key, retry := range t.ReadOnlyRetries {
-			if !regexp.MustCompile(`^(pre-implementation|review)/[a-z][a-z0-9_-]{0,63}$`).MatchString(key) ||
+			if !stateRetryKeyPattern.MatchString(key) ||
 				(retry.Stage != "pre-implementation" && retry.Stage != "review") ||
-				!regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(retry.Role) ||
-				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(retry.BaseSHA) ||
-				(retry.HeadSHA != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(retry.HeadSHA)) ||
-				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(retry.Config) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(retry.Rules) ||
+				!stateRolePattern.MatchString(retry.Role) ||
+				!stateRevisionPattern.MatchString(retry.BaseSHA) ||
+				(retry.HeadSHA != "" && !stateRevisionPattern.MatchString(retry.HeadSHA)) ||
+				!stateHashPattern.MatchString(retry.Config) || !stateHashPattern.MatchString(retry.Rules) ||
 				retry.Attempts < 1 || retry.Attempts > 2 || retry.RemainingSeconds < 0 || retry.RemainingSeconds > 86400 || key != retry.Stage+"/"+retry.Role {
 				return nil, false, errors.New("invalid read-only retry guard")
 			}
 		}
 		if v := t.VisualRequired; v != nil {
-			if v.Role == "" || !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(v.Role) ||
-				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.Base) ||
-				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.Head) ||
-				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Config) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Rules) || strings.TrimSpace(v.Reason) == "" {
+			if v.Role == "" || !stateRolePattern.MatchString(v.Role) ||
+				!stateRevisionPattern.MatchString(v.Base) ||
+				!stateRevisionPattern.MatchString(v.Head) ||
+				!stateHashPattern.MatchString(v.Config) || !stateHashPattern.MatchString(v.Rules) || strings.TrimSpace(v.Reason) == "" {
 				return nil, false, errors.New("invalid visual requirement")
 			}
 		}
@@ -967,20 +967,20 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			if p.Phase != "queued" && p.Phase != "waiting" && p.Phase != "running" && p.Phase != "ready" && p.Phase != "writing" {
 				return nil, false, errors.New("invalid preflight phase")
 			}
-			if !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(p.BaseSHA) ||
-				(p.HeadSHA != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(p.HeadSHA)) ||
-				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(p.Config) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(p.Rules) {
+			if !stateRevisionPattern.MatchString(p.BaseSHA) ||
+				(p.HeadSHA != "" && !stateRevisionPattern.MatchString(p.HeadSHA)) ||
+				!stateHashPattern.MatchString(p.Config) || !stateHashPattern.MatchString(p.Rules) {
 				return nil, false, errors.New("incomplete preflight identity")
 			}
-			if (p.Scope != "" && !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(p.Scope)) || p.ReuseCount < 0 {
+			if (p.Scope != "" && !stateHashPattern.MatchString(p.Scope)) || p.ReuseCount < 0 {
 				return nil, false, errors.New("invalid preflight reuse identity")
 			}
 			if w := p.DirectFix; w != nil {
 				if w.Role != "designer" || w.Disposition != "waived" || strings.TrimSpace(w.Reason) == "" ||
-					!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(w.BaseSHA) ||
-					!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(w.HeadSHA) ||
-					!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(w.Config) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(w.Rules) ||
-					!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(w.Scope) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(w.Findings) {
+					!stateRevisionPattern.MatchString(w.BaseSHA) ||
+					!stateRevisionPattern.MatchString(w.HeadSHA) ||
+					!stateHashPattern.MatchString(w.Config) || !stateHashPattern.MatchString(w.Rules) ||
+					!stateHashPattern.MatchString(w.Scope) || !stateHashPattern.MatchString(w.Findings) {
 					return nil, false, errors.New("invalid direct FIX preflight waiver")
 				}
 			}
@@ -988,21 +988,21 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		if t.Evidence != nil && t.Evidence.Visual != nil {
 			v := t.Evidence.Visual
 			if v.Head != t.Evidence.Head || v.Config != t.Evidence.Config ||
-				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.Head) ||
-				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Config) ||
-				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.ManifestSHA256) ||
+				!stateRevisionPattern.MatchString(v.Head) ||
+				!stateHashPattern.MatchString(v.Config) ||
+				!stateHashPattern.MatchString(v.ManifestSHA256) ||
 				len(v.Summary) > 1000 || len(v.Artifacts) < 1 || len(v.Artifacts) > MaxVisualEvidenceArtifacts ||
 				v.Manifest != "visual-evidence/"+id+"/"+v.Head+"-"+v.Config[:16]+"/manifest.json" {
 				return nil, false, errors.New("invalid visual evidence reference")
 			}
-			if v.SourceHead != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.SourceHead) {
+			if v.SourceHead != "" && !stateRevisionPattern.MatchString(v.SourceHead) {
 				return nil, false, errors.New("invalid visual evidence source revision")
 			}
-			if (v.Closure != "" || v.ReuseReason != "") && (!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Closure) || strings.TrimSpace(v.Runtime) == "" || len(v.Runtime) > 160) {
+			if (v.Closure != "" || v.ReuseReason != "") && (!stateHashPattern.MatchString(v.Closure) || strings.TrimSpace(v.Runtime) == "" || len(v.Runtime) > 160) {
 				return nil, false, errors.New("invalid visual evidence closure")
 			}
 			for _, artifact := range v.Artifacts {
-				if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}\.(png|jpg|jpeg|txt|json)$`).MatchString(artifact.Path) || strings.Contains(artifact.Path, "..") || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(artifact.SHA256) {
+				if !stateArtifactPattern.MatchString(artifact.Path) || strings.Contains(artifact.Path, "..") || !stateHashPattern.MatchString(artifact.SHA256) {
 					return nil, false, errors.New("invalid visual artifact reference")
 				}
 			}
@@ -1013,13 +1013,13 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			}
 		}
 		if t.Evidence != nil {
-			if t.Evidence.ReviewScope != "" && !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(t.Evidence.ReviewScope) {
+			if t.Evidence.ReviewScope != "" && !stateHashPattern.MatchString(t.Evidence.ReviewScope) {
 				return nil, false, errors.New("invalid review scope")
 			}
 			for role, disposition := range t.Evidence.ReviewDispositions {
-				if !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(role) ||
+				if !stateRolePattern.MatchString(role) ||
 					(disposition.Disposition != "completed" && disposition.Disposition != "reused") ||
-					!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(disposition.SourceHead) ||
+					!stateRevisionPattern.MatchString(disposition.SourceHead) ||
 					strings.TrimSpace(disposition.Runtime) == "" || len(disposition.Runtime) > 160 || len(disposition.Reason) > 500 {
 					return nil, false, errors.New("invalid review disposition")
 				}
@@ -1029,19 +1029,19 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			return nil, false, fmt.Errorf("unknown task state %q", t.State)
 		}
 		if t.State == Superseded {
-			if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(t.SupersededBy) || s.Tasks[t.SupersededBy] == nil || t.SupersededBy == t.ID {
+			if !stateIdentifierPattern.MatchString(t.SupersededBy) || s.Tasks[t.SupersededBy] == nil || t.SupersededBy == t.ID {
 				return nil, false, errors.New("superseded task has no valid replacement")
 			}
 		} else if t.SupersededBy != "" {
 			return nil, false, errors.New("non-superseded task has replacement link")
 		}
 		if t.Replan != nil {
-			if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(t.Replan.CommandID) || strings.TrimSpace(t.Replan.Reason) == "" || len(t.Replan.Reason) > 1600 || len(t.Replan.Sources) == 0 || len(t.Replan.Sources) > 8 || (t.Replan.CandidateHead != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(t.Replan.CandidateHead)) {
+			if !stateIdentifierPattern.MatchString(t.Replan.CommandID) || strings.TrimSpace(t.Replan.Reason) == "" || len(t.Replan.Reason) > 1600 || len(t.Replan.Sources) == 0 || len(t.Replan.Sources) > 8 || (t.Replan.CandidateHead != "" && !stateRevisionPattern.MatchString(t.Replan.CandidateHead)) {
 				return nil, false, errors.New("invalid replan provenance")
 			}
 			prior := 0
 			for _, source := range t.Replan.Sources {
-				if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(source.TaskID) || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(source.BaseSHA) || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(source.HeadSHA) || source.BaseSHA == source.HeadSHA || source.Order <= prior {
+				if !stateIdentifierPattern.MatchString(source.TaskID) || !stateRevisionPattern.MatchString(source.BaseSHA) || !stateRevisionPattern.MatchString(source.HeadSHA) || source.BaseSHA == source.HeadSHA || source.Order <= prior {
 					return nil, false, errors.New("invalid replan source provenance")
 				}
 				prior = source.Order
@@ -1052,7 +1052,7 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		}
 	}
 	for id, o := range s.Objectives {
-		if o == nil || o.ID != id || !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(id) {
+		if o == nil || o.ID != id || !stateIdentifierPattern.MatchString(id) {
 			return nil, false, errors.New("invalid objective identity")
 		}
 	}
@@ -1074,7 +1074,7 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 	if (s.Capacity.MaxHeavyChecks != 0 && (s.Capacity.MaxHeavyChecks < 1 || s.Capacity.MaxHeavyChecks > 8)) || (s.Capacity.MaxLightChecks != 0 && (s.Capacity.MaxLightChecks < 1 || s.Capacity.MaxLightChecks > 8)) {
 		return nil, false, errors.New("invalid check capacity policy")
 	}
-	if s.Capacity.ReasonCode != "" && !regexp.MustCompile(`^[a-z_]+$`).MatchString(s.Capacity.ReasonCode) {
+	if s.Capacity.ReasonCode != "" && !stateReasonPattern.MatchString(s.Capacity.ReasonCode) {
 		return nil, false, errors.New("invalid capacity reason code")
 	}
 	if len(s.Capacity.Transitions) > CapacityTransitionLimit {
@@ -1095,7 +1095,7 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		if transition.At.IsZero() || (transition.Kind != "capacity_underutilized" && transition.Kind != "capacity_backfill_selected" && transition.Kind != "capacity_backfill_suppressed") {
 			return nil, false, errors.New("invalid capacity transition")
 		}
-		if transition.ReasonCode != "" && !regexp.MustCompile(`^[a-z_]+$`).MatchString(transition.ReasonCode) {
+		if transition.ReasonCode != "" && !stateReasonPattern.MatchString(transition.ReasonCode) {
 			return nil, false, errors.New("invalid capacity transition reason")
 		}
 		if transition.Objective != "" && s.Objectives[transition.Objective] == nil {
@@ -1433,15 +1433,15 @@ func sameStrings(a, b []string) bool {
 	return len(a) == len(b) && strings.Join(a, "\x00") == strings.Join(b, "\x00")
 }
 func validSHA(value string) bool {
-	return regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(value)
+	return stateRevisionPattern.MatchString(value)
 }
-func validHash(value string) bool { return regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(value) }
+func validHash(value string) bool { return stateHashPattern.MatchString(value) }
 func validRoleRoster(roster []string) bool {
 	if len(roster) == 0 || hasDuplicateOrBlank(roster) {
 		return false
 	}
 	for _, role := range roster {
-		if !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(role) {
+		if !stateRolePattern.MatchString(role) {
 			return false
 		}
 	}
@@ -1469,19 +1469,19 @@ func cloneIntegrationBatch(batch *IntegrationBatch) *IntegrationBatch {
 }
 
 func validReviewProvenance(role string, provenance ReviewProvenance) error {
-	if !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(role) || provenance.Role != role ||
-		!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(provenance.Base) ||
-		!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(provenance.Head) ||
-		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(provenance.Config) ||
-		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(provenance.Rules) ||
-		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(provenance.Scope) ||
+	if !stateRolePattern.MatchString(role) || provenance.Role != role ||
+		!stateRevisionPattern.MatchString(provenance.Base) ||
+		!stateRevisionPattern.MatchString(provenance.Head) ||
+		!stateHashPattern.MatchString(provenance.Config) ||
+		!stateHashPattern.MatchString(provenance.Rules) ||
+		!stateHashPattern.MatchString(provenance.Scope) ||
 		len(provenance.Roster) == 0 || strings.TrimSpace(provenance.Provider) == "" || len(provenance.Provider) > 80 ||
 		strings.TrimSpace(provenance.Runtime) == "" || len(provenance.Runtime) > 160 || len(provenance.Summary) > 4000 || provenance.CompletedAt.IsZero() {
 		return errors.New("invalid review provenance")
 	}
 	seen := map[string]bool{}
 	for _, name := range provenance.Roster {
-		if !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(name) || seen[name] {
+		if !stateRolePattern.MatchString(name) || seen[name] {
 			return errors.New("invalid review provenance roster")
 		}
 		seen[name] = true
@@ -1650,7 +1650,7 @@ func ValidatePlan(plan []PlanTask) error {
 	}
 	byKey := map[string]PlanTask{}
 	for _, t := range plan {
-		if !regexp.MustCompile(PlanKeyPattern).MatchString(t.Key) || t.Title == "" || t.Objective == "" || len(t.Acceptance) == 0 || len(t.Areas) == 0 || len(t.Domains) == 0 {
+		if !statePlanKeyPattern.MatchString(t.Key) || t.Title == "" || t.Objective == "" || len(t.Acceptance) == 0 || len(t.Areas) == 0 || len(t.Domains) == 0 {
 			return errors.New("task lacks readiness fields or has an invalid key")
 		}
 		if _, ok := byKey[t.Key]; ok {

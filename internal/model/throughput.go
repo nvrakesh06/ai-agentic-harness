@@ -2,7 +2,6 @@ package model
 
 import (
 	"errors"
-	"regexp"
 	"sort"
 	"time"
 )
@@ -121,8 +120,8 @@ func validateTaskTiming(task *Task) error {
 }
 
 func validateRunMetrics(runs []Run) error {
-	sha := regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)
-	hash := regexp.MustCompile(`^[a-f0-9]{64}$`)
+	sha := stateRevisionPattern
+	hash := stateHashPattern
 	for _, run := range runs {
 		if run.Context == nil {
 			continue
