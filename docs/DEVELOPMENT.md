@@ -27,6 +27,15 @@ timeout bounds each package test binary; individual
 integration fixtures keep their own shorter context deadlines.
 Run native tests on macOS before claiming macOS runtime validation.
 
+The release runner discovers all packages and the complete native engine test
+inventory. It runs ordinary packages serially, then every engine test in serial
+groups of at most sixteen top-level tests. Subtests and fuzz seed cases remain
+included. Each group keeps the fifteen-minute deadline, uncached execution and
+fail-fast behavior. A missing terminal pass/skip event fails the gate, even if
+the process exits successfully. `dist/test-inventory.json` records planned
+coverage; it does not mean unexecuted groups passed. Grouping avoids losing the
+tail of a growing Windows integration suite to a package-wide aggregate timeout.
+
 ## Application configuration
 
 `aih init` detects Go test/vet, common npm script names, or cargo test. Review this
