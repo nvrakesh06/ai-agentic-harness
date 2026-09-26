@@ -58,3 +58,42 @@ func TestReplanDependencyCycleFailsClosed(t *testing.T) {
 		t.Fatal("replacement dependency cycle accepted")
 	}
 }
+
+func TestReplanRejectsCycleIntroducedBySuccessorLink(t *testing.T) {
+	s := model.NewSnapshot("project123")
+	s.Tasks["original"] = &model.Task{ID: "original", State: model.Blocked}
+	s.Tasks["downstream"] = &model.Task{ID: "downstream", State: model.Ready, Dependencies: []string{"original"}}
+	next := &model.Task{ID: "replacement", State: model.Ready, Dependencies: []string{"downstream"}}
+	if !prospectiveReplanCycle(s, next, []ReplanOriginal{{TaskID: "original"}}) {
+		t.Fatal("replacement edge cycle was accepted")
+	}
+}
+
+func TestReplanAllowsInterruptedReviewButRejectsLiveRun(t *testing.T) {
+	s := model.NewSnapshot("project123")
+	task := &model.Task{ID: "review", State: model.Review, Preflight: &model.Preflight{Phase: "writing"}}
+	s.Tasks[task.ID] = task
+	s.Runs = []model.Run{{Task: task.ID, Outcome: "interrupted"}}
+	if replanActive(s, task) {
+		t.Fatal("interrupted review checkpoint was treated as live")
+	}
+	s.Runs[0].Outcome = "running"
+	if !replanActive(s, task) {
+		t.Fatal("live run was accepted")
+	}
+}
+
+func TestReplanReceiptBindsExactManifest(t *testing.T) {
+	s := model.NewSnapshot("project123")
+	s.Tasks["replacement"] = &model.Task{ID: "replacement"}
+	request := validReplanRequest()
+	s.Applied[request.CommandID] = true
+	s.Replans[request.CommandID] = model.ReplanReceipt{Digest: replanDigest(request), ReplacementID: request.Replacement.ID}
+	if applied, err := replanReceipt(s, request); err != nil || !applied {
+		t.Fatalf("exact retry rejected: %v", err)
+	}
+	request.Reason = "different"
+	if _, err := replanReceipt(s, request); err == nil {
+		t.Fatal("altered request reused receipt")
+	}
+}

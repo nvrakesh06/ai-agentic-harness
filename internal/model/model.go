@@ -542,20 +542,21 @@ type Capacity struct {
 	Transitions        []CapacityTransition `json:"transitions,omitempty"`
 }
 type Snapshot struct {
-	Schema             int                   `json:"state_schema"`
-	CreatedBy          string                `json:"created_by_version"`
-	Project            string                `json:"project"`
-	Revision           uint64                `json:"revision"`
-	Controller         Lease                 `json:"controller"`
-	Objectives         map[string]*Objective `json:"objectives"`
-	Backlog            []string              `json:"authorized_objective_backlog"`
-	Capacity           Capacity              `json:"capacity"`
-	Tasks              map[string]*Task      `json:"tasks"`
-	Runs               []Run                 `json:"runs,omitempty"`
-	Applied            map[string]bool       `json:"applied_commands"`
-	Improvements       []string              `json:"improvement_candidates,omitempty"`
-	IntegrationBlocked string                `json:"integration_blocked,omitempty"`
-	IntegrationBatch   *IntegrationBatch     `json:"integration_batch,omitempty"`
+	Schema             int                      `json:"state_schema"`
+	CreatedBy          string                   `json:"created_by_version"`
+	Project            string                   `json:"project"`
+	Revision           uint64                   `json:"revision"`
+	Controller         Lease                    `json:"controller"`
+	Objectives         map[string]*Objective    `json:"objectives"`
+	Backlog            []string                 `json:"authorized_objective_backlog"`
+	Capacity           Capacity                 `json:"capacity"`
+	Tasks              map[string]*Task         `json:"tasks"`
+	Runs               []Run                    `json:"runs,omitempty"`
+	Applied            map[string]bool          `json:"applied_commands"`
+	Replans            map[string]ReplanReceipt `json:"replan_receipts,omitempty"`
+	Improvements       []string                 `json:"improvement_candidates,omitempty"`
+	IntegrationBlocked string                   `json:"integration_blocked,omitempty"`
+	IntegrationBatch   *IntegrationBatch        `json:"integration_batch,omitempty"`
 }
 
 // IntegrationBatch is a portable reservation for the deliberately small first
@@ -588,6 +589,14 @@ type ReplanCheckpoint struct {
 	Order   int    `json:"order"`
 }
 
+// ReplanReceipt binds an idempotent operator command to its exact manifest.
+// Applied alone cannot safely distinguish a retry from a different request
+// that reused a command ID after canonical policy advanced.
+type ReplanReceipt struct {
+	Digest        string `json:"digest"`
+	ReplacementID string `json:"replacement_id"`
+}
+
 // IntegrationBatchTask keeps every member's exact reviewed head and scope.
 // Review scopes are intentionally per-task: disjoint changes cannot share one
 // scope fingerprint, even when they share the selected review roster.
@@ -600,7 +609,7 @@ type IntegrationBatchTask struct {
 
 func NewSnapshot(project string) *Snapshot {
 	return &Snapshot{Schema: StateSchema, CreatedBy: Version, Project: project,
-		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}}
+		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}, Replans: map[string]ReplanReceipt{}}
 }
 
 const (
@@ -783,6 +792,14 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 	}
 	if s.Applied == nil {
 		s.Applied = map[string]bool{}
+	}
+	if s.Replans == nil {
+		s.Replans = map[string]ReplanReceipt{}
+	}
+	for id, receipt := range s.Replans {
+		if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(id) || !s.Applied[id] || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(receipt.Digest) || !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(receipt.ReplacementID) || s.Tasks[receipt.ReplacementID] == nil {
+			return nil, false, errors.New("invalid replan receipt")
+		}
 	}
 	for id, t := range s.Tasks {
 		if t == nil || t.ID != id || !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(id) {

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -112,18 +113,47 @@ func validateReplanRequest(r ReplanRequest) error {
 	return nil
 }
 
-func replanActive(t *model.Task) bool {
+func replanActive(s *model.Snapshot, t *model.Task) bool {
 	if t == nil {
 		return true
 	}
-	if t.Preflight != nil {
-		return true
+	for _, run := range s.Runs {
+		if run.Task == t.ID && run.Outcome == "running" {
+			return true
+		}
 	}
-	switch t.State {
-	case model.Running, model.Implemented, model.Verifying, model.Review, model.MergeReady, model.MergeTrain, model.PostVerify:
-		return true
+	for _, check := range s.Capacity.Verification {
+		if check.Task == t.ID {
+			return true
+		}
+	}
+	if s.IntegrationBatch != nil {
+		for _, member := range s.IntegrationBatch.Tasks {
+			if member.ID == t.ID {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+func replanDigest(request ReplanRequest) string {
+	encoded, _ := json.Marshal(request)
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
+}
+
+func replanReceipt(s *model.Snapshot, request ReplanRequest) (bool, error) {
+	receipt, ok := s.Replans[request.CommandID]
+	if !ok {
+		if s.Applied[request.CommandID] {
+			return false, errors.New("command ID was already used by another operation")
+		}
+		return false, nil
+	}
+	if receipt.Digest != replanDigest(request) || receipt.ReplacementID != request.Replacement.ID {
+		return false, errors.New("replan command ID does not match its accepted manifest")
+	}
+	return true, nil
 }
 
 func mergeReplanContract(r ReplanRequest, originals []*model.Task) (model.Task, error) {
@@ -185,6 +215,12 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 	if err := validateReplanRequest(request); err != nil {
 		return err
 	}
+	s := c.Snapshot()
+	if applied, receiptErr := replanReceipt(s, request); receiptErr != nil {
+		return receiptErr
+	} else if applied {
+		return c.reconcileReplanIssue(ctx, request.Replacement.ID)
+	}
 	effective, err := c.effective(ctx)
 	if err != nil {
 		return err
@@ -192,16 +228,12 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 	if request.Expected.BaseSHA != effective.BaseSHA || request.Expected.Config != effective.Hash || request.Expected.Rules != roles.Hash() {
 		return errors.New("replan policy or canonical main changed")
 	}
-	s := c.Snapshot()
-	if s.Applied[request.CommandID] {
-		return c.reconcileReplanIssue(ctx, request.Replacement.ID)
-	}
 	originals := make([]*model.Task, 0, len(request.Originals))
 	objective := ""
 	oldSet := map[string]bool{}
 	for _, expected := range request.Originals {
 		t := s.Tasks[expected.TaskID]
-		if t == nil || t.State != expected.State || t.HeadSHA != expected.HeadSHA || t.State == model.Done || t.State == model.Superseded || t.MergeSHA != "" || replanActive(t) {
+		if t == nil || t.State != expected.State || t.HeadSHA != expected.HeadSHA || t.State == model.Done || t.State == model.Superseded || t.MergeSHA != "" || replanActive(s, t) {
 			return fmt.Errorf("original task %s is not idle at its expected checkpoint", expected.TaskID)
 		}
 		if objective == "" {
@@ -240,7 +272,7 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 			return errors.New("replacement has invalid dependency")
 		}
 	}
-	if createsDependencyCycle(s, next.ID, next.Dependencies) {
+	if prospectiveReplanCycle(s, &next, request.Originals) {
 		return errors.New("replacement dependencies form a cycle")
 	}
 	for _, member := range request.Sources {
@@ -252,6 +284,9 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 	for _, task := range s.Tasks {
 		if oldSet[task.ID] || task.State == model.Done || task.State == model.Superseded {
 			continue
+		}
+		if _, known := model.ImmutableAreas(task); !known {
+			return fmt.Errorf("replacement cannot prove non-overlap with unfinished legacy task %s", task.ID)
 		}
 		if areasOverlap(next.Areas, task.AssignedAreas) || stringsOverlap(next.Domains, task.Domains) {
 			return fmt.Errorf("replacement overlaps unfinished task %s", task.ID)
@@ -297,7 +332,9 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 		}
 	}
 	if err := c.save(ctx, func(current *model.Snapshot) error {
-		if current.Applied[request.CommandID] {
+		if applied, err := replanReceipt(current, request); err != nil {
+			return err
+		} else if applied {
 			return nil
 		}
 		if current.Tasks[next.ID] != nil {
@@ -305,7 +342,7 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 		}
 		for _, expected := range request.Originals {
 			t := current.Tasks[expected.TaskID]
-			if t == nil || t.State != expected.State || t.HeadSHA != expected.HeadSHA || replanActive(t) {
+			if t == nil || t.State != expected.State || t.HeadSHA != expected.HeadSHA || replanActive(current, t) {
 				return fmt.Errorf("original task %s changed during replan", expected.TaskID)
 			}
 		}
@@ -316,6 +353,7 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 			old.SupersededBy = next.ID
 		}
 		current.Applied[request.CommandID] = true
+		current.Replans[request.CommandID] = model.ReplanReceipt{Digest: replanDigest(request), ReplacementID: next.ID}
 		return nil
 	}, gitx.Update{Branch: next.Branch, Old: "", New: head}); err != nil {
 		return err
@@ -394,13 +432,18 @@ func Replan(ctx context.Context, project *Project, request ReplanRequest) (err e
 }
 
 func replanSnapshotPrecondition(s *model.Snapshot, request ReplanRequest) error {
-	if s == nil || s.Applied[request.CommandID] {
+	if s == nil {
+		return errors.New("replan snapshot unavailable")
+	}
+	if applied, err := replanReceipt(s, request); err != nil {
+		return err
+	} else if applied {
 		return nil
 	}
 	objective := ""
 	for _, expected := range request.Originals {
 		t := s.Tasks[expected.TaskID]
-		if t == nil || t.State != expected.State || t.HeadSHA != expected.HeadSHA || replanActive(t) || t.MergeSHA != "" || t.State == model.Done || t.State == model.Superseded {
+		if t == nil || t.State != expected.State || t.HeadSHA != expected.HeadSHA || replanActive(s, t) || t.MergeSHA != "" || t.State == model.Done || t.State == model.Superseded {
 			return fmt.Errorf("original task %s is not idle at its expected checkpoint", expected.TaskID)
 		}
 		if objective == "" {
@@ -450,6 +493,48 @@ func (c *Controller) acquireReplan(ctx context.Context) error {
 
 func projectSupervisorLock(project *Project) string {
 	return project.Dir + "/supervisor.lock"
+}
+
+func prospectiveReplanCycle(s *model.Snapshot, successor *model.Task, originals []ReplanOriginal) bool {
+	probe := model.Clone(s)
+	probe.Tasks[successor.ID] = successor
+	for _, original := range originals {
+		probe.Tasks[original.TaskID].State = model.Superseded
+		probe.Tasks[original.TaskID].SupersededBy = successor.ID
+	}
+	visiting, done := map[string]bool{}, map[string]bool{}
+	var visit func(string) bool
+	visit = func(id string) bool {
+		if visiting[id] {
+			return true
+		}
+		if done[id] {
+			return false
+		}
+		task := probe.Tasks[id]
+		if task == nil {
+			return false
+		}
+		visiting[id] = true
+		edges := append([]string(nil), task.Dependencies...)
+		if task.State == model.Superseded {
+			edges = append(edges, task.SupersededBy)
+		}
+		for _, edge := range edges {
+			if visit(edge) {
+				return true
+			}
+		}
+		delete(visiting, id)
+		done[id] = true
+		return false
+	}
+	for id := range probe.Tasks {
+		if visit(id) {
+			return true
+		}
+	}
+	return false
 }
 
 func createsDependencyCycle(s *model.Snapshot, candidate string, dependencies []string) bool {
