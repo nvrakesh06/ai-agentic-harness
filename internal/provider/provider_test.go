@@ -320,6 +320,10 @@ func TestFindingRelevanceRequiresBaselineProof(t *testing.T) {
 	if err != nil || result.Findings[0].Relevance != model.FindingBaseline {
 		t.Fatalf("valid baseline finding = %#v, %v", result, err)
 	}
+	emptyNonBaseline := strings.Replace(strings.Replace(strings.Replace(valid, `"relevance":"baseline"`, `"relevance":"causal"`, 1), `"baseline_sha":"`+base+`"`, `"baseline_sha":""`, 1), `"baseline_evidence":"go test ./internal/studio at base fails identically"`, `"baseline_evidence":""`, 1)
+	if _, err := Parse(emptyNonBaseline, "reviewer"); err != nil {
+		t.Fatalf("non-baseline finding with required empty proof fields was rejected: %v", err)
+	}
 	for _, input := range []string{
 		strings.Replace(valid, `"baseline_evidence":"go test ./internal/studio at base fails identically"`, `"baseline_evidence":""`, 1),
 		strings.Replace(valid, `"relevance":"baseline"`, `"relevance":"not-proven"`, 1),
@@ -328,6 +332,57 @@ func TestFindingRelevanceRequiresBaselineProof(t *testing.T) {
 		if _, err := Parse(input, "reviewer"); err == nil {
 			t.Fatalf("invalid relevance proof accepted: %s", input)
 		}
+	}
+}
+
+func TestSchemaObjectsDeclareExactlyTheirProperties(t *testing.T) {
+	var schema any
+	if err := json.Unmarshal([]byte(Schema()), &schema); err != nil {
+		t.Fatal(err)
+	}
+	assertStrictSchemaObjects(t, schema, "$")
+}
+
+func assertStrictSchemaObjects(t *testing.T, node any, path string) {
+	t.Helper()
+	object, ok := node.(map[string]any)
+	if !ok {
+		return
+	}
+	if object["type"] == "object" {
+		properties, ok := object["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s object schema has no properties", path)
+		}
+		if additional, ok := object["additionalProperties"].(bool); !ok || additional {
+			t.Fatalf("%s object schema is not strict: %#v", path, object["additionalProperties"])
+		}
+		required, ok := object["required"].([]any)
+		if !ok {
+			t.Fatalf("%s object schema has no required keys", path)
+		}
+		seen := make(map[string]bool, len(required))
+		for _, value := range required {
+			key, ok := value.(string)
+			if !ok || seen[key] {
+				t.Fatalf("%s has invalid required key %#v", path, value)
+			}
+			seen[key] = true
+		}
+		if len(seen) != len(properties) {
+			t.Fatalf("%s required keys %v do not match properties %v", path, required, properties)
+		}
+		for key := range properties {
+			if !seen[key] {
+				t.Fatalf("%s property %q is not required", path, key)
+			}
+		}
+		for key, child := range properties {
+			assertStrictSchemaObjects(t, child, path+".properties."+key)
+		}
+	}
+	if items, ok := object["items"]; ok {
+		assertStrictSchemaObjects(t, items, path+".items")
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -431,9 +432,10 @@ func Schema() string {
 		for k := range props {
 			required = append(required, k)
 		}
+		sort.Strings(required)
 		return map[string]any{"type": "object", "properties": props, "required": required, "additionalProperties": false}
 	}
-	finding := map[string]any{"type": "object", "properties": map[string]any{"severity": map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low", "nit"}}, "category": str, "location": str, "reason": str, "suggested_resolution": str, "relevance": map[string]any{"type": "string", "enum": []string{model.FindingChanged, model.FindingCausal, model.FindingBaseline, model.FindingUnknown}}, "baseline_sha": str, "baseline_evidence": str}, "required": []string{"severity", "category", "location", "reason", "suggested_resolution", "relevance"}, "additionalProperties": false}
+	finding := obj(map[string]any{"severity": map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low", "nit"}}, "category": str, "location": str, "reason": str, "suggested_resolution": str, "relevance": map[string]any{"type": "string", "enum": []string{model.FindingChanged, model.FindingCausal, model.FindingBaseline, model.FindingUnknown}}, "baseline_sha": str, "baseline_evidence": str})
 	risk := map[string]any{"type": "string", "enum": []string{"low", "medium", "high"}}
 	key := map[string]any{"type": "string", "pattern": model.PlanKeyPattern}
 	task := obj(map[string]any{"key": key, "title": nonEmptyString, "objective": nonEmptyString, "acceptance": nonEmptyArray(str), "dependencies": array(str), "areas": nonEmptyArray(str), "conflict_domains": nonEmptyArray(str), "risk": risk, "ui": map[string]any{"type": "boolean"}, "security": map[string]any{"type": "boolean"}, "roles": array(str)})
