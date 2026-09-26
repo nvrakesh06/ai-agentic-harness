@@ -62,6 +62,10 @@ func init() {
 		}
 		os.Exit(1)
 	}
+	if os.Getenv("AIH_HELPER_MODE") == "invalid-schema" {
+		fmt.Fprintln(os.Stderr, `{"type":"turn.failed","error":{"code":"bad_request","message":"{\"error\":{\"code\":\"invalid_json_schema\"}}"}}`)
+		os.Exit(1)
+	}
 	if os.Getenv("AIH_HELPER_MODE") == "quoted-auth" {
 		fmt.Fprintln(os.Stderr, `{"type":"item.completed","item":{"type":"agent_message","text":"repository fixture quotes HTTP 401 Unauthorized"}}`)
 		os.Exit(1)
@@ -197,6 +201,36 @@ func TestAuthenticationFailureRequiresStructuredProviderErrorRecord(t *testing.T
 			t.Fatalf("process start failure classification = authentication=%t, err=%v", IsAuthenticationFailure(err), err)
 		}
 	})
+}
+
+func TestRequestRejectionRequiresAuthoritativeFailureEnvelope(t *testing.T) {
+	const nested = `{"type":"turn.failed","error":{"code":"bad_request","message":"{\"error\":{\"code\":\"invalid_json_schema\"}}"}}`
+	if failure, code := classifyFailureDetail("codex", "", nested); failure != FailureRequestRejected || code != RejectionInvalidJSONSchema {
+		t.Fatalf("nested documented rejection = %q %q", failure, code)
+	}
+	for _, output := range []string{
+		`{"type":"turn.completed","message":"{\"error\":{\"code\":\"invalid_json_schema\"}}"}`,
+		`{"type":"turn.failed","error":{"code":"bad_request","message":"repository quotes invalid_json_schema"}}`,
+		`{"type":"turn.failed","error":{"code":"bad_request","message":"{\"result\":\"invalid_json_schema\"}"}}`,
+	} {
+		if failure, code := classifyFailureDetail("codex", output, ""); failure != FailureUnknown || code != "" {
+			t.Fatalf("non-authoritative output classified = %q %q: %s", failure, code, output)
+		}
+	}
+	invocation := &InvocationError{Failure: FailureRequestRejected, Rejection: RejectionInvalidJSONSchema}
+	if code, ok := RequestRejection(invocation); !ok || code != RejectionInvalidJSONSchema {
+		t.Fatalf("typed request rejection = %q %t", code, ok)
+	}
+	if code, ok := RequestRejection(errors.New("invalid_json_schema")); ok || code != "" {
+		t.Fatalf("untyped text classified = %q %t", code, ok)
+	}
+}
+
+func TestSchemaSHA256IsStable(t *testing.T) {
+	first, second := SchemaSHA256(), SchemaSHA256()
+	if first != second || len(first) != 64 {
+		t.Fatalf("schema digest = %q, %q", first, second)
+	}
 }
 
 func TestWorkerScratchIsExternalAndConfiguresTemporaryToolCaches(t *testing.T) {

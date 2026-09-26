@@ -4,6 +4,7 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,7 @@ type InvocationError struct {
 	LastActivity time.Time
 	OutputBytes  int
 	Failure      FailureClass
+	Rejection    string
 }
 
 func (e *InvocationError) Error() string { return e.Cause.Error() }
@@ -60,8 +62,15 @@ func (e *InvocationError) Unwrap() error { return e.Cause }
 type FailureClass string
 
 const (
-	FailureUnknown        FailureClass = ""
-	FailureAuthentication FailureClass = "authentication"
+	FailureUnknown         FailureClass = ""
+	FailureAuthentication  FailureClass = "authentication"
+	FailureRequestRejected FailureClass = "request_rejected"
+
+	// RejectionInvalidJSONSchema is the only request rejection currently
+	// recognized from a documented provider error envelope. New codes need an
+	// explicit classifier and admission scope; free-form error text is never a
+	// durable provider hold.
+	RejectionInvalidJSONSchema = "invalid_json_schema"
 )
 
 // IsAuthenticationFailure reports only a typed classification made by the
@@ -69,6 +78,17 @@ const (
 func IsAuthenticationFailure(err error) bool {
 	var invocation *InvocationError
 	return errors.As(err, &invocation) && invocation.Failure == FailureAuthentication
+}
+
+// RequestRejection reports a typed, documented request rejection without
+// exposing the provider diagnostic. The returned code is safe to persist as a
+// bounded admission identity component.
+func RequestRejection(err error) (string, bool) {
+	var invocation *InvocationError
+	if !errors.As(err, &invocation) || invocation.Failure != FailureRequestRejected || invocation.Rejection == "" {
+		return "", false
+	}
+	return invocation.Rejection, true
 }
 
 func New(name string) Provider {
@@ -250,11 +270,13 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 }
 
 func (c CLI) invocationError(cause error, observed platform.Observation) error {
+	failure, rejection := classifyFailureDetail(c.Kind, observed.Stdout, observed.Stderr)
 	return &InvocationError{
 		Cause:        fmt.Errorf("%s invocation failed: %w", c.Kind, cause),
 		LastActivity: observed.LastActivity,
 		OutputBytes:  len(observed.Output),
-		Failure:      classifyFailure(c.Kind, observed.Stdout, observed.Stderr),
+		Failure:      failure,
+		Rejection:    rejection,
 	}
 }
 
@@ -262,6 +284,11 @@ func (c CLI) invocationError(cause error, observed platform.Observation) error {
 // the provider process. In particular, it does not scan arbitrary successful
 // event text, which may quote source files, prompts, or test fixtures.
 func classifyFailure(kind, stdout, stderr string) FailureClass {
+	failure, _ := classifyFailureDetail(kind, stdout, stderr)
+	return failure
+}
+
+func classifyFailureDetail(kind, stdout, stderr string) (FailureClass, string) {
 	for _, line := range strings.Split(stdout+"\n"+stderr, "\n") {
 		var record struct {
 			Type    string          `json:"type"`
@@ -273,7 +300,7 @@ func classifyFailure(kind, stdout, stderr string) FailureClass {
 		if json.Unmarshal([]byte(line), &record) != nil {
 			continue
 		}
-		var message string
+		var message, rejection string
 		switch kind {
 		case "codex":
 			if record.Type != "turn.failed" {
@@ -290,6 +317,7 @@ func classifyFailure(kind, stdout, stderr string) FailureClass {
 				continue
 			}
 			message = detail.Code + " " + detail.Message
+			rejection = documentedRequestRejection(detail.Code, detail.Message)
 		case "claude-code":
 			if record.Type != "result" || !record.IsError {
 				continue
@@ -299,10 +327,48 @@ func classifyFailure(kind, stdout, stderr string) FailureClass {
 			continue
 		}
 		if authenticationMessage(message) {
-			return FailureAuthentication
+			return FailureAuthentication, ""
+		}
+		if rejection != "" {
+			return FailureRequestRejected, rejection
 		}
 	}
-	return FailureUnknown
+	return FailureUnknown, ""
+}
+
+// documentedRequestRejection accepts a provider error code only from the
+// error object of a failed provider event. Codex may place the API error JSON
+// inside error.message, so decode that value as JSON rather than searching it.
+// This deliberately cannot classify source text that merely quotes a code.
+func documentedRequestRejection(code, message string) string {
+	if knownRequestRejection(code) {
+		return code
+	}
+	var nested struct {
+		Code  string `json:"code"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(message), &nested) != nil {
+		return ""
+	}
+	if knownRequestRejection(nested.Code) {
+		return nested.Code
+	}
+	if knownRequestRejection(nested.Error.Code) {
+		return nested.Error.Code
+	}
+	return ""
+}
+
+func knownRequestRejection(code string) bool { return code == RejectionInvalidJSONSchema }
+
+// SchemaSHA256 is the stable digest used to scope a provider schema hold. It
+// hashes the exact schema sent to both supported provider CLIs.
+func SchemaSHA256() string {
+	sum := sha256.Sum256([]byte(Schema()))
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func authenticationMessage(message string) bool {
