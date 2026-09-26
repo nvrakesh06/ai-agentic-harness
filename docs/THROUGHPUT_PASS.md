@@ -131,3 +131,27 @@ more infrastructure simply because an audit proposed it.
 The existing batch already repairs publication timeout recovery, deadlock,
 history-preserving synchronization, focused/shared validation, sealed visual
 reattestation, provider-auth handling, and explicit scope/task recovery.
+
+## Integration status and measured fixture repair
+
+The integration branch contains the four throughput lanes and the earlier
+reviewed recovery batch. Focused native/metrics fixtures passed together (183.545s),
+combined model/config/roles/CLI/release unit checks passed, and the supported
+read-only scope preview passed against stopped StatMotion revision 4894.
+Final reader fixtures and the complete release gate remain required before deployment.
+
+The QA-wave fixture originally used a 45-second wait with two independently
+merging tasks. Timeout stacks showed active serialized Git publication, rather
+than a mutex cycle. The corrected fixture pins canonical writer/reader capacities,
+holds the independent writer active until durable exact-head QA acceptance, and
+uses a bounded 90-second observation window with a 120-second worker budget.
+It retains peer-artifact and acceptance assertions. The mixed P1/deadline fixture
+waits for completed routing instead of failing on a valid intermediate publication.
+All failure exits cancel and drain their supervisor before closing its database.
+
+Known limits: this pass does not claim automatic binary draining, automatic scope
+reauthorization, or complete issue-94 planning recovery. Reader budgets are optional;
+legacy configuration retains its prior worker-budget fallback. Historical pinned
+run context and state residence are unavailable where they were never recorded.
+Product delivery improvement must be measured after resumption, not inferred from
+parallel agent count or these passing infrastructure checks.
