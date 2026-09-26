@@ -105,7 +105,10 @@ trying to reuse it as an open PR. Rewritten main history is rejected.
 
 `aih task replan --file repair.json` is a one-shot supervisor operation for an
 idle, unmerged group of tasks in one objective. The versioned manifest pins the
-current state, canonical policy, source checkpoints, and one replacement contract.
+exact current `aih-state` ref, canonical policy, source checkpoints, and one
+replacement contract. It can include a task with an empty checkpoint only when
+the remote snapshot proves that task was never started; such a task has no source
+patch and its declared branch must be absent remotely.
 It creates a new successor branch and records each original as `SUPERSEDED`; an
 original never becomes `DONE`, and its dependants wait for the successor's normal
 verification and integration. Phase one deliberately rejects cross-objective

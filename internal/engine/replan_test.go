@@ -11,7 +11,7 @@ import (
 func validReplanRequest() ReplanRequest {
 	sha := strings.Repeat("a", 40)
 	hash := strings.Repeat("b", 64)
-	return ReplanRequest{Schema: replanSchema, CommandID: "repair-1", Expected: ReplanExpected{BaseSHA: sha, Config: hash, Rules: hash},
+	return ReplanRequest{Schema: replanSchema, CommandID: "repair-1", Expected: ReplanExpected{BaseSHA: sha, Config: hash, Rules: hash, StateRef: sha},
 		Originals:   []ReplanOriginal{{TaskID: "old", State: model.Blocked, HeadSHA: sha}},
 		Sources:     []ReplanSource{{TaskID: "old", BaseSHA: strings.Repeat("c", 40), HeadSHA: sha, Order: 1}},
 		Replacement: ReplanReplacement{ID: "replacement", Title: "Repair", Objective: "repair", Acceptance: []string{"works"}, Areas: []string{"internal/engine"}, Domains: []string{"engine"}, Risk: "medium"}, Reason: "explicit bounded repair"}
@@ -32,6 +32,38 @@ func TestDecodeReplanRequestFailsClosed(t *testing.T) {
 	request.Sources[0].Order = 0
 	if err = validateReplanRequest(request); err == nil {
 		t.Fatal("unordered source checkpoint accepted")
+	}
+	request = validReplanRequest()
+	request.Expected.StateRef = ""
+	if err = validateReplanRequest(request); err == nil {
+		t.Fatal("state-unbound replan request accepted")
+	}
+	request = validReplanRequest()
+	request.Originals = append(request.Originals, ReplanOriginal{TaskID: "queued", State: model.Ready})
+	if err = validateReplanRequest(request); err != nil {
+		t.Fatalf("provably unstarted original was rejected at manifest shape: %v", err)
+	}
+	request.Sources[0].HeadSHA = strings.Repeat("d", 40)
+	if err = validateReplanRequest(request); err == nil {
+		t.Fatal("source checkpoint detached from original head accepted")
+	}
+}
+
+func TestReplanUnstartedRequiresEmptyLifecycle(t *testing.T) {
+	s := model.NewSnapshot("project123")
+	task := &model.Task{ID: "queued", State: model.Ready, Branch: "aih/queued", FixCycles: map[string]int{}}
+	s.Tasks[task.ID] = task
+	if !replanUnstarted(s, task) {
+		t.Fatal("empty queued task was not accepted")
+	}
+	task.Attempts = 1
+	if replanUnstarted(s, task) {
+		t.Fatal("attempted task was accepted as unstarted")
+	}
+	task.Attempts = 0
+	s.Runs = []model.Run{{Task: task.ID, Outcome: "interrupted"}}
+	if replanUnstarted(s, task) {
+		t.Fatal("task with a durable run was accepted as unstarted")
 	}
 }
 
