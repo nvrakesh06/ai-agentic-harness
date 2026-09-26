@@ -492,7 +492,7 @@ func TestPreflightReaderQueueLeavesIndependentWriterSlotsAvailable(t *testing.T)
 		s.Tasks[item.id] = &model.Task{ID: item.id, Title: item.id, Objective: "Fixture task " + item.id,
 			Acceptance: []string{"fixture succeeds"}, Areas: []string{item.id}, Domains: []string{item.id},
 			Risk: "low", UI: item.ui, State: model.Ready, Branch: "aih/" + item.id,
-			BaseSHA: base, HeadSHA: base}
+			BaseSHA: base, HeadSHA: base, AssignedAreas: []string{item.id}, AssignedAreaKinds: map[string]string{item.id: model.AreaFile}}
 		if err = f.P.Git.Worktree(ctx, f.P.TaskPath(s.Tasks[item.id]), s.Tasks[item.id].Branch, base); err != nil {
 			t.Fatal(err)
 		}
@@ -549,7 +549,20 @@ func TestPreflightReaderQueueLeavesIndependentWriterSlotsAvailable(t *testing.T)
 		case err := <-done:
 			t.Fatalf("supervisor exited before independent writers started: %v", err)
 		case <-writerDeadline.C:
-			t.Fatal(fmt.Sprintf("reader queue suppressed writers after reader pressure: designers=%d writers=%d snapshot=%#v", workers.designers.Load(), workers.writers.Load(), current))
+			code := make(map[string]string, 2)
+			for _, id := range []string{"code_a", "code_b"} {
+				if task := current.Tasks[id]; task != nil {
+					phase, reason := "", ""
+					if task.Preflight != nil {
+						phase = task.Preflight.Phase
+					}
+					if task.Blocker != nil {
+						reason = task.Blocker.Reason
+					}
+					code[id] = fmt.Sprintf("state=%s preflight=%s blocker=%q", task.State, phase, reason)
+				}
+			}
+			t.Fatal(fmt.Sprintf("reader queue suppressed writers after reader pressure: designers=%d writers=%d code=%v snapshot=%#v", workers.designers.Load(), workers.writers.Load(), code, current))
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
