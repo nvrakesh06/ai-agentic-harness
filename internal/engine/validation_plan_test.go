@@ -40,6 +40,29 @@ func TestValidationPlanSkipsForeignPlatformToolBeforeIdentity(t *testing.T) {
 	}
 }
 
+func TestFullValidationPlanSkipsForeignPlatformToolBeforeIdentity(t *testing.T) {
+	ctx := context.Background()
+	head, err := (gitx.Git{Dir: "."}).SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectDir, err := (gitx.Git{Dir: "."}).Run(ctx, "", "rev-parse", "--show-toplevel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := config.Effective{Hash: strings.Repeat("a", 64), Project: config.Project{Checks: []config.Check{
+		{Name: "host", Command: []string{os.Args[0]}, Platforms: []string{runtime.GOOS}, Timeout: 60},
+		{Name: "foreign missing", Command: []string{"aih-foreign-tool-that-does-not-exist"}, Platforms: []string{otherPlatform()}, Timeout: 60},
+	}}}
+	plan, err := fullValidationPlan(ctx, effective, projectDir, head, "platform identity fixture")
+	if err != nil {
+		t.Fatalf("full plan resolved a foreign platform tool: %v", err)
+	}
+	if len(plan.Checks) != 1 || plan.Checks[0].Name != "host" || !strings.Contains(plan.Toolchain, filepath.Base(os.Args[0])+"=") {
+		t.Fatalf("full plan did not retain only the host check: %#v", plan)
+	}
+}
+
 func TestValidationPlanPreservesApplicableMissingToolProvenance(t *testing.T) {
 	missing := config.Check{Name: "host missing", Command: []string{"aih-host-tool-that-does-not-exist"}, Platforms: []string{runtime.GOOS}, Timeout: 60}
 	checks, err := applicableValidationChecks([]config.Check{missing})
