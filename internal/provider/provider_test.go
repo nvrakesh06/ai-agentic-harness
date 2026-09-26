@@ -54,6 +54,18 @@ func init() {
 	if os.Getenv("AIH_HELPER_MODE") == "crash" {
 		os.Exit(2)
 	}
+	if os.Getenv("AIH_HELPER_MODE") == "auth-error" {
+		if strings.Contains(args, "--output-format") {
+			fmt.Fprintln(os.Stderr, `{"type":"result","is_error":true,"result":"HTTP 401 Unauthorized token=abcdefghijklmnopqrstuvwxyz0123456789"}`)
+		} else {
+			fmt.Fprintln(os.Stderr, `{"type":"turn.failed","error":{"code":"unauthorized","message":"HTTP 401 Unauthorized token=abcdefghijklmnopqrstuvwxyz0123456789"}}`)
+		}
+		os.Exit(1)
+	}
+	if os.Getenv("AIH_HELPER_MODE") == "quoted-auth" {
+		fmt.Fprintln(os.Stderr, `{"type":"item.completed","item":{"type":"agent_message","text":"repository fixture quotes HTTP 401 Unauthorized"}}`)
+		os.Exit(1)
+	}
 	if os.Getenv("AIH_HELPER_MODE") == "active-timeout" {
 		for {
 			fmt.Println(`{"type":"command_execution","status":"completed","command":"go test ./internal/provider"}`)
@@ -147,6 +159,44 @@ func TestCodexImplementerInvocationDisablesMultiAgentFeature(t *testing.T) {
 	if !strings.Contains(string(args), "--disable\nmulti_agent") {
 		t.Fatalf("implementer invocation did not disable the multi-agent feature: %s", args)
 	}
+}
+
+func TestAuthenticationFailureRequiresStructuredProviderErrorRecord(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AIH_PROVIDER_HELPER", "1")
+	for _, kind := range []string{"codex", "claude-code"} {
+		t.Run(kind+" error record", func(t *testing.T) {
+			t.Setenv("AIH_HELPER_MODE", "auth-error")
+			runtime := filepath.Join(t.TempDir(), "run")
+			_, err := (CLI{Kind: kind, Executable: exe}).Run(context.Background(), Request{Directory: t.TempDir(), Runtime: runtime, Role: "implementer", Prompt: "fixture", Timeout: time.Second})
+			if !IsAuthenticationFailure(err) {
+				t.Fatalf("error was not typed as authentication failure: %v", err)
+			}
+			output, readErr := os.ReadFile(filepath.Join(runtime, "output.log"))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if strings.Contains(string(output), "abcdefghijklmnopqrstuvwxyz0123456789") {
+				t.Fatalf("provider diagnostic was not redacted: %s", output)
+			}
+		})
+	}
+	t.Run("quoted repository content", func(t *testing.T) {
+		t.Setenv("AIH_HELPER_MODE", "quoted-auth")
+		_, err := (CLI{Kind: "codex", Executable: exe}).Run(context.Background(), Request{Directory: t.TempDir(), Runtime: filepath.Join(t.TempDir(), "run"), Role: "implementer", Prompt: "fixture", Timeout: time.Second})
+		if IsAuthenticationFailure(err) {
+			t.Fatalf("quoted repository content was incorrectly classified: %v", err)
+		}
+	})
+	t.Run("process start failure", func(t *testing.T) {
+		_, err := (CLI{Kind: "codex", Executable: filepath.Join(t.TempDir(), "missing-provider")}).Run(context.Background(), Request{Directory: t.TempDir(), Runtime: filepath.Join(t.TempDir(), "run"), Role: "implementer", Prompt: "fixture", Timeout: time.Second})
+		if err == nil || IsAuthenticationFailure(err) {
+			t.Fatalf("process start failure classification = authentication=%t, err=%v", IsAuthenticationFailure(err), err)
+		}
+	})
 }
 
 func TestWorkerScratchIsExternalAndConfiguresTemporaryToolCaches(t *testing.T) {

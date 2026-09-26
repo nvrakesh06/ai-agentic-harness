@@ -144,6 +144,15 @@ type reviewAssessment struct {
 	failure  error
 }
 
+func reviewAuthenticationFailure(outcomes []reviewOutcome) bool {
+	for _, outcome := range outcomes {
+		if provider.IsAuthenticationFailure(outcome.err) {
+			return true
+		}
+	}
+	return false
+}
+
 func supervisorEvidenceText(text string) bool {
 	text = strings.ToLower(text)
 	for _, decision := range []string{"product decision", "choose whether", "accept risk", "authorize an exception", "approve an exception", "production access", "destructive migration", "provide credentials", "threat model", "security boundary", "trusted workspace", "race condition"} {
@@ -1078,6 +1087,12 @@ func (c *Controller) work(id string, write bool) {
 }
 
 func (c *Controller) handleVerificationError(id string, err error) {
+	if provider.IsAuthenticationFailure(err) {
+		// Review calls have already placed the task in Review, so resume that
+		// same gate after the operator restores the provider session.
+		c.providerAuthenticationBlock(id, "review", model.Review)
+		return
+	}
 	if scopeError(err) {
 		c.block(id, "Correct or replan the immutable task-area assignment; local work is preserved.", err.Error(), model.Ready)
 		return
@@ -1101,6 +1116,22 @@ func (c *Controller) handleVerificationError(id string, err error) {
 		return
 	}
 	c.retry(id, "verification", err.Error())
+}
+
+func (c *Controller) providerAuthenticationBlock(id, stage string, resume model.State) {
+	t := c.Snapshot().Tasks[id]
+	if t == nil {
+		return
+	}
+	question := "Provider authentication failed. Restore the configured provider login for this OS user, then answer this task to resume its preserved " + stage + " stage."
+	reason := "The provider CLI returned a confirmed authentication error. AIH preserved task checkpoints and did not charge a code-fix or Advisor retry budget."
+	if c.mutate(func(s *model.Snapshot) error {
+		model.BlockWithOrigin(s.Tasks[id], question, reason, resume, model.BlockerOriginProviderAuthentication)
+		return nil
+	}) == nil {
+		_ = c.P.DB.Event(id, t.RunID, stage, c.P.Config.Project.Provider, "provider_authentication_blocked", "confirmed provider authentication failure; task retry budgets preserved")
+		c.mirror(id)
+	}
 }
 func (c *Controller) implement(id string) bool {
 	effective, e := c.effective(c.ctx)
@@ -1135,6 +1166,14 @@ func (c *Controller) implement(id string) bool {
 		if ce := c.recoveredCheckpoint(c.ctx, id, r); ce != nil {
 			c.block(id, "Resolve recovered checkpoint publication failure; local work is preserved.", ce.Error(), model.Ready)
 		}
+		return false
+	}
+	if provider.IsAuthenticationFailure(e) {
+		if ce := c.checkpointAuthenticationFailure(id); ce != nil {
+			c.block(id, "Resolve checkpoint failure; local work is preserved.", ce.Error(), model.Ready)
+			return false
+		}
+		c.providerAuthenticationBlock(id, "implementer", model.Ready)
 		return false
 	}
 	if ce := c.checkpoint(c.ctx, id); ce != nil {
@@ -1227,6 +1266,24 @@ func (c *Controller) implement(id string) bool {
 		c.retry(id, "implementation", "invalid result status")
 		return false
 	}
+}
+
+// checkpointAuthenticationFailure preserves edits made before a provider
+// authentication interruption but does not manufacture a checkpoint for a
+// failed call that left the worktree unchanged.
+func (c *Controller) checkpointAuthenticationFailure(id string) error {
+	t := c.Snapshot().Tasks[id]
+	if t == nil {
+		return errors.New("task disappeared during provider authentication failure")
+	}
+	status, err := (gitx.Git{Dir: c.P.TaskPath(t)}).Run(c.ctx, "", "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(status) == "" {
+		return nil
+	}
+	return c.checkpoint(c.ctx, id)
 }
 
 func completeImplementation(task *model.Task, guidanceAtStart int) (bool, error) {
@@ -1742,6 +1799,10 @@ func (c *Controller) verifyReview(id string) error {
 	if e = c.preserveReviewFindings(id, assessment.findings); e != nil {
 		return e
 	}
+	if reviewAuthenticationFailure(outcomes) {
+		c.providerAuthenticationBlock(id, "review", model.Review)
+		return nil
+	}
 	for i, role := range activeRequired {
 		if outcomes[i].result.Status == "completed" {
 			evidence.Reviews[role.Name] = outcomes[i].result.Summary
@@ -1833,6 +1894,10 @@ func (c *Controller) verifyReview(id string) error {
 		refreshAssessment := assessReviews(refreshRoles, refreshed, reviewFindingBlocksOrigin(t, paths, refreshRoles))
 		if e = c.preserveReviewFindings(id, refreshAssessment.findings); e != nil {
 			return e
+		}
+		if reviewAuthenticationFailure(refreshed) {
+			c.providerAuthenticationBlock(id, "review", model.Review)
+			return nil
 		}
 		for i, role := range refreshRoles {
 			if refreshed[i].result.Status == "completed" {

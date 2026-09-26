@@ -310,3 +310,31 @@ func TestImplementationFailureKeepsNormalFixLoop(t *testing.T) {
 		t.Fatalf("code failure ran implementer %d times, want normal bounded retry", got)
 	}
 }
+
+func TestProviderAuthenticationFailurePreservesTaskBudgetAndSkipsAdvisor(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	f.Provider.AuthFailures = map[string]int{"auth-blocked": 1}
+	seedReadyTask(t, ctx, f, "auth-blocked")
+	task := runUntilTaskState(t, ctx, f, "auth-blocked", model.Blocked)
+	if task.Attempts != 0 || len(task.FixCycles) != 0 || task.AdvisorUsed {
+		t.Fatalf("authentication failure consumed task recovery budget: %+v", task)
+	}
+	if task.Blocker == nil || task.Blocker.Origin != model.BlockerOriginProviderAuthentication || task.Blocker.Resume != model.Ready {
+		t.Fatalf("authentication failure did not preserve implementer stage: %+v", task.Blocker)
+	}
+	if got := f.Provider.ImplementationCount("auth-blocked"); got != 1 {
+		t.Fatalf("implementer calls = %d, want one failed provider invocation", got)
+	}
+	if got := f.Provider.AdvisorCount("auth-blocked"); got != 0 {
+		t.Fatalf("advisor calls = %d, want none after authentication failure", got)
+	}
+	if strings.Contains(task.Blocker.Reason, "fixture provider invocation failed") {
+		t.Fatalf("raw provider diagnostic entered blocker: %q", task.Blocker.Reason)
+	}
+}

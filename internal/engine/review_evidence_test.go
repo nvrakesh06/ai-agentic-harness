@@ -38,6 +38,22 @@ func TestBoundedFailureDiagnosticPreservesTailAfterLongSuccessfulOutput(t *testi
 	}
 }
 
+func TestReviewAuthenticationFailureTakesPrecedenceOverConcurrentFinding(t *testing.T) {
+	builtins := roles.Builtins()
+	required := []roles.Role{builtins["reviewer"], builtins["qa"]}
+	outcomes := []reviewOutcome{
+		{result: provider.Result{Status: "completed", Findings: []model.Finding{{Severity: "high", Category: "correctness", Reason: "fixture finding", Resolution: "repair fixture"}}}},
+		{err: &provider.InvocationError{Cause: errors.New("fixture provider failure"), Failure: provider.FailureAuthentication}},
+	}
+	assessment := assessReviews(required, outcomes)
+	if assessment.blocking != 0 || len(assessment.findings) != 1 {
+		t.Fatalf("mixed review assessment lost the concrete finding: %+v", assessment)
+	}
+	if !reviewAuthenticationFailure(outcomes) {
+		t.Fatal("typed review authentication failure was not detected")
+	}
+}
+
 func TestPassedCheckEvidenceDoesNotPublishOutputOrArguments(t *testing.T) {
 	secret := "ghp_" + strings.Repeat("a", 30)
 	privateFixture := "customer-email@example.invalid"

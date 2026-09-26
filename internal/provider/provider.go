@@ -46,10 +46,29 @@ type InvocationError struct {
 	Cause        error
 	LastActivity time.Time
 	OutputBytes  int
+	Failure      FailureClass
 }
 
 func (e *InvocationError) Error() string { return e.Cause.Error() }
 func (e *InvocationError) Unwrap() error { return e.Cause }
+
+// FailureClass identifies a provider-side failure without retaining provider
+// diagnostics in durable task state. It is deliberately small: task routing
+// must not infer an authentication outage from arbitrary model or repository
+// text.
+type FailureClass string
+
+const (
+	FailureUnknown        FailureClass = ""
+	FailureAuthentication FailureClass = "authentication"
+)
+
+// IsAuthenticationFailure reports only a typed classification made by the
+// supported provider adapter from a provider error record.
+func IsAuthenticationFailure(err error) bool {
+	var invocation *InvocationError
+	return errors.As(err, &invocation) && invocation.Failure == FailureAuthentication
+}
 
 func New(name string) Provider {
 	exe := "codex"
@@ -199,7 +218,7 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 				return recovered, nil
 			}
 		}
-		return result, &InvocationError{Cause: fmt.Errorf("%s invocation failed: %w", c.Kind, e), LastActivity: observed.LastActivity, OutputBytes: len(diagnosticOutput)}
+		return result, c.invocationError(e, observed)
 	}
 	out := observed.Stdout
 	if c.Kind == "codex" {
@@ -218,7 +237,7 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 			return result, fmt.Errorf("malformed Claude envelope: %w", e)
 		}
 		if envelope.IsError {
-			return result, errors.New("Claude returned an error result")
+			return result, c.invocationError(errors.New("Claude returned an error result"), observed)
 		}
 		if len(envelope.Structured) > 0 {
 			out = string(envelope.Structured)
@@ -227,6 +246,71 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 		}
 	}
 	return Parse(out, r.Role)
+}
+
+func (c CLI) invocationError(cause error, observed platform.Observation) error {
+	return &InvocationError{
+		Cause:        fmt.Errorf("%s invocation failed: %w", c.Kind, cause),
+		LastActivity: observed.LastActivity,
+		OutputBytes:  len(observed.Output),
+		Failure:      classifyFailure(c.Kind, observed.Stdout, observed.Stderr),
+	}
+}
+
+// classifyFailure reads only documented provider error envelopes emitted by
+// the provider process. In particular, it does not scan arbitrary successful
+// event text, which may quote source files, prompts, or test fixtures.
+func classifyFailure(kind, stdout, stderr string) FailureClass {
+	for _, line := range strings.Split(stdout+"\n"+stderr, "\n") {
+		var record struct {
+			Type    string          `json:"type"`
+			Message string          `json:"message"`
+			Error   json.RawMessage `json:"error"`
+			IsError bool            `json:"is_error"`
+			Result  string          `json:"result"`
+		}
+		if json.Unmarshal([]byte(line), &record) != nil {
+			continue
+		}
+		var message string
+		switch kind {
+		case "codex":
+			if record.Type != "turn.failed" {
+				continue
+			}
+			if len(record.Error) == 0 {
+				continue
+			}
+			var detail struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			if json.Unmarshal(record.Error, &detail) != nil {
+				continue
+			}
+			message = detail.Code + " " + detail.Message
+		case "claude-code":
+			if record.Type != "result" || !record.IsError {
+				continue
+			}
+			message = record.Result
+		default:
+			continue
+		}
+		if authenticationMessage(message) {
+			return FailureAuthentication
+		}
+	}
+	return FailureUnknown
+}
+
+func authenticationMessage(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "http 401") ||
+		strings.Contains(message, "401 unauthorized") ||
+		strings.Contains(message, "authentication failed") ||
+		strings.Contains(message, "not authenticated") ||
+		strings.Contains(message, "invalid api key")
 }
 
 // resolvedPath evaluates every existing component and reconstructs missing
