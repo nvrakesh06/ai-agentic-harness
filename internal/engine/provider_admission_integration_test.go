@@ -66,9 +66,8 @@ func TestProviderAdmissionHoldSuppressesWriterAndRestartWithoutBudgets(t *testin
 	seedReadyTask(t, ctx, f, "first")
 	seedReadyTask(t, ctx, f, "second")
 
-	firstCtx, stopFirst := context.WithCancel(ctx)
 	firstDone := make(chan error, 1)
-	go func() { firstDone <- engine.New(f.P).Serve(firstCtx) }()
+	go func() { firstDone <- engine.New(f.P).Serve(ctx) }()
 	s := waitProviderAdmissionHold(t, ctx, f)
 	first := s.Tasks["first"]
 	if first == nil || first.State != model.Ready || first.Attempts != 0 || len(first.FixCycles) != 0 || first.AdvisorUsed {
@@ -87,14 +86,15 @@ func TestProviderAdmissionHoldSuppressesWriterAndRestartWithoutBudgets(t *testin
 	if got := f.Provider.ProviderCallCount("second"); got != 0 {
 		t.Fatalf("second task made %d provider calls after shared hold", got)
 	}
-	stopFirst()
+	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
+		t.Fatal(err)
+	}
 	if err = <-firstDone; err != nil {
 		t.Fatal(err)
 	}
 
-	secondCtx, stopSecond := context.WithCancel(ctx)
 	secondDone := make(chan error, 1)
-	go func() { secondDone <- engine.New(f.P).Serve(secondCtx) }()
+	go func() { secondDone <- engine.New(f.P).Serve(ctx) }()
 	time.Sleep(1200 * time.Millisecond)
 	if got := f.Provider.ProviderCallCount("first"); got != 1 {
 		t.Fatalf("restart repeated rejected provider call %d times", got)
@@ -102,7 +102,9 @@ func TestProviderAdmissionHoldSuppressesWriterAndRestartWithoutBudgets(t *testin
 	if got := f.Provider.ProviderCallCount("second"); got != 0 {
 		t.Fatalf("restart admitted second provider call %d times", got)
 	}
-	stopSecond()
+	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
+		t.Fatal(err)
+	}
 	if err = <-secondDone; err != nil {
 		t.Fatal(err)
 	}
