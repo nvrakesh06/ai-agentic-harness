@@ -39,6 +39,65 @@ type mixedReviewDeadlineProvider struct {
 	firstTimeout  chan struct{}
 }
 
+type blockerWaveProvider struct {
+	blockerImplementations atomic.Int32
+	reviewerCalls          atomic.Int32
+	securityCalls          atomic.Int32
+	qaCalls                atomic.Int32
+	repairStarted          chan struct{}
+	releaseRepair          chan struct{}
+	repairOnce             sync.Once
+}
+
+func (*blockerWaveProvider) Name() string                   { return "codex" }
+func (*blockerWaveProvider) Validate(context.Context) error { return nil }
+func (p *blockerWaveProvider) Run(ctx context.Context, request provider.Request) (provider.Result, error) {
+	task, err := demo.Task(request.Prompt)
+	if err != nil {
+		return provider.Result{}, err
+	}
+	if request.Role == "implementer" {
+		name, contents := "feature-"+task.Title+".txt", "implemented\n"
+		if task.Title == "blocker" {
+			name = "feature-blocker.go"
+			if p.blockerImplementations.Add(1) == 2 {
+				p.repairOnce.Do(func() { close(p.repairStarted) })
+				select {
+				case <-p.releaseRepair:
+				case <-ctx.Done():
+					return provider.Result{}, ctx.Err()
+				}
+				contents = "repaired\n"
+			}
+		}
+		if err := os.WriteFile(filepath.Join(request.Directory, name), []byte(contents), 0o600); err != nil {
+			return provider.Result{}, err
+		}
+		return provider.Result{Schema: 1, Status: "completed", Summary: "implemented " + task.Title}, nil
+	}
+	if task.Title != "blocker" {
+		return provider.Result{Schema: 1, Status: "completed"}, nil
+	}
+	switch request.Role {
+	case "reviewer":
+		if p.reviewerCalls.Add(1) == 1 {
+			return provider.Result{Schema: 1, Status: "completed", Summary: "changed regression", Findings: []model.Finding{{Severity: "high", Category: "correctness", Location: "feature-blocker.go:1", Reason: "changed behavior fails", Resolution: "repair it", Relevance: model.FindingChanged}}}, nil
+		}
+		return provider.Result{Schema: 1, Status: "completed", Summary: "reviewer accepted repaired head"}, nil
+	case "security":
+		p.securityCalls.Add(1)
+		return provider.Result{Schema: 1, Status: "completed", Summary: "security accepted"}, nil
+	case "qa":
+		p.qaCalls.Add(1)
+		if p.reviewerCalls.Load() < 2 {
+			return provider.Result{}, errors.New("candidate QA ran before the blocking repair")
+		}
+		return provider.Result{Schema: 1, Status: "completed", Summary: "QA accepted repaired head"}, nil
+	default:
+		return provider.Result{Schema: 1, Status: "completed"}, nil
+	}
+}
+
 func (*mixedReviewDeadlineProvider) Name() string                   { return "codex" }
 func (*mixedReviewDeadlineProvider) Validate(context.Context) error { return nil }
 func (p *mixedReviewDeadlineProvider) Run(ctx context.Context, request provider.Request) (provider.Result, error) {
@@ -231,6 +290,108 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 	if evidence == nil || evidence.Reviews["reviewer"] != "reviewer exact-head summary" || evidence.Reviews["security"] != "security exact-head summary" || evidence.Reviews["qa"] != "QA exact-head acceptance" {
 		t.Fatalf("durable wave evidence = %#v", evidence)
 	}
+}
+
+func TestBlockingPeerDefersCandidateQAUntilRepairAndFullReview(t *testing.T) {
+	setupCtx, setupCancel := context.WithTimeout(context.Background(), time.Minute)
+	defer setupCancel()
+	f, err := demo.New(setupCtx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	configureFixtureRoleTimeouts(t, setupCtx, f, config.RoleTimeouts{})
+	seedReadyTask(t, setupCtx, f, "blocker")
+	snapshot, stateHead, err := f.P.Git.Load(setupCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Tasks["blocker"].Areas = []string{"feature-blocker.go"}
+	snapshot.Tasks["blocker"].Risk = "high"
+	next, err := f.P.Git.StateCommit(setupCtx, stateHead, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(setupCtx, []gitx.Update{{Branch: "aih-state", Old: stateHead, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	workers := &blockerWaveProvider{repairStarted: make(chan struct{}), releaseRepair: make(chan struct{})}
+	f.P.Provider = workers
+	workflowCtx, workflowCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer workflowCancel()
+	supervisor := newFixtureSupervisor(workflowCtx, f.P)
+	drained := false
+	release := func() {
+		select {
+		case <-workers.releaseRepair:
+		default:
+			close(workers.releaseRepair)
+		}
+	}
+	releaseRepair := func() {
+		select {
+		case <-workers.releaseRepair:
+		default:
+			close(workers.releaseRepair)
+		}
+	}
+	defer func() {
+		if !drained {
+			release()
+			if err := supervisor.drain("blocking peer review cleanup"); err != nil {
+				t.Errorf("blocking peer review supervisor drain: %v", err)
+			}
+		}
+	}()
+	select {
+	case <-workers.repairStarted:
+	case <-supervisor.completion():
+		drained = true
+		t.Fatalf("supervisor stopped before review FIX: %v %s", supervisor.completedResult(), retryFixtureStatus(f, "blocker"))
+	case <-workflowCtx.Done():
+		t.Fatalf("reviewer blocker did not reach the writer FIX: %v %s", workflowCtx.Err(), retryFixtureStatus(f, "blocker"))
+	}
+	current, _, err := f.P.DB.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := current.Tasks["blocker"]
+	if task == nil || task.FixCycles["reviewer"] != 1 || workers.qaCalls.Load() != 0 || !slices.ContainsFunc(task.Findings, func(finding model.Finding) bool {
+		return finding.Role == "reviewer" && finding.Relevance == model.FindingChanged && finding.Location == "feature-blocker.go:1"
+	}) {
+		t.Fatalf("blocking peer was not preserved and routed to FIX before QA: task=%#v qa_calls=%d", task, workers.qaCalls.Load())
+	}
+	rejectedHead := task.HeadSHA
+	if rejectedHead == "" {
+		t.Fatal("blocking review had no durable rejected head")
+	}
+	releaseRepair()
+	for {
+		current, _, err = f.P.DB.Load()
+		if err == nil && current.Tasks["blocker"] != nil && current.Tasks["blocker"].State == model.Done {
+			task = current.Tasks["blocker"]
+			break
+		}
+		select {
+		case <-supervisor.completion():
+			drained = true
+			t.Fatalf("supervisor stopped before repaired full review: %v %s", supervisor.completedResult(), retryFixtureStatus(f, "blocker"))
+		case <-workflowCtx.Done():
+			t.Fatalf("repaired review did not finish: %v %s", workflowCtx.Err(), retryFixtureStatus(f, "blocker"))
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	if workers.blockerImplementations.Load() != 2 || workers.reviewerCalls.Load() != 2 || workers.securityCalls.Load() != 2 || workers.qaCalls.Load() != 1 || task.Evidence == nil || task.Evidence.Head == rejectedHead || task.Evidence.IntegrationSHA != task.HeadSHA || task.Evidence.ReviewDispositions["reviewer"].Disposition != "completed" || task.Evidence.ReviewDispositions["security"].Disposition != "completed" || task.Evidence.ReviewDispositions["qa"].Disposition != "completed" || task.Evidence.ReviewDispositions["reviewer"].SourceHead != task.Evidence.Head || task.Evidence.ReviewDispositions["security"].SourceHead != task.Evidence.Head || task.Evidence.ReviewDispositions["qa"].SourceHead != task.Evidence.Head {
+		t.Fatalf("candidate QA was not deferred until the repaired full roster: implementations=%d reviewer=%d security=%d qa=%d", workers.blockerImplementations.Load(), workers.reviewerCalls.Load(), workers.securityCalls.Load(), workers.qaCalls.Load())
+	}
+	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
+		t.Fatal(err)
+	}
+	if err = supervisor.waitHandoff("blocking peer review cooperative handoff"); err != nil {
+		drained = true
+		t.Fatal(err, retryFixtureStatus(f, "blocker"))
+	}
+	drained = true
 }
 
 func TestReviewTimeoutPersistsPeerFindingBeforeRetryAndDefersQA(t *testing.T) {

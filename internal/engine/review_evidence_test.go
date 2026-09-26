@@ -187,6 +187,53 @@ func TestCompletedReviewDoesNotPublishSupervisorEvidenceOnlyFinding(t *testing.T
 	}
 }
 
+func TestDeferredReviewOutcomeRequiresRetainedAttributedBlocker(t *testing.T) {
+	builtins := roles.Builtins()
+	required := []roles.Role{builtins["reviewer"], builtins["qa"]}
+	blocker := model.Finding{Severity: "high", Category: "correctness", Location: "fixture.go:1", Reason: "changed behavior fails", Resolution: "repair it", Relevance: model.FindingChanged}
+
+	valid := []reviewOutcome{
+		{result: provider.Result{Status: "completed", Findings: []model.Finding{blocker}}},
+		{deferred: true},
+	}
+	assessment := assessReviews(required, valid)
+	if assessment.blocking != 0 || assessment.failure != nil || len(assessment.findings) != 1 || assessment.findings[0].Role != "reviewer" {
+		t.Fatalf("attributed blocker did not safely defer later QA: %#v", assessment)
+	}
+
+	for name, outcomes := range map[string][]reviewOutcome{
+		"nonblocking":      {{result: provider.Result{Status: "completed", Findings: []model.Finding{{Severity: "nit", Category: "style", Relevance: model.FindingChanged}}}}, {deferred: true}},
+		"provider failure": {{err: errors.New("provider unavailable")}, {deferred: true}},
+		"evidence only":    {{result: provider.Result{Status: "completed", Findings: []model.Finding{{Severity: "medium", Category: "verification", Reason: "Node is unavailable", Resolution: "Provide native check output"}}}}, {deferred: true}},
+		"no blocker":       {{result: provider.Result{Status: "completed"}}, {deferred: true}},
+	} {
+		assessment := assessReviews(required, outcomes)
+		if assessment.failure == nil {
+			t.Fatalf("%s deferred QA was accepted without a retained blocker: %#v", name, assessment)
+		}
+	}
+}
+
+func TestCompletedWaveBlocksOriginRequiresAttributedRetainedFinding(t *testing.T) {
+	builtins := roles.Builtins()
+	required := []roles.Role{builtins["reviewer"], builtins["qa"]}
+	task := &model.Task{}
+	base := reviewOutcome{result: provider.Result{Status: "completed", Findings: []model.Finding{{Severity: "high", Category: "correctness", Relevance: model.FindingChanged}}}}
+	if !completedWaveBlocksOrigin(task, []string{"fixture.go"}, required, []reviewOutcome{base, {}}, []int{0}) {
+		t.Fatal("changed blocking finding did not stop the later wave")
+	}
+	for name, outcome := range map[string]reviewOutcome{
+		"baseline":         {result: provider.Result{Status: "completed", Findings: []model.Finding{{Severity: "high", Category: "correctness", Relevance: model.FindingBaseline}}}},
+		"unknown":          {result: provider.Result{Status: "completed", Findings: []model.Finding{{Severity: "high", Category: "correctness", Relevance: model.FindingUnknown}}}},
+		"evidence only":    {result: provider.Result{Status: "completed", Findings: []model.Finding{{Severity: "medium", Category: "verification", Reason: "Node is unavailable", Resolution: "Provide native check output", Relevance: model.FindingChanged}}}},
+		"provider failure": {err: errors.New("provider unavailable")},
+	} {
+		if completedWaveBlocksOrigin(task, []string{"fixture.go"}, required, []reviewOutcome{outcome, {}}, []int{0}) {
+			t.Fatalf("%s incorrectly stopped the later wave", name)
+		}
+	}
+}
+
 func TestReviewEvidencePayloadIsExactHeadAndPeerFree(t *testing.T) {
 	evidence := &model.Evidence{
 		Base: "base", Head: strings.Repeat("a", 40), Config: "config", Rules: "rules",
