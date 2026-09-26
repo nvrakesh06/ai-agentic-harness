@@ -39,6 +39,16 @@ type mixedReviewDeadlineProvider struct {
 	firstTimeout  chan struct{}
 }
 
+// providerHoldPeerWaveProvider deliberately gives the second independent
+// review goroutine time to queue behind MaxReaders=1. The first typed provider
+// rejection must publish the shared admission hold before that queued peer can
+// acquire the reader reservation.
+type providerHoldPeerWaveProvider struct {
+	readerCalls atomic.Int32
+	qaCalls     atomic.Int32
+	firstReader chan struct{}
+}
+
 func (*mixedReviewDeadlineProvider) Name() string                   { return "codex" }
 func (*mixedReviewDeadlineProvider) Validate(context.Context) error { return nil }
 func (p *mixedReviewDeadlineProvider) Run(ctx context.Context, request provider.Request) (provider.Result, error) {
@@ -68,6 +78,45 @@ func (p *mixedReviewDeadlineProvider) Run(ctx context.Context, request provider.
 	case "qa":
 		p.qaCalls.Add(1)
 		return provider.Result{}, errors.New("QA ran before the timed-out peer recovered")
+	default:
+		return provider.Result{Schema: 1, Status: "completed"}, nil
+	}
+}
+
+func (*providerHoldPeerWaveProvider) Name() string                   { return "codex" }
+func (*providerHoldPeerWaveProvider) Validate(context.Context) error { return nil }
+func (p *providerHoldPeerWaveProvider) Run(ctx context.Context, request provider.Request) (provider.Result, error) {
+	task, err := demo.Task(request.Prompt)
+	if err != nil {
+		return provider.Result{}, err
+	}
+	if request.Role == "implementer" {
+		if err := os.WriteFile(filepath.Join(request.Directory, "feature-"+task.Title+".txt"), []byte("implemented\n"), 0o600); err != nil {
+			return provider.Result{}, err
+		}
+		return provider.Result{Schema: 1, Status: "completed", Summary: "implemented " + task.Title}, nil
+	}
+	if task.Title != "held-peer-wave" {
+		return provider.Result{Schema: 1, Status: "completed"}, nil
+	}
+	switch request.Role {
+	case "reviewer", "security":
+		if p.readerCalls.Add(1) != 1 {
+			return provider.Result{}, errors.New("queued reader reached provider after a durable admission hold")
+		}
+		close(p.firstReader)
+		// Keep the reservation occupied while the other independent role starts
+		// and waits on MaxReaders. This tests the post-reservation hold check,
+		// not just the scheduler's next tick.
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-ctx.Done():
+			return provider.Result{}, ctx.Err()
+		}
+		return provider.Result{}, &provider.InvocationError{Cause: errors.New("fixture schema rejected"), Failure: provider.FailureRequestRejected, Rejection: provider.RejectionInvalidJSONSchema}
+	case "qa":
+		p.qaCalls.Add(1)
+		return provider.Result{}, errors.New("QA ran after an independent provider admission rejection")
 	default:
 		return provider.Result{Schema: 1, Status: "completed"}, nil
 	}
@@ -230,6 +279,61 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 	evidence := current.Tasks["audited"].Evidence
 	if evidence == nil || evidence.Reviews["reviewer"] != "reviewer exact-head summary" || evidence.Reviews["security"] != "security exact-head summary" || evidence.Reviews["qa"] != "QA exact-head acceptance" {
 		t.Fatalf("durable wave evidence = %#v", evidence)
+	}
+}
+
+func TestProviderAdmissionHoldRechecksQueuedReviewPeerAfterReaderReservation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	// The canonical file, not only the local project copy, must constrain this
+	// wave to one reader so security queues behind the initial reviewer.
+	f.P.Config.Project.MaxReaders = 1
+	f.Project.MaxReaders = 1
+	configureFixtureRoleTimeouts(t, ctx, f, config.RoleTimeouts{})
+	seedReadyTask(t, ctx, f, "held-peer-wave")
+	snapshot, stateHead, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Tasks["held-peer-wave"].Risk = "high"
+	next, err := f.P.Git.StateCommit(ctx, stateHead, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateHead, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	workers := &providerHoldPeerWaveProvider{firstReader: make(chan struct{})}
+	f.P.Provider = workers
+	done := make(chan error, 1)
+	go func() { done <- engine.New(f.P).Serve(ctx) }()
+	select {
+	case <-workers.firstReader:
+	case serveErr := <-done:
+		t.Fatalf("supervisor stopped before first independent reader rejection: %v", serveErr)
+	case <-time.After(30 * time.Second):
+		t.Fatal("reviewer/security wave did not start")
+	}
+	_ = waitProviderAdmissionHold(t, ctx, f)
+	// Let a few scheduling ticks run after the hold. A role that passed the
+	// pre-semaphore check must still be suppressed after it receives the slot.
+	time.Sleep(250 * time.Millisecond)
+	if got := workers.readerCalls.Load(); got != 1 {
+		t.Fatalf("queued independent reader calls = %d, want exactly the initial rejected provider call", got)
+	}
+	if got := workers.qaCalls.Load(); got != 0 {
+		t.Fatalf("QA calls = %d, want no QA after independent provider rejection", got)
+	}
+	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

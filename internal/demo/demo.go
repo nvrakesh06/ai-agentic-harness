@@ -254,22 +254,25 @@ func (h *Hub) Pull(ctx context.Context, n int) (github.Pull, error) {
 }
 
 type Worker struct {
-	Active            atomic.Int32
-	Max               atomic.Int32
-	ReviewActive      atomic.Int32
-	ReviewMax         atomic.Int32
-	mu                sync.Mutex
-	reviewPair        reviewPair
-	Reviews           []string
-	Failures          map[string]int
-	AuthFailures      map[string]int
-	RequestRejections map[string]int
-	ProviderCalls     map[string]int
-	EnvironmentBlocks map[string]int
-	Implementations   map[string]int
-	Advisors          map[string]int
-	NoChanges         map[string]bool
-	ScratchTooling    map[string]bool
+	Active       atomic.Int32
+	Max          atomic.Int32
+	ReviewActive atomic.Int32
+	ReviewMax    atomic.Int32
+	mu           sync.Mutex
+	reviewPair   reviewPair
+	Reviews      []string
+	Failures     map[string]int
+	AuthFailures map[string]int
+	// AuthFailuresAfterWrite exercises the supervisor checkpoint that must
+	// preserve scoped edits if a provider loses authentication after writing.
+	AuthFailuresAfterWrite map[string]int
+	RequestRejections      map[string]int
+	ProviderCalls          map[string]int
+	EnvironmentBlocks      map[string]int
+	Implementations        map[string]int
+	Advisors               map[string]int
+	NoChanges              map[string]bool
+	ScratchTooling         map[string]bool
 }
 
 // reviewPair is a demo-only rendezvous for the two independent peers used to
@@ -420,6 +423,10 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 		if authFailure {
 			w.AuthFailures[task.Title]--
 		}
+		authFailureAfterWrite := w.AuthFailuresAfterWrite[task.Title] > 0
+		if authFailureAfterWrite {
+			w.AuthFailuresAfterWrite[task.Title]--
+		}
 		environmentBlock := w.EnvironmentBlocks[task.Title] > 0
 		if environmentBlock {
 			w.EnvironmentBlocks[task.Title]--
@@ -437,6 +444,9 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 		}
 		if e = os.WriteFile(filepath.Join(r.Directory, "feature-"+task.Title+".txt"), []byte("implemented\n"), 0600); e != nil {
 			return result, e
+		}
+		if authFailureAfterWrite {
+			return result, &provider.InvocationError{Cause: errors.New("fixture provider invocation failed after scoped write"), Failure: provider.FailureAuthentication}
 		}
 		if w.ScratchTooling[task.Title] {
 			if r.Scratch == "" {

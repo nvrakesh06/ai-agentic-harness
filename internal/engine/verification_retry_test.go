@@ -587,7 +587,7 @@ func TestImplementationFailureKeepsNormalFixLoop(t *testing.T) {
 	}
 }
 
-func TestProviderAuthenticationFailureCreatesSharedHoldWithoutTaskBudget(t *testing.T) {
+func TestProviderAuthenticationFailureAfterScopedWriteCheckpointsSharedHoldAcrossAttach(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
@@ -595,13 +595,16 @@ func TestProviderAuthenticationFailureCreatesSharedHoldWithoutTaskBudget(t *test
 		t.Fatal(err)
 	}
 	defer f.P.DB.Close()
-	f.Provider.AuthFailures = map[string]int{"auth-blocked": 1}
+	// The worker writes first, then returns a typed authentication failure. The
+	// shared hold must not strand that scoped edit in machine A's worktree.
+	f.Provider.AuthFailuresAfterWrite = map[string]int{"auth-blocked": 1}
 	seedReadyTask(t, ctx, f, "auth-blocked")
-	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- engine.New(f.P).Serve(runCtx) }()
+	go func() { done <- engine.New(f.P).Serve(ctx) }()
 	snapshot := waitProviderAdmissionHold(t, ctx, f)
-	stop()
+	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
+		t.Fatal(err)
+	}
 	if err = <-done; err != nil {
 		t.Fatal(err)
 	}
@@ -612,6 +615,9 @@ func TestProviderAuthenticationFailureCreatesSharedHoldWithoutTaskBudget(t *test
 	if task.State != model.Ready || task.Blocker != nil {
 		t.Fatalf("authentication failure did not preserve schedulable implementer checkpoint: %+v", task)
 	}
+	if task.HeadSHA == "" {
+		t.Fatalf("authentication failure after a scoped write did not publish a task checkpoint: %+v", task)
+	}
 	if len(snapshot.ProviderAdmissionHolds) != 1 {
 		t.Fatalf("authentication failure did not create shared provider hold: %#v", snapshot.ProviderAdmissionHolds)
 	}
@@ -621,7 +627,31 @@ func TestProviderAuthenticationFailureCreatesSharedHoldWithoutTaskBudget(t *test
 	if got := f.Provider.AdvisorCount("auth-blocked"); got != 0 {
 		t.Fatalf("advisor calls = %d, want none after authentication failure", got)
 	}
-	if strings.Contains(task.Blocker.Reason, "fixture provider invocation failed") {
+	if task.Blocker != nil && strings.Contains(task.Blocker.Reason, "fixture provider invocation failed") {
 		t.Fatalf("raw provider diagnostic entered blocker: %q", task.Blocker.Reason)
+	}
+
+	// A separate machine must reconstruct the published source checkpoint from
+	// state and the task branch; a provider hold cannot make local edits the
+	// only surviving copy of work completed before authentication failed.
+	replacement, err := f.Open(ctx, filepath.Join(f.Root, "auth-machine-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.DB.Close()
+	if err = replacement.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered, _, err := replacement.DB.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredTask := recovered.Tasks["auth-blocked"]
+	if recoveredTask == nil || recoveredTask.HeadSHA != task.HeadSHA {
+		t.Fatalf("attach lost authentication checkpoint: recovered=%#v want_head=%s", recoveredTask, task.HeadSHA)
+	}
+	content, err := os.ReadFile(filepath.Join(replacement.TaskPath(recoveredTask), "feature-auth-blocked.txt"))
+	if err != nil || strings.TrimSpace(string(content)) != "implemented" {
+		t.Fatalf("attach lost source written before authentication failure: %q %v", content, err)
 	}
 }

@@ -34,8 +34,16 @@ func (e *providerAdmissionHeldError) Unwrap() error {
 }
 
 func isProviderAdmissionHeld(err error) bool {
+	_, held := providerAdmissionHeldErrorFor(err)
+	return held
+}
+
+func providerAdmissionHeldErrorFor(err error) (*providerAdmissionHeldError, bool) {
 	var held *providerAdmissionHeldError
-	return errors.As(err, &held)
+	if !errors.As(err, &held) {
+		return nil, false
+	}
+	return held, true
 }
 
 func providerAdmissionFailure(effective config.Effective, resolved config.ModelResolution, err error) (model.ProviderAdmissionHold, bool) {
@@ -84,6 +92,22 @@ func providerAdmissionHoldForSchema(s *model.Snapshot, effective config.Effectiv
 
 func (c *Controller) providerAdmissionHeld(effective config.Effective) (model.ProviderAdmissionHold, bool) {
 	return providerAdmissionHold(c.Snapshot(), effective)
+}
+
+func (c *Controller) providerAdmissionGate(effective config.Effective, task *model.Task) error {
+	hold, held := c.providerAdmissionHeld(effective)
+	if !held {
+		return nil
+	}
+	if task != nil {
+		if err := c.mutate(func(s *model.Snapshot) error {
+			providerAdmissionCheckpoint(s.Tasks[task.ID])
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return &providerAdmissionHeldError{hold: hold, cause: errors.New(providerAdmissionMessage(hold))}
 }
 
 // providerAdmissionActive resolves canonical configuration only while a

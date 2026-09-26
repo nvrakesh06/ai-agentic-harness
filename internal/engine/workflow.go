@@ -611,16 +611,8 @@ func (c *Controller) recordReadOnlyDeadline(e config.Effective, stage string, r 
 }
 
 func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effective, r roles.Role, t *model.Task, dir, objective, diff, evidence string, complete func(*model.Snapshot, provider.Result, error) error, explicitReadRef string) (provider.Result, error) {
-	if hold, held := c.providerAdmissionHeld(e); held {
-		if t != nil {
-			if err := c.mutate(func(s *model.Snapshot) error {
-				providerAdmissionCheckpoint(s.Tasks[t.ID])
-				return nil
-			}); err != nil {
-				return provider.Result{}, err
-			}
-		}
-		return provider.Result{}, &providerAdmissionHeldError{hold: hold, cause: errors.New(providerAdmissionMessage(hold))}
+	if err := c.providerAdmissionGate(e, t); err != nil {
+		return provider.Result{}, err
 	}
 	if r.Name != "implementer" {
 		select {
@@ -628,6 +620,13 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 			defer func() { <-c.readers }()
 		case <-ctx.Done():
 			return provider.Result{}, ctx.Err()
+		}
+		// A concurrent peer can publish a durable provider hold while this role
+		// waits for a reader reservation. Recheck after acquiring the slot and
+		// before creating a run or dispatching the provider: otherwise every
+		// queued peer that passed the first check would still invoke it.
+		if err := c.providerAdmissionGate(e, t); err != nil {
+			return provider.Result{}, err
 		}
 		if t != nil && t.Preflight != nil && t.Preflight.Phase == "waiting" {
 			if err := c.mutate(func(s *model.Snapshot) error {
@@ -1530,7 +1529,18 @@ func (c *Controller) implement(id string) bool {
 		}
 		return false
 	}
-	if isProviderAdmissionHeld(e) {
+	if held, ok := providerAdmissionHeldErrorFor(e); ok {
+		// A provider may have edited the scoped writer worktree before returning
+		// an authentication failure. Keep the existing fenced checkpoint path so
+		// those edits become portable before the shared provider hold suppresses
+		// every task. A normal successful checkpoint remains a schedulable
+		// pre-provider state; only a failed scope/secret/publication safeguard
+		// requires the existing local recovery blocker.
+		if held.hold.Class == model.ProviderAdmissionAuthentication {
+			if ce := c.checkpointAuthenticationFailure(id); ce != nil {
+				c.block(id, "Resolve checkpoint failure; local work is preserved.", ce.Error(), model.Ready)
+			}
+		}
 		return false
 	}
 	if provider.IsAuthenticationFailure(e) {
