@@ -65,6 +65,54 @@ project directory somewhere safe. Recreate through attach rather than copying a
 SQLite database from another machine. Never delete the authoritative `aih-state`
 branch or manually merge it into main.
 
+## Explicit legacy scope reauthorization
+
+Schema 9 intentionally blocks a started legacy task when it has no provable
+immutable assignment. Do not edit SQLite, infer an old scope from `areas` or a
+diff, or weaken that gate. An operator may instead authorize a **new** bounded
+contract with `aih scope recover --file recovery.json`. This command does not
+start providers or schedule work.
+
+First stop the supervisor, fetch state, and inspect the task checkpoint and
+retained worktree. Create a schema-1 JSON manifest from that exact remote state:
+
+```json
+{
+  "schema": 1,
+  "command_id": "scope-reauth-20260926",
+  "expected_state_ref": "<aih-state commit>",
+  "policy_hash": "<current canonical policy hash>",
+  "tasks": [{
+    "id": "legacy-task",
+    "base_sha": "<durable task base>",
+    "head_sha": "<durable task head>",
+    "contract_hash": "<existing acceptance/scope contract hash>",
+    "areas": ["internal/example"],
+    "additional_dependencies": ["predecessor-task"],
+    "reason": "Operator explicitly authorizes this new bounded ownership contract."
+  }]
+}
+```
+
+Run `aih scope recover --file recovery.json --preview` first; it performs no
+lease acquisition or publication. If its proof is accepted, run
+`aih scope recover --file recovery.json`, then inspect `aih status` and use
+`aih resume` only when the ordinary scheduler should continue. Recovery checks
+the exact state/policy, checkpoint ref,
+base-to-head and dirty-worktree paths, canonicalizes the declared areas at the
+current canonical base, preserves existing dependencies, rejects conflicts with
+unfinished owners unless a predecessor dependency gates them, and rejects cycles.
+It refuses a live owner, active work, merged work, or an already known immutable
+assignment. A successful command records the authorization in the task's typed
+decision history, invalidates preflight/review/visual approval evidence, and
+keeps findings, budgets, summaries, checkpoints, and retry guards. Blocked tasks
+remain blocked; other unmerged recovered tasks return to `READY` and must complete
+fresh preflight and verification. Reuse the same command ID only for an
+idempotent retry.
+
+Historical planned-reference restoration is intentionally future work. This
+phase records explicit operator authorization only.
+
 ## Network or permission failures
 
 Git publications compare explicit expected ref revisions. A mismatch or uncertain

@@ -24,10 +24,70 @@ const RoleSchema = 1
 const CapacityTransitionLimit = 20
 const MaxTaskGuidance = 8
 const MaxGuidanceBytes = 1600
+const MaxScopeRecoveryReasonBytes = 1600
 
 // MaxVisualEvidenceArtifacts includes up to eight screenshots and one shared diagnostic log.
 const MaxVisualEvidenceArtifacts = 9
 const guidancePrefix = "AIH_GUIDANCE_V1:"
+const scopeRecoveryPrefix = "AIH_SCOPE_RECOVERY_V1:"
+
+// ScopeRecovery records an explicit operator authorization for a legacy task
+// whose original immutable assignment was never persisted. It deliberately
+// records the new contract rather than claiming to reconstruct history from
+// mutable plan fields or changed paths.
+type ScopeRecovery struct {
+	CommandID    string   `json:"command_id"`
+	StateRef     string   `json:"state_ref"`
+	PolicyHash   string   `json:"policy_hash"`
+	BaseSHA      string   `json:"base_sha"`
+	HeadSHA      string   `json:"head_sha"`
+	ContractHash string   `json:"contract_hash"`
+	ManifestHash string   `json:"manifest_hash"`
+	Areas        []string `json:"areas"`
+	Dependencies []string `json:"additional_dependencies,omitempty"`
+	Reason       string   `json:"reason"`
+}
+
+// ScopeRecoveryRecord returns the typed durable authorization for a command.
+func ScopeRecoveryRecord(t *Task, commandID string) (ScopeRecovery, bool) {
+	if t == nil {
+		return ScopeRecovery{}, false
+	}
+	for _, decision := range t.Decisions {
+		if !strings.HasPrefix(decision, scopeRecoveryPrefix) {
+			continue
+		}
+		var record ScopeRecovery
+		if json.Unmarshal([]byte(strings.TrimPrefix(decision, scopeRecoveryPrefix)), &record) == nil && record.CommandID == commandID {
+			return record, true
+		}
+	}
+	return ScopeRecovery{}, false
+}
+
+// RecordScopeRecovery stores a compact typed decision in the existing durable
+// Decisions field. Recovery is intentionally bounded so a repeated operator
+// command cannot turn Decisions into an unbounded audit log.
+func RecordScopeRecovery(t *Task, record ScopeRecovery) error {
+	if t == nil || record.CommandID == "" || len(record.Reason) == 0 || len(record.Reason) > MaxScopeRecoveryReasonBytes || !utf8.ValidString(record.Reason) || strings.ContainsRune(record.Reason, '\x00') {
+		return errors.New("invalid scope recovery decision")
+	}
+	if prior, ok := ScopeRecoveryRecord(t, record.CommandID); ok {
+		if prior.ManifestHash == record.ManifestHash {
+			return nil
+		}
+		return errors.New("scope recovery command ID already records a different manifest")
+	}
+	if len(t.Decisions) >= 64 {
+		return errors.New("task decision limit reached")
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	t.Decisions = append(t.Decisions, scopeRecoveryPrefix+string(encoded))
+	return nil
+}
 
 type State string
 
