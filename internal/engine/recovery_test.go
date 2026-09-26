@@ -69,7 +69,10 @@ func TestPartialGraphRecoversWithoutLocalProject(t *testing.T) {
 	states := []model.State{model.Done, model.Running, model.Review, model.Blocked, model.Ready}
 	for i, state := range states {
 		id := string(rune('a' + i))
-		task := &model.Task{ID: id, ObjectiveID: "objective", Title: id, State: state, HeadSHA: base, Branch: "aih/" + id, FixCycles: map[string]int{}}
+		// This fixture exercises ordinary interrupted-task recovery, not the
+		// legacy fail-closed route below. Seed the same immutable README boundary
+		// each recovered worktree actually contains.
+		task := &model.Task{ID: id, ObjectiveID: "objective", Title: id, Areas: []string{"README.md"}, AssignedAreas: []string{"README.md"}, AssignedAreaKinds: map[string]string{"README.md": model.AreaFile}, State: state, BaseSHA: base, HeadSHA: base, Branch: "aih/" + id, FixCycles: map[string]int{}}
 		if state == model.Blocked {
 			model.Block(task, "Choose", "decision", model.Ready)
 		}

@@ -247,7 +247,7 @@ func TestScratchFailurePreservesOperatorGuidanceAcrossAttach(t *testing.T) {
 	if err = fixture.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih/ui", New: base}}); err != nil {
 		t.Fatal(err)
 	}
-	task := &model.Task{ID: "ui", ObjectiveID: "objective", Title: "ui", Objective: "exercise bounded guidance recovery", State: model.Ready, Branch: "aih/ui", BaseSHA: base, HeadSHA: base}
+	task := &model.Task{ID: "ui", ObjectiveID: "objective", Title: "ui", Objective: "exercise bounded guidance recovery", Areas: []string{"feature-ui.txt"}, AssignedAreas: []string{"feature-ui.txt"}, AssignedAreaKinds: map[string]string{"feature-ui.txt": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", State: model.Ready, Branch: "aih/ui", BaseSHA: base, HeadSHA: base}
 	if err = model.QueueOperatorGuidance(task, "operator", base, fixture.P.Config.BaseSHA, fixture.P.Config.Hash, roles.Hash(), "Keep this constraint until an implementer starts."); err != nil {
 		t.Fatal(err)
 	}
