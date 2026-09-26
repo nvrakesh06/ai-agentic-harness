@@ -149,31 +149,69 @@ func runUntilTaskState(t *testing.T, ctx context.Context, f *demo.Fixture, id st
 		case err = <-done:
 			t.Fatal("supervisor stopped before target state", err)
 		case <-ctx.Done():
-			// Let the supervisor observe cancellation before reporting the durable
-			// state. This keeps a failed fixture from leaving an owned goroutine
-			// behind and makes a deadline distinguish a blocked transition from a
-			// check-permit stall.
+			// Do not return while Serve can still own SQLite. The caller commonly
+			// defers DB.Close, so a timed-out fixture must drain its supervisor
+			// before reporting failure. Emit a bounded diagnostic grace first, then
+			// wait for the cancellation-aware supervisor to finish.
 			var stopErr error
 			select {
 			case stopErr = <-done:
 			case <-time.After(5 * time.Second):
-				stopErr = fmt.Errorf("supervisor did not stop within diagnostic grace")
+				t.Logf("supervisor drain exceeded 5s: %s", retryFixtureStatus(f, id))
+				stopErr = <-done
 			}
-			snapshot, _, loadErr := f.P.DB.Load()
-			var task *model.Task
-			if loadErr == nil {
-				task = snapshot.Tasks[id]
-			}
-			t.Fatalf("%v waiting for %s; supervisor=%v load=%v task=%+v", ctx.Err(), strings.Join(func() []string {
+			t.Fatalf("%v waiting for %s; supervisor=%v %s", ctx.Err(), strings.Join(func() []string {
 				states := make([]string, 0, len(wanted))
 				for _, state := range wanted {
 					states = append(states, string(state))
 				}
 				return states
-			}(), ","), stopErr, loadErr, task)
+			}(), ","), stopErr, retryFixtureStatus(f, id))
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+// retryFixtureStatus contains only fixed lifecycle and guard fields. It keeps
+// a deadline report useful without emitting paths, command output, prompts, or
+// other fixture data that could contain credentials.
+func retryFixtureStatus(f *demo.Fixture, id string) string {
+	stage := "unavailable"
+	stageAt := ""
+	if f != nil && f.P != nil && f.P.DB != nil {
+		stage = f.P.DB.Get(engine.LocalSupervisorStageKey)
+		stageAt = f.P.DB.Get(engine.LocalSupervisorStageAtKey)
+	}
+	type status struct {
+		Stage          string
+		StageAt        string
+		State          model.State
+		Attempts       int
+		Classification string
+		NativeOnly     bool
+		BlockerOrigin  string
+		Resume         model.State
+	}
+	result := status{Stage: stage, StageAt: stageAt}
+	if f == nil || f.P == nil || f.P.DB == nil {
+		return fmt.Sprintf("status=%+v", result)
+	}
+	snapshot, _, err := f.P.DB.Load()
+	if err != nil || snapshot.Tasks[id] == nil {
+		return fmt.Sprintf("status=%+v", result)
+	}
+	task := snapshot.Tasks[id]
+	result.State = task.State
+	if task.Verification != nil {
+		result.Attempts = task.Verification.Attempts
+		result.Classification = task.Verification.Classification
+		result.NativeOnly = task.Verification.NativeOnly
+	}
+	if task.Blocker != nil {
+		result.BlockerOrigin = task.Blocker.Origin
+		result.Resume = task.Blocker.Resume
+	}
+	return fmt.Sprintf("status=%+v", result)
 }
 
 func storeCommand(kind string) store.Command {
@@ -480,21 +518,23 @@ func TestAlternatingTransientFailuresConsumeOneRetry(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows npm lock classification is platform-specific")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
+	setupCtx, setupCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer setupCancel()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(t.TempDir(), "first-attempt")
-	f, err := demo.New(ctx, t.TempDir(), []string{exe, "_aih-native-timeout-then-npm-lock", marker})
+	f, err := demo.New(setupCtx, t.TempDir(), []string{exe, "_aih-native-timeout-then-npm-lock", marker})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.P.DB.Close()
-	setFixtureCheck(t, ctx, f, []string{exe, "_aih-native-timeout-then-npm-lock", marker}, 1)
-	seedReadyTask(t, ctx, f, "alternating-transient")
-	task := runUntilTaskState(t, ctx, f, "alternating-transient", model.Blocked)
+	setFixtureCheck(t, setupCtx, f, []string{exe, "_aih-native-timeout-then-npm-lock", marker}, 1)
+	seedReadyTask(t, setupCtx, f, "alternating-transient")
+	workflowCtx, workflowCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer workflowCancel()
+	task := runUntilTaskState(t, workflowCtx, f, "alternating-transient", model.Blocked)
 	if task.Verification == nil || task.Verification.Attempts != 2 || task.Verification.Classification != "timeout" {
 		t.Fatalf("alternating transient failures did not retain the first bounded classification: %+v", task.Verification)
 	}
