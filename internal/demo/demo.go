@@ -259,6 +259,7 @@ type Worker struct {
 	ReviewActive      atomic.Int32
 	ReviewMax         atomic.Int32
 	mu                sync.Mutex
+	reviewPair        reviewPair
 	Reviews           []string
 	Failures          map[string]int
 	AuthFailures      map[string]int
@@ -267,6 +268,56 @@ type Worker struct {
 	Advisors          map[string]int
 	NoChanges         map[string]bool
 	ScratchTooling    map[string]bool
+}
+
+// reviewPair is a demo-only rendezvous for the two independent peers used to
+// prove the configured reader limit. Normal fixture workers deliberately leave
+// it disabled: QA follows its peers and must never wait for a concurrent role.
+type reviewPair struct {
+	title string
+	seen  map[string]bool
+	ready chan struct{}
+}
+
+// ConfigureReviewPair makes reviewer and security rendezvous for title. It is
+// intentionally explicit so ordinary Worker invocations do not acquire a test
+// timing dependency.
+func (w *Worker) ConfigureReviewPair(title string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.reviewPair = reviewPair{title: title, seen: map[string]bool{}, ready: make(chan struct{})}
+}
+
+func (w *Worker) waitForReviewPair(ctx context.Context, title, role string) error {
+	if role != "reviewer" && role != "security" {
+		return nil
+	}
+	w.mu.Lock()
+	pair := &w.reviewPair
+	if pair.title != title || pair.ready == nil {
+		w.mu.Unlock()
+		return nil
+	}
+	pair.seen[role] = true
+	if pair.seen["reviewer"] && pair.seen["security"] {
+		close(pair.ready)
+		pair.ready = nil
+		w.mu.Unlock()
+		return nil
+	}
+	ready := pair.ready
+	w.mu.Unlock()
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return errors.New("demo reviewer/security peer did not arrive")
+	}
 }
 
 func (w *Worker) ImplementationCount(title string) int {
@@ -292,6 +343,9 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 			// batch lifecycle fixture covers low-risk grouped integration.
 			if key == "beta" {
 				p.Risk = "medium"
+			}
+			if key == "alpha" {
+				p.Security = true
 			}
 			if key == "dependent" {
 				p.Dependencies = []string{"alpha"}
@@ -382,7 +436,7 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 		w.Advisors[task.Title]++
 		w.mu.Unlock()
 	}
-	if r.Role == "reviewer" || r.Role == "qa" {
+	if r.Role == "reviewer" || r.Role == "security" || r.Role == "qa" {
 		n := w.ReviewActive.Add(1)
 		defer w.ReviewActive.Add(-1)
 		for {
@@ -391,22 +445,9 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 				break
 			}
 		}
-		deadline := time.NewTimer(5 * time.Second)
-		ticker := time.NewTicker(10 * time.Millisecond)
-	waitForPeer:
-		for w.ReviewActive.Load() < 2 {
-			select {
-			case <-ctx.Done():
-				deadline.Stop()
-				ticker.Stop()
-				return result, ctx.Err()
-			case <-deadline.C:
-				break waitForPeer
-			case <-ticker.C:
-			}
+		if e := w.waitForReviewPair(ctx, task.Title, r.Role); e != nil {
+			return result, e
 		}
-		deadline.Stop()
-		ticker.Stop()
 		b, e := os.ReadFile(filepath.Join(r.Directory, "feature-"+task.Title+".txt"))
 		if e != nil || strings.TrimSpace(string(b)) != "implemented" {
 			return result, errors.New("mock reviewer observed missing feature")
@@ -458,6 +499,7 @@ func Run(ctx context.Context, out io.Writer, checks []string) (string, error) {
 	if e = f.P.DB.Submit(store.Command{ID: model.ID(), Kind: "run", Payload: "Create independent fixtures, one blocked task, and one dependent task."}); e != nil {
 		return root, e
 	}
+	f.Provider.ConfigureReviewPair("alpha")
 	controller := engine.New(f.P)
 	done := make(chan error, 1)
 	go func() { done <- controller.Serve(ctx); close(done) }()
