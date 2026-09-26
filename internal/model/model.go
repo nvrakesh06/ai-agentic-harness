@@ -617,18 +617,21 @@ type Capacity struct {
 	Transitions        []CapacityTransition `json:"transitions,omitempty"`
 }
 type Snapshot struct {
-	Schema             int                      `json:"state_schema"`
-	CreatedBy          string                   `json:"created_by_version"`
-	Project            string                   `json:"project"`
-	Revision           uint64                   `json:"revision"`
-	Controller         Lease                    `json:"controller"`
-	Objectives         map[string]*Objective    `json:"objectives"`
-	Backlog            []string                 `json:"authorized_objective_backlog"`
-	Capacity           Capacity                 `json:"capacity"`
-	Tasks              map[string]*Task         `json:"tasks"`
-	Runs               []Run                    `json:"runs,omitempty"`
-	Applied            map[string]bool          `json:"applied_commands"`
-	Replans            map[string]ReplanReceipt `json:"replan_receipts,omitempty"`
+	Schema     int                   `json:"state_schema"`
+	CreatedBy  string                `json:"created_by_version"`
+	Project    string                `json:"project"`
+	Revision   uint64                `json:"revision"`
+	Controller Lease                 `json:"controller"`
+	Objectives map[string]*Objective `json:"objectives"`
+	Backlog    []string              `json:"authorized_objective_backlog"`
+	Capacity   Capacity              `json:"capacity"`
+	Tasks      map[string]*Task      `json:"tasks"`
+	Runs       []Run                 `json:"runs,omitempty"`
+	Applied    map[string]bool       `json:"applied_commands"`
+	// Always encode this initialized receipt ledger. Clone uses the portable JSON
+	// representation, so omitting an empty ledger would turn it into nil before
+	// the first accepted replan and lose the write-ready provenance invariant.
+	Replans            map[string]ReplanReceipt `json:"replan_receipts"`
 	Improvements       []string                 `json:"improvement_candidates,omitempty"`
 	IntegrationBlocked string                   `json:"integration_blocked,omitempty"`
 	IntegrationBatch   *IntegrationBatch        `json:"integration_batch,omitempty"`
