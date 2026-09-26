@@ -56,24 +56,62 @@ func TestReplanUnstartedRequiresEmptyLifecycle(t *testing.T) {
 	if !replanUnstarted(s, task) {
 		t.Fatal("empty queued task was not accepted")
 	}
-	task.Attempts = 1
+	base := strings.Repeat("d", 40)
+	task.BaseSHA = base
 	if replanUnstarted(s, task) {
-		t.Fatal("attempted task was accepted as unstarted")
+		t.Fatal("base-only task was accepted as an empty checkpoint")
+	}
+	if !replanBaseOnly(s, task, base) || !replanEmptyOriginal(s, task, base) {
+		t.Fatal("exact base-only planning task was rejected")
+	}
+	if replanBaseOnly(s, task, strings.Repeat("e", 40)) {
+		t.Fatal("base-only task accepted a different requested base")
+	}
+	task.State = model.Planned
+	if !replanBaseOnly(s, task, base) {
+		t.Fatal("planned base-only task was rejected")
+	}
+	task.State = model.Blocked
+	if replanBaseOnly(s, task, base) {
+		t.Fatal("blocked base-only task was accepted")
+	}
+	task.State = model.Ready
+	task.Attempts = 1
+	if replanBaseOnly(s, task, base) {
+		t.Fatal("attempted base-only task was accepted")
 	}
 	task.Attempts = 0
 	task.RecoveryRequired = true
-	if replanUnstarted(s, task) {
-		t.Fatal("recovery-marked task was accepted as unstarted")
+	if replanBaseOnly(s, task, base) {
+		t.Fatal("recovery-marked base-only task was accepted")
 	}
 	task.RecoveryRequired = false
 	task.FixCycles["review"] = 1
-	if replanUnstarted(s, task) {
-		t.Fatal("task with a FIX cycle was accepted as unstarted")
+	if replanBaseOnly(s, task, base) {
+		t.Fatal("base-only task with a FIX cycle was accepted")
 	}
 	task.FixCycles["review"] = 0
 	s.Runs = []model.Run{{Task: task.ID, Outcome: "interrupted"}}
-	if replanUnstarted(s, task) {
-		t.Fatal("task with a durable run was accepted as unstarted")
+	if replanBaseOnly(s, task, base) {
+		t.Fatal("base-only task with a durable run was accepted")
+	}
+}
+
+func TestReplanSnapshotPreconditionAcceptsOnlyExactBaseOnlyOriginal(t *testing.T) {
+	s := model.NewSnapshot("project123")
+	base := strings.Repeat("a", 40)
+	stateRef := strings.Repeat("c", 40)
+	s.Tasks["queued"] = &model.Task{ID: "queued", ObjectiveID: "objective", State: model.Ready, Branch: "aih/queued", BaseSHA: base, FixCycles: map[string]int{}}
+	request := validReplanRequest()
+	request.Expected.BaseSHA = base
+	request.Expected.StateRef = stateRef
+	request.Originals = []ReplanOriginal{{TaskID: "queued", State: model.Ready}}
+	if err := replanSnapshotPrecondition(s, stateRef, request); err != nil {
+		t.Fatalf("exact base-only original rejected before lease: %v", err)
+	}
+	request.Expected.BaseSHA = strings.Repeat("d", 40)
+	if err := replanSnapshotPrecondition(s, stateRef, request); err == nil {
+		t.Fatal("base-only original accepted a different request base")
 	}
 }
 

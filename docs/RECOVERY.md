@@ -164,6 +164,11 @@ exact current `aih-state` ref, canonical policy, source checkpoints, and one
 replacement contract. It can include a task with an empty checkpoint only when
 the remote snapshot proves that task was never started; such a task has no source
 patch and its declared branch must be absent remotely.
+An otherwise empty `PLANNED` or `READY` task may retain only an exact
+`base_sha` binding to the manifest's canonical base. This base-only shape is not
+a source checkpoint: it still requires no lifecycle or approval history, no
+remote or local source branch, and no retained task worktree. Any other base,
+state, history, or local artifact is rejected rather than cleared or inferred.
 It creates a new successor branch and records each original as `SUPERSEDED`; an
 original never becomes `DONE`, and its dependants wait for the successor's normal
 verification and integration. Phase one deliberately rejects cross-objective

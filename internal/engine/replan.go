@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -153,7 +154,18 @@ func replanActive(s *model.Snapshot, t *model.Task) bool {
 // verification checkpoint to transfer. An empty requested head is therefore
 // not a wildcard: it is accepted only for this narrow, never-started shape.
 func replanUnstarted(s *model.Snapshot, t *model.Task) bool {
-	if t == nil || t.BaseSHA != "" || t.HeadSHA != "" || t.MergeSHA != "" || t.PostVerifySHA != "" || t.SyncBase != "" ||
+	return replanEmptyCheckpoint(s, t, "", false)
+}
+
+// replanBaseOnly accepts only a planning-only task that was bound to the exact
+// canonical base recorded in this request. A base is not a source checkpoint:
+// the task must still have no head or durable lifecycle history to transfer.
+func replanBaseOnly(s *model.Snapshot, t *model.Task, expectedBase string) bool {
+	return expectedBase != "" && replanSHA.MatchString(expectedBase) && t != nil && (t.State == model.Planned || t.State == model.Ready) && replanEmptyCheckpoint(s, t, expectedBase, true)
+}
+
+func replanEmptyCheckpoint(s *model.Snapshot, t *model.Task, expectedBase string, allowExpectedBase bool) bool {
+	if t == nil || (!allowExpectedBase && t.BaseSHA != "") || (allowExpectedBase && t.BaseSHA != expectedBase) || t.HeadSHA != "" || t.MergeSHA != "" || t.PostVerifySHA != "" || t.SyncBase != "" ||
 		t.RecoveryRequired || t.Attempts != 0 || t.Rotations != 0 || t.AdvisorUsed || t.RunID != "" || t.Preflight != nil || t.Verification != nil ||
 		t.Evidence != nil || t.VisualRequired != nil || t.Blocker != nil || t.PR != 0 || len(t.Findings) != 0 || len(t.Summary) != 0 ||
 		len(t.ReportedTests) != 0 || len(t.Risks) != 0 || len(t.Decisions) != 0 || len(t.ReviewProvenance) != 0 {
@@ -175,6 +187,10 @@ func replanUnstarted(s *model.Snapshot, t *model.Task) bool {
 		}
 	}
 	return true
+}
+
+func replanEmptyOriginal(s *model.Snapshot, t *model.Task, expectedBase string) bool {
+	return replanUnstarted(s, t) || replanBaseOnly(s, t, expectedBase)
 }
 
 func replanDigest(request ReplanRequest) string {
@@ -332,13 +348,8 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 			return fmt.Errorf("original task %s is not idle at its expected checkpoint", expected.TaskID)
 		}
 		if expected.HeadSHA == "" {
-			if !replanUnstarted(s, t) {
+			if !replanEmptyOriginal(s, t, request.Expected.BaseSHA) {
 				return fmt.Errorf("original task %s is not provably unstarted", expected.TaskID)
-			}
-			if t.Branch != "" {
-				if remote, e := c.P.Git.RemoteHead(ctx, t.Branch); e != nil || remote != "" {
-					return fmt.Errorf("unstarted original task %s source ref exists or cannot be checked", t.ID)
-				}
 			}
 		} else if t.HeadSHA != expected.HeadSHA {
 			return fmt.Errorf("original task %s is not idle at its expected checkpoint", expected.TaskID)
@@ -355,6 +366,9 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 			}
 		}
 		originals, oldSet[t.ID] = append(originals, t), true
+	}
+	if err := replanUnstartedRefs(ctx, c.P, s, request); err != nil {
+		return err
 	}
 	if objective == "" || s.Tasks[request.Replacement.ID] != nil {
 		return errors.New("replacement task already exists or originals lack an objective")
@@ -449,6 +463,13 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 			return fmt.Errorf("source checkpoint %s changed during replan validation", source.TaskID)
 		}
 	}
+	// Recheck the base-only absence proof immediately before the fenced source
+	// and state publication. This is deliberately separate from source-ref
+	// checks: a base binding must never hide a locally created branch or task
+	// worktree that appeared while the successor candidate was being built.
+	if err := replanUnstartedRefs(ctx, c.P, s, request); err != nil {
+		return err
+	}
 	if err := c.save(ctx, func(current *model.Snapshot) error {
 		if applied, err := replanReceipt(current, request); err != nil {
 			return err
@@ -460,7 +481,7 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 		}
 		for _, expected := range request.Originals {
 			t := current.Tasks[expected.TaskID]
-			if t == nil || t.State != expected.State || replanActive(current, t) || (expected.HeadSHA == "" && !replanUnstarted(current, t)) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
+			if t == nil || t.State != expected.State || replanActive(current, t) || (expected.HeadSHA == "" && !replanEmptyOriginal(current, t, request.Expected.BaseSHA)) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
 				return fmt.Errorf("original task %s changed during replan", expected.TaskID)
 			}
 		}
@@ -530,7 +551,7 @@ func Replan(ctx context.Context, project *Project, request ReplanRequest) (err e
 		return err
 	}
 	if policyRequired {
-		if err = replanUnstartedRefs(ctx, project.Git, before, request); err != nil {
+		if err = replanUnstartedRefs(ctx, project, before, request); err != nil {
 			return err
 		}
 		effective, err := Canonical(ctx, project.Git)
@@ -564,17 +585,37 @@ func Replan(ctx context.Context, project *Project, request ReplanRequest) (err e
 
 // replanUnstartedRefs keeps an empty task checkpoint fail-closed. A declared
 // branch for a never-started task must not have appeared remotely between plan
-// admission and this bounded replacement request.
-func replanUnstartedRefs(ctx context.Context, g gitx.Git, s *model.Snapshot, request ReplanRequest) error {
+// admission and this bounded replacement request. A base-only planning task is
+// stricter: its declared branch and task worktree must both be provably absent
+// locally as well, otherwise its source boundary is ambiguous.
+func replanUnstartedRefs(ctx context.Context, p *Project, s *model.Snapshot, request ReplanRequest) error {
 	for _, expected := range request.Originals {
 		if expected.HeadSHA != "" {
 			continue
 		}
 		t := s.Tasks[expected.TaskID]
-		if t != nil && t.Branch != "" {
-			if remote, err := g.RemoteHead(ctx, t.Branch); err != nil || remote != "" {
+		if t == nil || !replanEmptyOriginal(s, t, request.Expected.BaseSHA) {
+			return fmt.Errorf("original task %s is not provably unstarted", expected.TaskID)
+		}
+		if t.Branch != "" {
+			if remote, err := p.Git.RemoteHead(ctx, t.Branch); err != nil || remote != "" {
 				return fmt.Errorf("unstarted original task %s source ref exists or cannot be checked", expected.TaskID)
 			}
+		}
+		if !replanBaseOnly(s, t, request.Expected.BaseSHA) {
+			continue
+		}
+		if t.Branch == "" {
+			return fmt.Errorf("base-only original task %s has no declared branch", expected.TaskID)
+		}
+		local, err := p.Git.Run(ctx, "", "for-each-ref", "--format=%(objectname)", "refs/heads/"+t.Branch)
+		if err != nil || strings.TrimSpace(local) != "" {
+			return fmt.Errorf("base-only original task %s local source ref exists or cannot be checked", expected.TaskID)
+		}
+		if _, err = os.Stat(p.TaskPath(t)); err == nil {
+			return fmt.Errorf("base-only original task %s has a retained worktree", expected.TaskID)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect base-only original task %s worktree: %w", expected.TaskID, err)
 		}
 	}
 	return nil
@@ -595,7 +636,7 @@ func replanSnapshotPrecondition(s *model.Snapshot, stateRef string, request Repl
 	objective := ""
 	for _, expected := range request.Originals {
 		t := s.Tasks[expected.TaskID]
-		if t == nil || t.State != expected.State || replanActive(s, t) || t.MergeSHA != "" || t.State == model.Done || t.State == model.Superseded || (expected.HeadSHA == "" && !replanUnstarted(s, t)) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
+		if t == nil || t.State != expected.State || replanActive(s, t) || t.MergeSHA != "" || t.State == model.Done || t.State == model.Superseded || (expected.HeadSHA == "" && !replanEmptyOriginal(s, t, request.Expected.BaseSHA)) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
 			return fmt.Errorf("original task %s is not idle at its expected checkpoint", expected.TaskID)
 		}
 		if objective == "" {
