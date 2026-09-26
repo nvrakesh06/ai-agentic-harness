@@ -84,7 +84,43 @@ func TestFixtureSupervisorDrainWatchdogIsInjectable(t *testing.T) {
 	}
 }
 
-// drain cancels the child on every fixture exit, then waits through the
+func TestFixtureSupervisorWaitHandoffDoesNotCancelHealthyChild(t *testing.T) {
+	done := make(chan error, 1)
+	done <- nil
+	cancelled := false
+	supervisor := &fixtureSupervisor{
+		cancel:       func() { cancelled = true },
+		done:         done,
+		drainTimeout: time.Second,
+		watchdog:     func(string) { t.Fatal("watchdog ran after healthy handoff") },
+	}
+	if err := supervisor.waitHandoff("status=fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if cancelled {
+		t.Fatal("healthy handoff cancelled its child before completion")
+	}
+}
+
+func TestFixtureSupervisorHandoffTimeoutCancelsBeforeWatchdog(t *testing.T) {
+	done := make(chan error)
+	cancelled := false
+	var diagnostic string
+	supervisor := &fixtureSupervisor{
+		cancel:       func() { cancelled = true },
+		done:         done,
+		drainTimeout: time.Millisecond,
+		watchdog:     func(value string) { diagnostic = value },
+	}
+	if err := supervisor.waitHandoff("status=bounded-safe-fields"); !errors.Is(err, errFixtureSupervisorUndrained) {
+		t.Fatalf("handoff timeout error = %v", err)
+	}
+	if !cancelled || diagnostic != "status=bounded-safe-fields" {
+		t.Fatalf("handoff timeout cancellation=%t watchdog=%q", cancelled, diagnostic)
+	}
+}
+
+// drain cancels the child on failure cleanup, then waits through the
 // controller's bounded shutdown allowance. The watchdog is process-level by
 // design: returning would allow a caller's deferred DB.Close to race Serve.
 func (s *fixtureSupervisor) drain(diagnostic string) error {
@@ -92,6 +128,28 @@ func (s *fixtureSupervisor) drain(diagnostic string) error {
 		return nil
 	}
 	s.cancel()
+	return s.waitAfterCancel(diagnostic)
+}
+
+// waitHandoff preserves a queued handoff's cooperative shutdown path. If that
+// bounded phase does not finish, cancellation starts the same drain path used
+// for failures before the watchdog can terminate the fixture process.
+func (s *fixtureSupervisor) waitHandoff(diagnostic string) error {
+	if s == nil {
+		return nil
+	}
+	timer := time.NewTimer(s.drainTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-s.done:
+		return err
+	case <-timer.C:
+		s.cancel()
+		return s.waitAfterCancel(diagnostic)
+	}
+}
+
+func (s *fixtureSupervisor) waitAfterCancel(diagnostic string) error {
 	timer := time.NewTimer(s.drainTimeout)
 	defer timer.Stop()
 	select {
@@ -232,7 +290,7 @@ func runUntilTaskState(t *testing.T, ctx context.Context, f *demo.Fixture, id st
 			if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
 				t.Fatal(err)
 			}
-			if err = supervisor.drain(retryFixtureStatus(f, id)); err != nil {
+			if err = supervisor.waitHandoff(retryFixtureStatus(f, id)); err != nil {
 				t.Fatal(err)
 			}
 			drained = true
