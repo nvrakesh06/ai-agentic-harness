@@ -450,7 +450,31 @@ func (e *readOnlyDeadlineError) Unwrap() error {
 func readOnlyRetryKey(stage, role string) string { return stage + "/" + role }
 
 func readOnlyRetryMatches(retry model.ReadOnlyRetry, stage, role string, task *model.Task, effective config.Effective) bool {
-	return retry.Stage == stage && retry.Role == role && retry.BaseSHA == task.BaseSHA && retry.HeadSHA == task.HeadSHA && retry.Config == effective.Hash && retry.Rules == roles.Hash()
+	return retry.Stage == stage && retry.Role == role && readOnlyRetryCurrent(retry, task, effective)
+}
+
+func readOnlyRetryCurrent(retry model.ReadOnlyRetry, task *model.Task, effective config.Effective) bool {
+	return retry.BaseSHA == task.BaseSHA && retry.HeadSHA == task.HeadSHA && retry.Config == effective.Hash && retry.Rules == roles.Hash()
+}
+
+// pruneStaleReadOnlyRetryGuards bounds the portable retry map without erasing
+// a current exact-input record. A changed base, head, policy, or rule set has
+// already invalidated the old reader budget, so only those stale guards can be
+// discarded to admit a new identity.
+func pruneStaleReadOnlyRetryGuards(retries map[string]model.ReadOnlyRetry, task *model.Task, effective config.Effective) {
+	for key, retry := range retries {
+		if !readOnlyRetryCurrent(retry, task, effective) {
+			delete(retries, key)
+		}
+	}
+}
+
+func readOnlyRetrySlotAvailable(retries map[string]model.ReadOnlyRetry, key string, task *model.Task, effective config.Effective) bool {
+	pruneStaleReadOnlyRetryGuards(retries, task, effective)
+	if _, exists := retries[key]; exists {
+		return true
+	}
+	return len(retries) < 8
 }
 
 func readOnlyInitialAndRemaining(seconds int) (initial, remaining time.Duration) {
@@ -532,6 +556,7 @@ func (c *Controller) recordReadOnlyDeadline(e config.Effective, stage string, r 
 	seconds := e.Project.RoleTimeout(stage)
 	_, remainder := readOnlyInitialAndRemaining(seconds)
 	retry := false
+	exhausted := false
 	err := c.mutate(func(s *model.Snapshot) error {
 		current := s.Tasks[task.ID]
 		if current == nil {
@@ -539,6 +564,10 @@ func (c *Controller) recordReadOnlyDeadline(e config.Effective, stage string, r 
 		}
 		if current.ReadOnlyRetries == nil {
 			current.ReadOnlyRetries = map[string]model.ReadOnlyRetry{}
+		}
+		if !readOnlyRetrySlotAvailable(current.ReadOnlyRetries, key, current, e) {
+			exhausted = true
+			return nil
 		}
 		guard, guarded := current.ReadOnlyRetries[key]
 		if !guarded || !readOnlyRetryMatches(guard, stage, r.Name, current, e) {
@@ -563,7 +592,13 @@ func (c *Controller) recordReadOnlyDeadline(e config.Effective, stage string, r 
 		}
 		return nil
 	})
-	return retry, err
+	if err != nil {
+		return false, err
+	}
+	if exhausted {
+		return false, &readOnlyDeadlineError{Stage: stage, Role: r.Name, Retry: false, err: errors.New("read-only retry guard capacity exhausted for current exact input")}
+	}
+	return retry, nil
 }
 
 func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effective, r roles.Role, t *model.Task, dir, objective, diff, evidence string, complete func(*model.Snapshot, provider.Result, error) error, explicitReadRef string) (provider.Result, error) {
