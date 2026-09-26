@@ -281,20 +281,22 @@ func TestDeadlineCheckpointAndHandoffRecoverTogetherAfterMachineLoss(t *testing.
 	}
 	snapshot.Objectives["deadline-objective"] = &model.Objective{ID: "deadline-objective", Text: "recover timeout work", Planned: true}
 	snapshot.Tasks["deadline"] = &model.Task{
-		ID:          "deadline",
-		ObjectiveID: "deadline-objective",
-		Title:       "deadline",
-		Objective:   "Write recovered.txt and preserve it across the deadline.",
-		Acceptance:  []string{"recovered.txt is durable"},
-		Areas:       []string{"recovered.txt"},
-		Domains:     []string{"deadline-fixture"},
-		Risk:        "low",
-		State:       model.Ready,
-		Branch:      "aih/deadline",
-		BaseSHA:     base,
-		HeadSHA:     base,
-		Rotations:   23,
-		FixCycles:   map[string]int{},
+		ID:                "deadline",
+		ObjectiveID:       "deadline-objective",
+		Title:             "deadline",
+		Objective:         "Write recovered.txt and preserve it across the deadline.",
+		Acceptance:        []string{"recovered.txt is durable"},
+		Areas:             []string{"recovered.txt"},
+		AssignedAreas:     []string{"recovered.txt"},
+		AssignedAreaKinds: map[string]string{"recovered.txt": model.AreaFile},
+		Domains:           []string{"deadline-fixture"},
+		Risk:              "low",
+		State:             model.Ready,
+		Branch:            "aih/deadline",
+		BaseSHA:           base,
+		HeadSHA:           base,
+		Rotations:         23,
+		FixCycles:         map[string]int{},
 	}
 	nextState, err := f.P.Git.StateCommit(ctx, stateHead, snapshot)
 	if err != nil {

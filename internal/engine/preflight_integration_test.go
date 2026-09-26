@@ -360,7 +360,7 @@ func TestImplementerCheckpointContinuesWithoutRepeatingPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, AssignedAreas: []string{"src/labels.tsx"}, AssignedAreaKinds: map[string]string{"src/labels.tsx": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: effective.BaseSHA}
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"checkpoint-continuation.txt"}, AssignedAreas: []string{"checkpoint-continuation.txt"}, AssignedAreaKinds: map[string]string{"checkpoint-continuation.txt": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: effective.BaseSHA}
 	s.Tasks[task.ID] = task
 	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, effective.BaseSHA); err != nil {
 		t.Fatal(err)
@@ -413,7 +413,7 @@ func TestRecoveredDeadlineCheckpointContinuesWithoutRepeatingPreflight(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, AssignedAreas: []string{"src/labels.tsx"}, AssignedAreaKinds: map[string]string{"src/labels.tsx": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: effective.BaseSHA}
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"checkpoint-continuation.txt"}, AssignedAreas: []string{"checkpoint-continuation.txt"}, AssignedAreaKinds: map[string]string{"checkpoint-continuation.txt": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: effective.BaseSHA}
 	s.Tasks[task.ID] = task
 	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, effective.BaseSHA); err != nil {
 		t.Fatal(err)
