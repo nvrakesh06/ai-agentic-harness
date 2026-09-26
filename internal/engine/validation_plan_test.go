@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -20,6 +21,50 @@ func TestToolchainIdentityPreservesMissingCheckProvenance(t *testing.T) {
 	if !errors.As(err, &unavailable) || unavailable.check.Name != check.Name || strings.Join(unavailable.check.Command, "\x00") != strings.Join(check.Command, "\x00") {
 		t.Fatalf("missing tool lost configured check provenance: err=%v unavailable=%#v", err, unavailable)
 	}
+}
+
+func TestValidationPlanSkipsForeignPlatformToolBeforeIdentity(t *testing.T) {
+	checks, err := applicableValidationChecks([]config.Check{
+		{Name: "host", Command: []string{os.Args[0]}, Platforms: []string{runtime.GOOS}, Timeout: 60},
+		{Name: "foreign missing", Command: []string{"aih-foreign-tool-that-does-not-exist"}, Platforms: []string{otherPlatform()}, Timeout: 60},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolchain, err := toolchainIdentity(t.TempDir(), checks)
+	if err != nil {
+		t.Fatalf("foreign platform tool was resolved: %v", err)
+	}
+	if len(checks) != 1 || checks[0].Name != "host" || !strings.Contains(toolchain, filepath.Base(os.Args[0])+"=") {
+		t.Fatalf("plan did not retain only the host check: checks=%#v toolchain=%q", checks, toolchain)
+	}
+}
+
+func TestValidationPlanPreservesApplicableMissingToolProvenance(t *testing.T) {
+	missing := config.Check{Name: "host missing", Command: []string{"aih-host-tool-that-does-not-exist"}, Platforms: []string{runtime.GOOS}, Timeout: 60}
+	checks, err := applicableValidationChecks([]config.Check{missing})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = toolchainIdentity(t.TempDir(), checks)
+	var unavailable *validationToolUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.check.Name != missing.Name || strings.Join(unavailable.check.Command, "\x00") != strings.Join(missing.Command, "\x00") {
+		t.Fatalf("applicable missing tool lost provenance: err=%v unavailable=%#v", err, unavailable)
+	}
+}
+
+func TestValidationPlanRejectsNoApplicableChecks(t *testing.T) {
+	_, err := applicableValidationChecks([]config.Check{{Name: "foreign", Command: []string{"aih-foreign-tool-that-does-not-exist"}, Platforms: []string{otherPlatform()}, Timeout: 60}})
+	if err == nil || !strings.Contains(err.Error(), "no applicable verification checks") {
+		t.Fatalf("no-applicable plan quietly succeeded: %v", err)
+	}
+}
+
+func otherPlatform() string {
+	if runtime.GOOS == "windows" {
+		return "linux"
+	}
+	return "windows"
 }
 
 func TestPostVerifyPlanUsesSourceToolchainAndControlGitInput(t *testing.T) {
