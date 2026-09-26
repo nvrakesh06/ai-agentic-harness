@@ -399,7 +399,7 @@ func (g Git) Checkpoint(ctx context.Context, path, task string) (string, error) 
 	if e != nil {
 		return "", e
 	}
-	changed, e := w.Run(ctx, "", "diff", "--name-only", "-z", "HEAD")
+	changed, e := w.Run(ctx, "", "diff", "--name-only", "-z", "HEAD", "--")
 	if e != nil {
 		return "", e
 	}
@@ -540,14 +540,14 @@ func (g Git) Rebase(ctx context.Context, path, base string) error {
 	return e
 }
 func (g Git) Diff(ctx context.Context, base, head string) (string, []string, error) {
-	d, e := g.Run(ctx, "", "diff", "--no-ext-diff", base+"..."+head)
+	d, e := g.Run(ctx, "", "diff", "--no-ext-diff", base+"..."+head, "--")
 	if e != nil {
 		return "", nil, e
 	}
 	// A rename must remain two changed paths here. The caller uses this list for
 	// scope and validation planning, where seeing only the destination could
 	// incorrectly classify a cross-package move as a focused local change.
-	paths, e := g.Run(ctx, "", "diff", "--no-renames", "--name-only", base+"..."+head)
+	paths, e := g.Run(ctx, "", "diff", "--no-renames", "--name-only", base+"..."+head, "--")
 	if paths == "" {
 		return d, nil, e
 	}
