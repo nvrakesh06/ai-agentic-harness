@@ -97,3 +97,22 @@ func TestReplanReceiptBindsExactManifest(t *testing.T) {
 		t.Fatal("altered request reused receipt")
 	}
 }
+
+func TestAcceptedReplanRetryDoesNotRequireCurrentPolicy(t *testing.T) {
+	s := model.NewSnapshot("project123")
+	s.Tasks["replacement"] = &model.Task{ID: "replacement"}
+	request := validReplanRequest()
+	s.Applied[request.CommandID] = true
+	s.Replans[request.CommandID] = model.ReplanReceipt{Digest: replanDigest(request), ReplacementID: "replacement"}
+	if required, err := replanPolicyRequired(s, request); err != nil || required {
+		t.Fatalf("accepted retry requested stale policy validation: required=%t err=%v", required, err)
+	}
+}
+
+func TestReplanOverlapUsesUnstartedImmutableAreaFallback(t *testing.T) {
+	queued := &model.Task{ID: "queued", State: model.Ready, Areas: []string{"feature-queued.txt"}}
+	areas, known := model.ImmutableAreas(queued)
+	if !known || !areasOverlap([]string{"feature-queued.txt"}, areas) {
+		t.Fatal("queued immutable Areas fallback was treated as disjoint")
+	}
+}

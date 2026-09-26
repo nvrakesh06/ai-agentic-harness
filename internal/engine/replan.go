@@ -156,6 +156,11 @@ func replanReceipt(s *model.Snapshot, request ReplanRequest) (bool, error) {
 	return true, nil
 }
 
+func replanPolicyRequired(s *model.Snapshot, request ReplanRequest) (bool, error) {
+	accepted, err := replanReceipt(s, request)
+	return !accepted, err
+}
+
 func mergeReplanContract(r ReplanRequest, originals []*model.Task) (model.Task, error) {
 	next := model.Task{ID: r.Replacement.ID, Title: r.Replacement.Title, Objective: r.Replacement.Objective, Acceptance: uniqueStrings(r.Replacement.Acceptance), Areas: uniqueStrings(r.Replacement.Areas), Domains: uniqueStrings(r.Replacement.Domains), Roles: uniqueStrings(r.Replacement.Roles), Risk: r.Replacement.Risk, UI: r.Replacement.UI, Security: r.Replacement.Security, Dependencies: uniqueStrings(r.Replacement.Dependencies), State: model.Ready, Branch: "aih/" + r.Replacement.ID, FixCycles: map[string]int{}}
 	if len(next.Acceptance) != len(r.Replacement.Acceptance) || len(next.Areas) != len(r.Replacement.Areas) || len(next.Domains) != len(r.Replacement.Domains) {
@@ -285,10 +290,11 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 		if oldSet[task.ID] || task.State == model.Done || task.State == model.Superseded {
 			continue
 		}
-		if _, known := model.ImmutableAreas(task); !known {
+		areas, known := model.ImmutableAreas(task)
+		if !known {
 			return fmt.Errorf("replacement cannot prove non-overlap with unfinished legacy task %s", task.ID)
 		}
-		if areasOverlap(next.Areas, task.AssignedAreas) || stringsOverlap(next.Domains, task.Domains) {
+		if areasOverlap(next.Areas, areas) || stringsOverlap(next.Domains, task.Domains) {
 			return fmt.Errorf("replacement overlaps unfinished task %s", task.ID)
 		}
 	}
@@ -407,12 +413,18 @@ func Replan(ctx context.Context, project *Project, request ReplanRequest) (err e
 	if err = replanSnapshotPrecondition(before, request); err != nil {
 		return err
 	}
-	effective, err := Canonical(ctx, project.Git)
-	if err != nil || effective.BaseSHA != request.Expected.BaseSHA || effective.Hash != request.Expected.Config || roles.Hash() != request.Expected.Rules {
-		if err != nil {
-			return err
+	policyRequired, err := replanPolicyRequired(before, request)
+	if err != nil {
+		return err
+	}
+	if policyRequired {
+		effective, err := Canonical(ctx, project.Git)
+		if err != nil || effective.BaseSHA != request.Expected.BaseSHA || effective.Hash != request.Expected.Config || roles.Hash() != request.Expected.Rules {
+			if err != nil {
+				return err
+			}
+			return errors.New("replan policy or canonical main changed")
 		}
-		return errors.New("replan policy or canonical main changed")
 	}
 	c := New(project)
 	if err = c.acquireReplan(ctx); err != nil {
