@@ -149,7 +149,28 @@ func runUntilTaskState(t *testing.T, ctx context.Context, f *demo.Fixture, id st
 		case err = <-done:
 			t.Fatal("supervisor stopped before target state", err)
 		case <-ctx.Done():
-			t.Fatal(ctx.Err())
+			// Let the supervisor observe cancellation before reporting the durable
+			// state. This keeps a failed fixture from leaving an owned goroutine
+			// behind and makes a deadline distinguish a blocked transition from a
+			// check-permit stall.
+			var stopErr error
+			select {
+			case stopErr = <-done:
+			case <-time.After(5 * time.Second):
+				stopErr = fmt.Errorf("supervisor did not stop within diagnostic grace")
+			}
+			snapshot, _, loadErr := f.P.DB.Load()
+			var task *model.Task
+			if loadErr == nil {
+				task = snapshot.Tasks[id]
+			}
+			t.Fatalf("%v waiting for %s; supervisor=%v load=%v task=%+v", ctx.Err(), strings.Join(func() []string {
+				states := make([]string, 0, len(wanted))
+				for _, state := range wanted {
+					states = append(states, string(state))
+				}
+				return states
+			}(), ","), stopErr, loadErr, task)
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
@@ -203,7 +224,7 @@ func TestMissingNativeCapabilityBlocksWithoutImplementerRetry(t *testing.T) {
 	if got := f.Provider.ImplementationCount("missing-tool"); got != 1 {
 		t.Fatalf("implementer ran %d times after a missing native tool", got)
 	}
-	if task.Blocker == nil || task.Blocker.Origin != model.BlockerOriginVerificationOnly || task.Blocker.Resume != model.SyncRequired || task.Verification == nil || !task.Verification.NativeOnly {
+	if task.AdvisorUsed || len(task.FixCycles) != 0 || task.Blocker == nil || task.Blocker.Origin != model.BlockerOriginVerificationOnly || task.Blocker.Resume != model.SyncRequired || task.Verification == nil || !task.Verification.NativeOnly {
 		t.Fatalf("missing capability was not durably routed to native verification: %+v", task)
 	}
 	if got := eventCount(t, f, "retry_suppressed"); got != 1 {
