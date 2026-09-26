@@ -112,8 +112,10 @@ idempotent retry.
 
 A manifest may instead declare both `base_sha` and `head_sha` as empty for a
 strictly proven never-started `PLANNED` or `READY` task. Both fields must be
-empty together. AIH then requires no durable lifecycle or history, no prior
-assignment, no remote task branch, and no retained task worktree; it still
+empty together. AIH then requires no durable lifecycle or history, no known
+assignment, no remote task branch, and no retained task worktree. A legacy
+all-`unknown` assignment inferred by schema migration is allowed because it
+does not claim a historical boundary. AIH still
 classifies the new areas at the canonical base and applies the same ownership,
 dependency, and cycle checks. This authorizes a new immutable contract only;
 it does not restore or infer a historical checkpoint.

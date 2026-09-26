@@ -18,6 +18,11 @@ func TestScopeRecoveryUnstartedRequiresEmptyLifecycle(t *testing.T) {
 		t.Fatal("attempted task was accepted as unstarted")
 	}
 	task.Attempts = 0
+	task.FixCycles["native"] = 1
+	if scopeRecoveryUnstarted(snapshot, task) {
+		t.Fatal("task with a retry cycle was accepted as unstarted")
+	}
+	task.FixCycles["native"] = 0
 	snapshot.Runs = []model.Run{{Task: task.ID, Outcome: "interrupted"}}
 	if scopeRecoveryUnstarted(snapshot, task) {
 		t.Fatal("task with historical run was accepted as unstarted")
