@@ -513,7 +513,17 @@ func (c *Controller) Serve(parent context.Context) error {
 				break
 			}
 			s := c.Snapshot()
-			capacity := decideCapacity(s, active, c.P.Config.Project, planning, len(c.readers), time.Now().UTC())
+			providerAdmissionHeld := c.providerAdmissionActive()
+			capacity := decideCapacity(s, active, c.P.Config.Project, planning || providerAdmissionHeld, len(c.readers), time.Now().UTC())
+			if providerAdmissionHeld {
+				// Treat a matching provider hold as an existing admission fence so
+				// decideCapacity never advances the objective backlog cursor merely
+				// because a planner was intentionally not launched.
+				capacity.planObjective = ""
+				capacity.status.State = "underutilized"
+				capacity.status.ReasonCode = "provider_admission_held"
+				capacity.status.Reason = "provider admission is held for the current supported request schema"
+			}
 			if ce = c.persistCapacity(capacity.status, capacity.planObjective); ce != nil {
 				e = ce
 				stopping = true
@@ -536,13 +546,15 @@ func (c *Controller) Serve(parent context.Context) error {
 				active[id] = true
 				c.launch(func() { c.work(id, true); done <- id })
 			}
-			for _, candidate := range selectPreflights(c.Snapshot(), active, guidedPreflights, c.P.Config.Project.MaxReaders, c.P.Config.Project.MaxWriters, preflightRoles) {
-				id := candidate.task.ID
-				active[id] = false
-				guidedPreflights[id] = candidate.guided
-				c.launch(func() { c.preflight(id); done <- id })
+			if !providerAdmissionHeld {
+				for _, candidate := range selectPreflights(c.Snapshot(), active, guidedPreflights, c.P.Config.Project.MaxReaders, c.P.Config.Project.MaxWriters, preflightRoles) {
+					id := candidate.task.ID
+					active[id] = false
+					guidedPreflights[id] = candidate.guided
+					c.launch(func() { c.preflight(id); done <- id })
+				}
 			}
-			if capacity.planObjective != "" {
+			if capacity.planObjective != "" && !providerAdmissionHeld {
 				id := capacity.planObjective
 				planning = true
 				c.launch(func() { c.plan(id); done <- "@plan" })
@@ -555,10 +567,16 @@ func (c *Controller) Serve(parent context.Context) error {
 					continue
 				}
 				switch t.State {
-				case model.Implemented, model.SyncRequired, model.Verifying, model.Review:
+				case model.Implemented, model.SyncRequired, model.Verifying:
 					id := t.ID
 					active[id] = true
 					c.launch(func() { c.work(id, false); done <- id })
+				case model.Review:
+					if !providerAdmissionHeld {
+						id := t.ID
+						active[id] = true
+						c.launch(func() { c.work(id, false); done <- id })
+					}
 				}
 			}
 			if !merging {

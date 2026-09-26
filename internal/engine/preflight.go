@@ -559,6 +559,9 @@ func (c *Controller) preflight(id string) {
 		c.block(id, "Restore Git access and retry.", err.Error(), model.Ready)
 		return
 	}
+	if _, held := c.providerAdmissionHeld(effective); held {
+		return
+	}
 	t := c.Snapshot().Tasks[id]
 	if t == nil || (t.State != model.Ready && t.State != model.Fix) {
 		return
@@ -657,6 +660,9 @@ func (c *Controller) preflight(id string) {
 			return
 		}
 		if roleErr != nil {
+			if isProviderAdmissionHeld(roleErr) {
+				return
+			}
 			if provider.IsAuthenticationFailure(roleErr) {
 				c.providerAuthenticationBlock(id, r.Name+" preflight", current.State)
 				return
@@ -721,6 +727,9 @@ func (c *Controller) admitWriter(id string, active map[string]bool) (bool, error
 	effective, err := c.effective(c.ctx)
 	if err != nil {
 		return false, err
+	}
+	if _, held := c.providerAdmissionHeld(effective); held {
+		return false, nil
 	}
 	s := c.Snapshot()
 	t := s.Tasks[id]
