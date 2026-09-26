@@ -51,6 +51,34 @@ func TestVerificationCapacityRoundTripAndValidation(t *testing.T) {
 		t.Fatal("unknown owner accepted")
 	}
 }
+
+func TestSnapshotClonePreservesEmptyReplanReceiptLedger(t *testing.T) {
+	s := NewSnapshot("project123")
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded map[string]json.RawMessage
+	if err = json.Unmarshal(b, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := encoded["replan_receipts"]; !ok || string(got) != "{}" {
+		t.Fatalf("empty replan receipt ledger was not durably encoded: %s", b)
+	}
+	cloned := Clone(s)
+	if cloned.Replans == nil {
+		t.Fatal("clone dropped the empty replan receipt ledger")
+	}
+	delete(encoded, "replan_receipts") // Legacy snapshots remain recoverable.
+	legacy, err := json.Marshal(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, _, err := Decode(legacy)
+	if err != nil || recovered.Replans == nil {
+		t.Fatalf("legacy receipt omission was not recovered: %#v %v", recovered, err)
+	}
+}
 func TestSchedulerDependenciesDomainsAndBlocked(t *testing.T) {
 	s := NewSnapshot("project123")
 	for _, id := range []string{"a", "b", "c", "d", "e", "f"} {
