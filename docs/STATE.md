@@ -154,10 +154,11 @@ rejection class, and schema digest; canonical policy, rules, and model are retai
 as origin provenance but do not widen a schema rejection's key. At most six exact
 holds and two provider-specific saturation holds fit in the eight-record map. A
 full exact set never evicts a current hold: it records the affected provider's
-fail-closed saturation hold instead. Migration from schema 11 or earlier creates
-an empty hold map even if an old fixture carried similarly named data. Earlier
-state has no trustworthy provider-wide identity, so migration neither invents a
-hold nor clears, rewrites, or recovers historical task-local blockers.
+fail-closed saturation hold instead. The schema-12 migration step creates an empty
+hold map for schema 11 state even if an old fixture carried similarly named data.
+Older snapshots first receive their documented earlier migrations. Neither path
+has a trustworthy provider-wide identity, so the schema-12 step neither invents a
+hold nor performs any additional task-blocker rewrite or recovery.
 
 All migrated snapshots then undergo current validation. The first subsequent state
 commit keeps the original remote commit as its parent, preserving the pre-migration

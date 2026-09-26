@@ -148,11 +148,12 @@ binary available only for rollback before the first schema-12 save; once that sa
 is acknowledged, an older runtime rejects the newer snapshot before writes and
 cannot safely attach or take ownership.
 
-Migration from schema 11 and earlier initializes an empty provider-hold map. It
-does not infer a provider-wide hold from old task blockers, and it retains every
-legacy task blocker unchanged. The new map has room for six exact holds and two
-provider-specific saturation holds. Saturation is fail-closed and never evicts an
-active exact hold.
+The schema-12 migration step initializes an empty provider-hold map for schema 11
+state. Older snapshots also receive their documented earlier migrations. This step
+does not infer a provider-wide hold from old task blockers and performs no
+additional task-blocker rewrite or recovery. The new map has room for six exact
+holds and two provider-specific saturation holds. Saturation is fail-closed and
+never evicts an active exact hold.
 
 ## Provider admission holds
 
