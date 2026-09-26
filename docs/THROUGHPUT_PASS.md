@@ -121,13 +121,18 @@ interfaces, and resume dependency-unblocked tasks with the configured safe write
 Report product throughput as verified merged changes and critical-path age after
 resumption. More sessions, open issues, or checkpoint commits are not success.
 
-## Deferred unless a demonstrated blocker remains
+## Deferred from this finite repair pass
 
 General stack-PR machinery, automatic binary draining, configurable review DAGs,
 external shell resource reservation, and a broader task-contract rewrite are not
 part of this pass. Broader Windows fixture resource lanes require a demonstrated
 fixture-contention failure beyond the observed aggregate timeout. Do not create
 more infrastructure simply because an audit proposed it.
+The broader [AIH execution architecture proposal](EXECUTION_ARCHITECTURE.md)
+addresses accepted-goal preparation, evidence readiness, controlled activation,
+and measured scoped reuse after rollout. It preserves existing defaults and is
+not a claim that these proposed contracts are already deployed. Product work
+resumes alongside subsequent shared improvements after this finite repair.
 The existing batch already repairs publication timeout recovery, deadlock,
 history-preserving synchronization, focused/shared validation, sealed visual
 reattestation, provider-auth handling, and explicit scope/task recovery.
@@ -187,3 +192,35 @@ The existing 635kB Studio bundle warning is accepted for that configuration-only
 change. An earlier operator-preview port conflict was cleared by stopping the owned
 preview before rerunning validation. Activate this policy only after AIH deployment,
 then regenerate scope manifests against its new canonical policy hash.
+
+## Remaining diagnostics and provisioned-browser proof
+
+Candidate `65aaeb1` failed in group 9 after 123 engine passes and two explicit
+provisioned-browser skips. The read-only isolation fixture still expected Reviewer
+and QA to overlap, contrary to the new QA-after-peer ordering. The repair uses
+Reviewer and Security as independent readers while preserving the two-reader
+capacity, disposable-checkout isolation and cleanup assertions. The shared demo
+worker no longer waits for another reader on every QA call; an explicit bounded
+Reviewer/Security rendezvous remains only in the demo that tests parallelism.
+Independent scoped review approved the fixture-only change. Focused recovery demo
+and read-only isolation checks passed (160.268s and 32.320s respectively).
+
+All 88 remaining engine tests then passed in seven serial diagnostic groups at
+`48484c`. This includes the failed case and all previously unexecuted tests, not
+a substitute for the full release gate. The engine inventory still contains 213
+tests; already completed tests must also run in the final uncached gate.
+
+Provisioning the two real-browser cases exposed a separate fixture defect:
+`TestNativeVisualCapturePinsHeadAndStoresOutsideSource` constructed its controller
+with a zero-value control Git client. Detached checkout creation therefore ran
+against the process repository, which did not contain the fixture source SHA.
+Production initializes and fetches a control repository; the fixture now creates
+that repository and asserts it contains the exact pinned commit. Source/revision,
+network-blocking, external artifact storage and capture assertions are unchanged.
+Both provisioned real-browser tests passed together (16.814s); scoped review
+approved the repair. The final gate enables those tests explicitly so a browser
+skip cannot be presented as provisioned-browser proof.
+
+Known boundary: diagnostics, focused proofs and an architecture proposal do not
+establish improved consumer delivery. The combined exact-tree release gate,
+verified artifact activation and a real task reaching DONE remain required.
