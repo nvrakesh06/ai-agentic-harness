@@ -101,6 +101,34 @@ func TestReplanRejectsCycleIntroducedBySuccessorLink(t *testing.T) {
 	}
 }
 
+func TestReplanSerializedOwnershipResolvesSupersededDependency(t *testing.T) {
+	s := model.NewSnapshot("project123")
+	s.Tasks["original"] = &model.Task{ID: "original", State: model.Blocked}
+	s.Tasks["owner"] = &model.Task{ID: "owner", State: model.Ready, Dependencies: []string{"original"}}
+	next := &model.Task{ID: "replacement", State: model.Ready}
+	prospective := prospectiveReplanSnapshot(s, next, []ReplanOriginal{{TaskID: "original"}})
+	if !replanSerialized(prospective.Tasks, next.ID, "owner") {
+		t.Fatal("dependent owner was not serialized through replacement")
+	}
+	if prospectiveReplanCycle(s, next, []ReplanOriginal{{TaskID: "original"}}) {
+		t.Fatal("serialized replacement dependency introduced a cycle")
+	}
+	prospective.Tasks["owner"].Dependencies = nil
+	if replanSerialized(prospective.Tasks, next.ID, "owner") {
+		t.Fatal("unrelated owner was accepted as serialized")
+	}
+}
+
+func TestReplanSerializedOwnershipStillRejectsProspectiveCycle(t *testing.T) {
+	s := model.NewSnapshot("project123")
+	s.Tasks["original"] = &model.Task{ID: "original", State: model.Blocked}
+	s.Tasks["owner"] = &model.Task{ID: "owner", State: model.Ready, Dependencies: []string{"original"}}
+	next := &model.Task{ID: "replacement", State: model.Ready, Dependencies: []string{"owner"}}
+	if !prospectiveReplanCycle(s, next, []ReplanOriginal{{TaskID: "original"}}) {
+		t.Fatal("serialized overlap cycle was accepted")
+	}
+}
+
 func TestReplanAllowsInterruptedReviewButRejectsLiveRun(t *testing.T) {
 	s := model.NewSnapshot("project123")
 	task := &model.Task{ID: "review", State: model.Review, Preflight: &model.Preflight{Phase: "writing"}}

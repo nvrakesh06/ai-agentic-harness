@@ -336,15 +336,22 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 			return fmt.Errorf("source checkpoint %s changed or is invalid", member.TaskID)
 		}
 	}
-	for _, task := range s.Tasks {
-		if oldSet[task.ID] || task.State == model.Done || task.State == model.Superseded {
+	// Ownership is evaluated after replacement links exist. An overlapping
+	// unfinished task is safe only when the prospective graph proves that one
+	// task waits for the other; a superseded dependency resolves to its successor.
+	prospective := prospectiveReplanSnapshot(s, &next, request.Originals)
+	for _, task := range prospective.Tasks {
+		if oldSet[task.ID] || task.ID == next.ID || task.State == model.Done || task.State == model.Superseded {
 			continue
 		}
-		areas, known := model.ImmutableAreas(task)
+		areas, known := replanOwnershipAreas(task)
 		if !known {
 			return fmt.Errorf("replacement cannot prove non-overlap with unfinished legacy task %s", task.ID)
 		}
 		if areasOverlap(next.Areas, areas) || stringsOverlap(next.Domains, task.Domains) {
+			if replanSerialized(prospective.Tasks, next.ID, task.ID) {
+				continue
+			}
 			return fmt.Errorf("replacement overlaps unfinished task %s", task.ID)
 		}
 	}
@@ -589,12 +596,7 @@ func projectSupervisorLock(project *Project) string {
 }
 
 func prospectiveReplanCycle(s *model.Snapshot, successor *model.Task, originals []ReplanOriginal) bool {
-	probe := model.Clone(s)
-	probe.Tasks[successor.ID] = successor
-	for _, original := range originals {
-		probe.Tasks[original.TaskID].State = model.Superseded
-		probe.Tasks[original.TaskID].SupersededBy = successor.ID
-	}
+	probe := prospectiveReplanSnapshot(s, successor, originals)
 	visiting, done := map[string]bool{}, map[string]bool{}
 	var visit func(string) bool
 	visit = func(id string) bool {
@@ -628,6 +630,72 @@ func prospectiveReplanCycle(s *model.Snapshot, successor *model.Task, originals 
 		}
 	}
 	return false
+}
+
+func prospectiveReplanSnapshot(s *model.Snapshot, successor *model.Task, originals []ReplanOriginal) *model.Snapshot {
+	probe := model.Clone(s)
+	probe.Tasks[successor.ID] = successor
+	for _, original := range originals {
+		if task := probe.Tasks[original.TaskID]; task != nil {
+			task.State = model.Superseded
+			task.SupersededBy = successor.ID
+		}
+	}
+	return probe
+}
+
+// replanOwnershipAreas accepts durable plan ownership and the narrow unstarted
+// fallback. A started task with unknown assigned-area kinds remains fail-closed:
+// dependency ordering cannot make an unprovable boundary safe.
+func replanOwnershipAreas(task *model.Task) ([]string, bool) {
+	areas, known := model.ImmutableAreas(task)
+	if !known {
+		return nil, false
+	}
+	if len(task.AssignedAreas) != 0 {
+		for _, kind := range model.ImmutableAreaKinds(task) {
+			if kind == model.AreaUnknown {
+				return nil, false
+			}
+		}
+	}
+	return areas, true
+}
+
+// replanSerialized accepts either dependency direction. The search follows a
+// superseded original through SupersededBy, so a dependent task that still names
+// its historical predecessor waits for the replacement rather than running in
+// parallel with it.
+func replanSerialized(tasks map[string]*model.Task, left, right string) bool {
+	return replanTaskDependsOn(tasks, left, right) || replanTaskDependsOn(tasks, right, left)
+}
+
+func replanTaskDependsOn(tasks map[string]*model.Task, start, target string) bool {
+	seen := map[string]bool{}
+	var visit func(string) bool
+	visit = func(id string) bool {
+		if id == target {
+			return true
+		}
+		if seen[id] {
+			return false
+		}
+		seen[id] = true
+		task := tasks[id]
+		if task == nil {
+			return false
+		}
+		if task.State == model.Superseded {
+			return visit(task.SupersededBy)
+		}
+		for _, dependency := range task.Dependencies {
+			if visit(dependency) {
+				return true
+			}
+		}
+		return false
+	}
+	return start != target && visit(start)
 }
 
 func createsDependencyCycle(s *model.Snapshot, candidate string, dependencies []string) bool {
