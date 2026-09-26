@@ -36,9 +36,10 @@ type ReplanRequest struct {
 }
 
 type ReplanExpected struct {
-	BaseSHA string `json:"base_sha"`
-	Config  string `json:"config"`
-	Rules   string `json:"rules"`
+	BaseSHA  string `json:"base_sha"`
+	Config   string `json:"config"`
+	Rules    string `json:"rules"`
+	StateRef string `json:"state_ref"`
 }
 type ReplanOriginal struct {
 	TaskID  string      `json:"task_id"`
@@ -86,26 +87,37 @@ var replanHash = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 func validateReplanRequest(r ReplanRequest) error {
 	if r.Schema != replanSchema || !replanID.MatchString(r.CommandID) || !replanID.MatchString(r.Replacement.ID) ||
-		!replanSHA.MatchString(r.Expected.BaseSHA) || !replanHash.MatchString(r.Expected.Config) || !replanHash.MatchString(r.Expected.Rules) ||
+		!replanSHA.MatchString(r.Expected.BaseSHA) || !replanHash.MatchString(r.Expected.Config) || !replanHash.MatchString(r.Expected.Rules) || !replanSHA.MatchString(r.Expected.StateRef) ||
 		len(r.Originals) == 0 || len(r.Originals) > 8 || len(r.Sources) == 0 || len(r.Sources) > 8 || len(r.Reason) == 0 || len(r.Reason) > 1600 || !utf8.ValidString(r.Reason) || strings.ContainsRune(r.Reason, 0) {
 		return errors.New("invalid bounded replan request")
 	}
 	if r.Replacement.Title == "" || r.Replacement.Objective == "" || len(r.Replacement.Acceptance) == 0 || len(r.Replacement.Acceptance) > 32 || len(r.Replacement.Areas) == 0 || len(r.Replacement.Areas) > 32 || len(r.Replacement.Domains) == 0 || len(r.Replacement.Domains) > 16 || (r.Replacement.Risk != "low" && r.Replacement.Risk != "medium" && r.Replacement.Risk != "high") {
 		return errors.New("replacement lacks a bounded task contract")
 	}
-	seen := map[string]bool{}
+	seen := map[string]string{}
 	for _, old := range r.Originals {
-		if !replanID.MatchString(old.TaskID) || !replanSHA.MatchString(old.HeadSHA) || seen[old.TaskID] {
+		if !replanID.MatchString(old.TaskID) || (old.HeadSHA != "" && !replanSHA.MatchString(old.HeadSHA)) {
 			return errors.New("invalid or duplicate original task")
 		}
-		seen[old.TaskID] = true
+		if _, duplicate := seen[old.TaskID]; duplicate {
+			return errors.New("invalid or duplicate original task")
+		}
+		seen[old.TaskID] = old.HeadSHA
 	}
 	last := 0
+	sourced := map[string]bool{}
 	for _, source := range r.Sources {
-		if !seen[source.TaskID] || !replanSHA.MatchString(source.BaseSHA) || !replanSHA.MatchString(source.HeadSHA) || source.BaseSHA == source.HeadSHA || source.Order <= last {
+		originalHead, ok := seen[source.TaskID]
+		if !ok || originalHead == "" || originalHead != source.HeadSHA || sourced[source.TaskID] || !replanSHA.MatchString(source.BaseSHA) || !replanSHA.MatchString(source.HeadSHA) || source.BaseSHA == source.HeadSHA || source.Order <= last {
 			return errors.New("invalid ordered source checkpoint")
 		}
+		sourced[source.TaskID] = true
 		last = source.Order
+	}
+	for id, head := range seen {
+		if head != "" && !sourced[id] {
+			return errors.New("started original lacks a source checkpoint")
+		}
 	}
 	if r.CandidateHead != "" && !replanSHA.MatchString(r.CandidateHead) {
 		return errors.New("invalid candidate head")
@@ -135,6 +147,29 @@ func replanActive(s *model.Snapshot, t *model.Task) bool {
 		}
 	}
 	return false
+}
+
+// replanUnstarted proves that an original has no durable implementation or
+// verification checkpoint to transfer. An empty requested head is therefore
+// not a wildcard: it is accepted only for this narrow, never-started shape.
+func replanUnstarted(s *model.Snapshot, t *model.Task) bool {
+	if t == nil || t.BaseSHA != "" || t.HeadSHA != "" || t.MergeSHA != "" || t.PostVerifySHA != "" || t.SyncBase != "" ||
+		t.Attempts != 0 || t.Rotations != 0 || t.AdvisorUsed || t.RunID != "" || t.Preflight != nil || t.Verification != nil ||
+		t.Evidence != nil || t.VisualRequired != nil || t.Blocker != nil || t.PR != 0 || len(t.Findings) != 0 || len(t.Summary) != 0 ||
+		len(t.ReportedTests) != 0 || len(t.Risks) != 0 || len(t.Decisions) != 0 || len(t.ReviewProvenance) != 0 {
+		return false
+	}
+	for _, run := range s.Runs {
+		if run.Task == t.ID {
+			return false
+		}
+	}
+	for _, check := range s.Capacity.Verification {
+		if check.Task == t.ID {
+			return false
+		}
+	}
+	return true
 }
 
 func replanDigest(request ReplanRequest) string {
@@ -238,7 +273,19 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 	oldSet := map[string]bool{}
 	for _, expected := range request.Originals {
 		t := s.Tasks[expected.TaskID]
-		if t == nil || t.State != expected.State || t.HeadSHA != expected.HeadSHA || t.State == model.Done || t.State == model.Superseded || t.MergeSHA != "" || replanActive(s, t) {
+		if t == nil || t.State != expected.State || t.State == model.Done || t.State == model.Superseded || t.MergeSHA != "" || replanActive(s, t) {
+			return fmt.Errorf("original task %s is not idle at its expected checkpoint", expected.TaskID)
+		}
+		if expected.HeadSHA == "" {
+			if !replanUnstarted(s, t) {
+				return fmt.Errorf("original task %s is not provably unstarted", expected.TaskID)
+			}
+			if t.Branch != "" {
+				if remote, e := c.P.Git.RemoteHead(ctx, t.Branch); e != nil || remote != "" {
+					return fmt.Errorf("unstarted original task %s source ref exists or cannot be checked", t.ID)
+				}
+			}
+		} else if t.HeadSHA != expected.HeadSHA {
 			return fmt.Errorf("original task %s is not idle at its expected checkpoint", expected.TaskID)
 		}
 		if objective == "" {
@@ -246,8 +293,11 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 		} else if objective != t.ObjectiveID {
 			return errors.New("replan originals must share one objective")
 		}
-		if remote, e := c.P.Git.RemoteHead(ctx, t.Branch); e != nil || remote != t.HeadSHA {
-			return fmt.Errorf("original task %s source ref changed", t.ID)
+		if expected.HeadSHA != "" {
+			remote, e := c.P.Git.RemoteHead(ctx, t.Branch)
+			if e != nil || remote != t.HeadSHA {
+				return fmt.Errorf("original task %s source ref changed", t.ID)
+			}
 		}
 		originals, oldSet[t.ID] = append(originals, t), true
 	}
@@ -348,7 +398,7 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 		}
 		for _, expected := range request.Originals {
 			t := current.Tasks[expected.TaskID]
-			if t == nil || t.State != expected.State || t.HeadSHA != expected.HeadSHA || replanActive(current, t) {
+			if t == nil || t.State != expected.State || replanActive(current, t) || (expected.HeadSHA == "" && !replanUnstarted(current, t)) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
 				return fmt.Errorf("original task %s changed during replan", expected.TaskID)
 			}
 		}
@@ -406,11 +456,11 @@ func Replan(ctx context.Context, project *Project, request ReplanRequest) (err e
 	// Validate the operator's exact snapshot and canonical policy before this
 	// one-shot operation publishes even its lease. Unlike Serve, this path never
 	// calls recovery or scheduler admission while holding that lease.
-	before, _, err := project.Git.Load(ctx)
+	before, stateRef, err := project.Git.Load(ctx)
 	if err != nil {
 		return err
 	}
-	if err = replanSnapshotPrecondition(before, request); err != nil {
+	if err = replanSnapshotPrecondition(before, stateRef, request); err != nil {
 		return err
 	}
 	policyRequired, err := replanPolicyRequired(before, request)
@@ -418,6 +468,9 @@ func Replan(ctx context.Context, project *Project, request ReplanRequest) (err e
 		return err
 	}
 	if policyRequired {
+		if err = replanUnstartedRefs(ctx, project.Git, before, request); err != nil {
+			return err
+		}
 		effective, err := Canonical(ctx, project.Git)
 		if err != nil || effective.BaseSHA != request.Expected.BaseSHA || effective.Hash != request.Expected.Config || roles.Hash() != request.Expected.Rules {
 			if err != nil {
@@ -427,7 +480,11 @@ func Replan(ctx context.Context, project *Project, request ReplanRequest) (err e
 		}
 	}
 	c := New(project)
-	if err = c.acquireReplan(ctx); err != nil {
+	expectedStateRef := ""
+	if policyRequired {
+		expectedStateRef = stateRef
+	}
+	if err = c.acquireReplan(ctx, expectedStateRef); err != nil {
 		return err
 	}
 	defer func() {
@@ -443,7 +500,25 @@ func Replan(ctx context.Context, project *Project, request ReplanRequest) (err e
 	return c.applyReplan(ctx, request)
 }
 
-func replanSnapshotPrecondition(s *model.Snapshot, request ReplanRequest) error {
+// replanUnstartedRefs keeps an empty task checkpoint fail-closed. A declared
+// branch for a never-started task must not have appeared remotely between plan
+// admission and this bounded replacement request.
+func replanUnstartedRefs(ctx context.Context, g gitx.Git, s *model.Snapshot, request ReplanRequest) error {
+	for _, expected := range request.Originals {
+		if expected.HeadSHA != "" {
+			continue
+		}
+		t := s.Tasks[expected.TaskID]
+		if t != nil && t.Branch != "" {
+			if remote, err := g.RemoteHead(ctx, t.Branch); err != nil || remote != "" {
+				return fmt.Errorf("unstarted original task %s source ref exists or cannot be checked", expected.TaskID)
+			}
+		}
+	}
+	return nil
+}
+
+func replanSnapshotPrecondition(s *model.Snapshot, stateRef string, request ReplanRequest) error {
 	if s == nil {
 		return errors.New("replan snapshot unavailable")
 	}
@@ -452,10 +527,13 @@ func replanSnapshotPrecondition(s *model.Snapshot, request ReplanRequest) error 
 	} else if applied {
 		return nil
 	}
+	if request.Expected.StateRef != stateRef {
+		return errors.New("replan state changed")
+	}
 	objective := ""
 	for _, expected := range request.Originals {
 		t := s.Tasks[expected.TaskID]
-		if t == nil || t.State != expected.State || t.HeadSHA != expected.HeadSHA || replanActive(s, t) || t.MergeSHA != "" || t.State == model.Done || t.State == model.Superseded {
+		if t == nil || t.State != expected.State || replanActive(s, t) || t.MergeSHA != "" || t.State == model.Done || t.State == model.Superseded || (expected.HeadSHA == "" && !replanUnstarted(s, t)) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
 			return fmt.Errorf("original task %s is not idle at its expected checkpoint", expected.TaskID)
 		}
 		if objective == "" {
@@ -470,13 +548,16 @@ func replanSnapshotPrecondition(s *model.Snapshot, request ReplanRequest) error 
 // acquireReplan deliberately differs from acquire: it cannot hydrate legacy
 // tasks, alter capacity, or run any recovery work before the exact replan
 // request has been checked. Its only mutation is the normal fenced lease.
-func (c *Controller) acquireReplan(ctx context.Context) error {
+func (c *Controller) acquireReplan(ctx context.Context, expectedStateRef string) error {
 	s, head, err := c.P.Git.Load(ctx)
 	if err != nil {
 		return err
 	}
 	if s.Project != c.P.Config.Project.ID {
 		return errors.New("remote project identity mismatch")
+	}
+	if expectedStateRef != "" && head != expectedStateRef {
+		return errors.New("replan state changed before lease acquisition")
 	}
 	now := c.nowUTC()
 	if s.Controller.Owner != "" && s.Controller.Expires.Add(5*time.Second).After(now) {
