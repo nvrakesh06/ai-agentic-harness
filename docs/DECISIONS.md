@@ -1,5 +1,20 @@
 # V1 engineering decisions
 
+## Accepted: provider authentication failure routing, phase 1 (2026-09-26)
+
+Supported Codex and Claude CLI adapters classify an authentication failure only
+from their structured provider error records, then the supervisor blocks the
+affected task at its current recoverable stage. The task's implementation/fix
+budget and Advisor allowance remain unchanged, and provider diagnostics are not
+copied into portable state. This phase does not add a shared provider circuit
+breaker or suppress admissions for other tasks; that provider-wide policy needs
+separate durable-state and recovery design. Planning has no task checkpoint or
+task retry budget yet, so orchestrator-wide provider admission is also deferred
+to that phase. An authentication error from an Advisor invocation that has
+already started is likewise deferred: preserving that Advisor's reason, kind,
+and continuation requires durable recovery state rather than resuming an
+implementer incorrectly.
+
 The central AIH repository is public. Target application repositories can remain
 private; AIH supports GitHub Free and does not change their visibility.
 

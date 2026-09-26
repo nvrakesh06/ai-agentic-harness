@@ -376,6 +376,10 @@ const (
 	// BlockerOriginImplementerDecision marks a worker request for a human
 	// product or implementation decision.
 	BlockerOriginImplementerDecision = "implementer-decision"
+	// BlockerOriginProviderAuthentication marks a confirmed provider CLI
+	// authentication error. It resumes the preserved task stage after the
+	// operator restores provider access.
+	BlockerOriginProviderAuthentication = "provider-authentication"
 )
 
 type Finding struct {

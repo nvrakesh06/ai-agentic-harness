@@ -261,8 +261,10 @@ type Worker struct {
 	mu                sync.Mutex
 	Reviews           []string
 	Failures          map[string]int
+	AuthFailures      map[string]int
 	EnvironmentBlocks map[string]int
 	Implementations   map[string]int
+	Advisors          map[string]int
 	NoChanges         map[string]bool
 	ScratchTooling    map[string]bool
 }
@@ -271,6 +273,12 @@ func (w *Worker) ImplementationCount(title string) int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.Implementations[title]
+}
+
+func (w *Worker) AdvisorCount(title string) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.Advisors[title]
 }
 
 func (w *Worker) Name() string                   { return "codex" }
@@ -319,6 +327,10 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 		if fail {
 			w.Failures[task.Title]--
 		}
+		authFailure := w.AuthFailures[task.Title] > 0
+		if authFailure {
+			w.AuthFailures[task.Title]--
+		}
 		environmentBlock := w.EnvironmentBlocks[task.Title] > 0
 		if environmentBlock {
 			w.EnvironmentBlocks[task.Title]--
@@ -326,6 +338,9 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 		w.mu.Unlock()
 		if fail {
 			return result, errors.New("injected provider failure")
+		}
+		if authFailure {
+			return result, &provider.InvocationError{Cause: errors.New("fixture provider invocation failed"), Failure: provider.FailureAuthentication}
 		}
 		if w.NoChanges[task.Title] {
 			result.Summary = "Completed without source changes"
@@ -353,6 +368,14 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 			result.Risks = []string{"Supervisor-owned native verification remains."}
 		}
 		return result, nil
+	}
+	if r.Role == "advisor" {
+		w.mu.Lock()
+		if w.Advisors == nil {
+			w.Advisors = map[string]int{}
+		}
+		w.Advisors[task.Title]++
+		w.mu.Unlock()
 	}
 	if r.Role == "reviewer" || r.Role == "qa" {
 		n := w.ReviewActive.Add(1)

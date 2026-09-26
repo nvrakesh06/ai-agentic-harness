@@ -657,6 +657,10 @@ func (c *Controller) preflight(id string) {
 			return
 		}
 		if roleErr != nil {
+			if provider.IsAuthenticationFailure(roleErr) {
+				c.providerAuthenticationBlock(id, r.Name+" preflight", current.State)
+				return
+			}
 			c.retry(id, "implementation", roleErr.Error())
 			return
 		}
