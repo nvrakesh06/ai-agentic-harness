@@ -59,6 +59,9 @@ func TestPlannerAreasMatchGeneratedFixtureFiles(t *testing.T) {
 		if task.Risk != wantRisk {
 			t.Fatalf("planner risk for %q = %q, want %q", task.Key, task.Risk, wantRisk)
 		}
+		if task.Key == "alpha" && !task.Security {
+			t.Fatal("planner did not request the independent security review peer")
+		}
 	}
 }
 
