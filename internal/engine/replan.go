@@ -250,18 +250,17 @@ func replanTransferredAreas(request ReplanRequest, task *model.Task) ([]string, 
 		return nil, false
 	}
 	if len(task.AssignedAreas) != 0 {
-		for _, kind := range model.ImmutableAreaKinds(task) {
-			if kind != model.AreaUnknown {
-				continue
-			}
+		kinds := model.ImmutableAreaKinds(task)
+		transferred := make([]string, 0, len(areas))
+		for _, area := range areas {
 			// A started task's historical assignment remains an authorization
 			// boundary even if a legacy runtime could not classify its kind.
-			if !replanRequestMarksUnstarted(request, task.ID) {
-				return areas, true
+			if kinds[area] == model.AreaUnknown && replanRequestMarksUnstarted(request, task.ID) {
+				continue
 			}
-			return nil, false
+			transferred = append(transferred, area)
 		}
-		return areas, true
+		return transferred, len(transferred) != 0
 	}
 	// The only assignment-free fallback is an explicitly unstarted original.
 	// Its mutable legacy Areas prose must not be promoted into the successor.

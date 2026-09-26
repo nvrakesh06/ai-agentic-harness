@@ -98,9 +98,9 @@ func TestReplanContractCollapsesInternalDependenciesAndPreservesKnownScope(t *te
 	request.Originals = append(request.Originals, ReplanOriginal{TaskID: "queued", State: model.Ready})
 	request.Replacement.Dependencies = []string{"external"}
 	started := &model.Task{ID: "old", Objective: "repair", Dependencies: []string{"queued", "external"}, Areas: []string{"legacy/known.go"}, AssignedAreas: []string{"legacy/known.go"}, AssignedAreaKinds: map[string]string{"legacy/known.go": model.AreaFile}, Risk: "medium"}
-	queued := &model.Task{ID: "queued", Objective: "repair", Dependencies: []string{"old", "external"}, Areas: []string{"(new)"}, Risk: "low"}
+	queued := &model.Task{ID: "queued", Objective: "repair", Dependencies: []string{"old", "external"}, Areas: []string{"known/queued.go", "(new)"}, AssignedAreas: []string{"known/queued.go", "(new)"}, AssignedAreaKinds: map[string]string{"known/queued.go": model.AreaFile, "(new)": model.AreaUnknown}, Risk: "low"}
 	next, err := mergeReplanContract(request, []*model.Task{started, queued})
-	if err != nil || strings.Join(next.Dependencies, ",") != "external" || !containsReplanArea(next.Areas, "legacy/known.go") || containsReplanArea(next.Areas, "(new)") {
+	if err != nil || strings.Join(next.Dependencies, ",") != "external" || !containsReplanArea(next.Areas, "legacy/known.go") || !containsReplanArea(next.Areas, "known/queued.go") || containsReplanArea(next.Areas, "(new)") {
 		t.Fatalf("replacement did not retain external prerequisites and known scope only: %#v err=%v", next, err)
 	}
 	request.Replacement.Dependencies = []string{"old"}
