@@ -588,6 +588,16 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		local := engine.LocalSupervisorHealth(p.DB, lease, time.Now())
 		health = &local
 	}
+	admissionReason := "reservation-aware counts require the active supervisor's in-memory task reservations"
+	if !localActive {
+		admissionReason = "local supervisor is stopped; durable eligibility is not live utilization"
+	} else if health != nil && health.State != "healthy" {
+		admissionReason = "local supervisor health is " + health.State + "; reservation-aware admission counts are unavailable"
+	}
+	// The CLI has a portable checkpoint but never the controller's active task-ID
+	// map. It reports only durable independent facts and does not turn RUNNING
+	// state or historical runs into a fabricated live admission inventory.
+	admission := engine.DurableAdmissionReport(s, admissionReason)
 	invokedBuild := buildinfo.Current()
 	var supervisorBuild *buildinfo.Identity
 	if localActive {
@@ -618,7 +628,8 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 			InvokedBinaryBuild    buildinfo.Identity       `json:"invoked_binary_build"`
 			BuildsDiffer          bool                     `json:"builds_differ"`
 			LocalSupervisorHealth *engine.SupervisorHealth `json:"local_supervisor_health,omitempty"`
-		}{s, machineHeavy, localActive, localCount(localActive, s.Capacity.ActiveWriters), localCount(localActive, s.Capacity.ActiveReaders), localCount(localActive, s.Capacity.ActivePreflights), supervisorBuild, invokedBuild, buildsDiffer, health})
+			Admission             engine.AdmissionReport   `json:"admission"`
+		}{s, machineHeavy, localActive, localCount(localActive, s.Capacity.ActiveWriters), localCount(localActive, s.Capacity.ActiveReaders), localCount(localActive, s.Capacity.ActivePreflights), supervisorBuild, invokedBuild, buildsDiffer, health, admission})
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Project %s · durable revision %d (%s)\n", s.Project, s.Revision, shortSHA(h))
 	fmt.Fprintf(cmd.OutOrStdout(), "Controller: %s · durable heartbeat %s · lease expires %s\n", s.Controller.Machine, s.Controller.Heartbeat.Format(time.RFC3339), s.Controller.Expires.Format(time.RFC3339))
@@ -686,6 +697,15 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s check %q for %s (%s; %s)\n", check.Phase, check.Class, check.Check, check.Task, time.Since(at).Round(time.Second), map[string]string{"queued": "waiting for a verification slot", "running": "slot owned"}[check.Phase])
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Preflights: %d active\n", localCount(localActive, capacity.ActivePreflights))
+	if admission.Availability == "reservation_aware" && admission.Counts != nil {
+		counts := admission.Counts
+		fmt.Fprintf(cmd.OutOrStdout(), "Admission: %d active reservations, %d prepared/admittable, %d dependency-blocked, %d domain-blocked, %d preflight-waiting, %d decision-blocked\n", counts.ActiveReservations, counts.PreparedAdmittable, counts.DependencyBlocked, counts.DomainBlocked, counts.PreflightWaiting, counts.DecisionBlocked)
+	} else if admission.Durable != nil {
+		counts := admission.Durable
+		fmt.Fprintf(cmd.OutOrStdout(), "Admission (durable eligibility, not live): %d dependency-blocked, %d preflight-pending, %d decision-blocked; unavailable without active reservations: %s\n", counts.DependencyBlocked, counts.PreflightPending, counts.DecisionBlocked, strings.Join(admission.Unavailable, ", "))
+	} else {
+		fmt.Fprintln(cmd.OutOrStdout(), "Admission: unavailable — "+admission.Reason)
+	}
 	if capacity.ReasonCode != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Backfill: %s — %s (%s)\n", capacity.State, capacity.Reason, capacity.ReasonCode)
 	} else {

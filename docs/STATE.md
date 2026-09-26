@@ -55,6 +55,14 @@ only portable environment/command classes,
 the source revision, a normalized fingerprint and attempt count; it contains no
 machine paths or provider conversation state.
 
+`aih status` does not reconstruct a live admission inventory from those durable
+scalar counters or from task states. Exact active reservations,
+prepared/admittable work, and domain conflicts require the supervisor's
+in-memory task-reservation map. Without it, status reports only durable
+dependency, preflight-pending, and decision-blocked eligibility facts, labels
+the result non-live, and identifies the reservation-sensitive fields as
+unavailable.
+
 Schema 9 also permits one optional portable integration-batch reservation. It is
 strictly an admission manifest for two or three already `MERGE_READY`, low-risk,
 independent tasks. It records the shared base/configuration/rules and review roster,
