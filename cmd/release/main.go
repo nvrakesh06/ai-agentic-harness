@@ -161,6 +161,10 @@ func runReleaseTests(ctx context.Context) error {
 }
 
 func runReleaseTestCommand(ctx context.Context, name string, args []string, expected []string) error {
+	return runReleaseTestGroupCommand(ctx, name, args, expected, nil)
+}
+
+func runReleaseTestGroupCommand(ctx context.Context, name string, args []string, expectedTests, expectedPackages []string) error {
 	fmt.Println(name, strings.Join(args, " "))
 	process, err := platform.StartManaged(ctx, "", nil, name, args...)
 	if err != nil {
@@ -173,7 +177,9 @@ func runReleaseTestCommand(ctx context.Context, name string, args []string, expe
 	go func() { <-ctx.Done(); process.Close() }()
 
 	var failedPackage string
-	completed := map[string]string{}
+	var failedTest string
+	completedTests := map[string]string{}
+	completedPackages := map[string]string{}
 	scanner := bufio.NewScanner(process.Stdout)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
@@ -188,12 +194,19 @@ func runReleaseTestCommand(ctx context.Context, name string, args []string, expe
 			continue
 		}
 		if event.Action == "pass" || event.Action == "skip" {
-			completed[event.Test] = event.Action
+			if event.Test != "" {
+				completedTests[event.Test] = event.Action
+			} else if event.Package != "" {
+				completedPackages[event.Package] = event.Action
+			}
 		}
 		if event.Action == "fail" && event.Package != "" && event.Test == "" {
 			failedPackage = event.Package
 			process.Close()
 			break
+		}
+		if event.Action == "fail" && event.Package != "" && event.Test != "" && failedTest == "" {
+			failedTest = event.Package + "/" + event.Test
 		}
 	}
 	scanErr := scanner.Err()
@@ -204,6 +217,9 @@ func runReleaseTestCommand(ctx context.Context, name string, args []string, expe
 	if failedPackage != "" {
 		return fmt.Errorf("go test reported failure for %s; cancelled remaining package tests: %w", failedPackage, waitErr)
 	}
+	if failedTest != "" {
+		return fmt.Errorf("go test reported failure for %s before its package terminal event: %w", failedTest, waitErr)
+	}
 	if errors.Is(context.Cause(ctx), errReleaseYielded) {
 		return errReleaseYielded
 	}
@@ -213,12 +229,17 @@ func runReleaseTestCommand(ctx context.Context, name string, args []string, expe
 	if waitErr != nil {
 		return waitErr
 	}
-	for _, test := range expected {
-		if !releaseTerminalAccepted(test, completed[test]) {
-			if completed[test] == "skip" {
+	for _, test := range expectedTests {
+		if !releaseTerminalAccepted(test, completedTests[test]) {
+			if completedTests[test] == "skip" {
 				return fmt.Errorf("release browser test %s was skipped while AIH_REAL_PLAYWRIGHT=1", test)
 			}
 			return fmt.Errorf("release test inventory incomplete: %s has no terminal pass/skip event", test)
+		}
+	}
+	for _, pkg := range expectedPackages {
+		if action := completedPackages[pkg]; action != "pass" && action != "skip" {
+			return fmt.Errorf("release package inventory incomplete: %s has no terminal pass/skip event", pkg)
 		}
 	}
 	return nil
@@ -301,6 +322,15 @@ func releaseMachinePermit(ctx context.Context) (func(), config.Machine, string, 
 }
 
 var errReleaseYielded = errors.New("release gate yielded to queued supervisor native check")
+
+// releaseYieldCancellation preserves the yield sentinel only for cancellation
+// caused by a priority yield. Concrete test/package failures remain dominant.
+func releaseYieldCancellation(ctx context.Context, err error) error {
+	if errors.Is(context.Cause(ctx), errReleaseYielded) && errors.Is(err, context.Canceled) {
+		return errReleaseYielded
+	}
+	return nil
+}
 
 func releaseYieldContext(dir string, machine config.Machine) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancelCause(context.Background())

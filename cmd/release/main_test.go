@@ -93,6 +93,41 @@ func TestRunReleaseTestsDoesNotCancelForFailureTextInOutput(t *testing.T) {
 	}
 }
 
+func TestReleaseObservedTestFailureDominatesPriorityYield(t *testing.T) {
+	if os.Getenv("GO_WANT_RELEASE_OBSERVED_FAILURE_HELPER") == "1" {
+		fmt.Fprintln(os.Stdout, `{"Action":"fail","Package":"example.com/engine","Test":"TestObserved"}`)
+		if err := os.WriteFile(os.Getenv("GO_WANT_RELEASE_OBSERVED_FAILURE_MARKER"), []byte("emitted"), 0600); err != nil {
+			os.Exit(2)
+		}
+		select {}
+	}
+	marker := filepath.Join(t.TempDir(), "observed-failure")
+	t.Setenv("GO_WANT_RELEASE_OBSERVED_FAILURE_HELPER", "1")
+	t.Setenv("GO_WANT_RELEASE_OBSERVED_FAILURE_MARKER", marker)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	result := make(chan error, 1)
+	go func() {
+		result <- runReleaseTestCommand(ctx, os.Args[0], []string{"-test.run=^TestReleaseObservedTestFailureDominatesPriorityYield$", "--"}, nil)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel(errReleaseYielded)
+			t.Fatal("test failure helper did not emit its JSON event")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel(errReleaseYielded)
+	err := <-result
+	if err == nil || errors.Is(err, errReleaseYielded) || !strings.Contains(err.Error(), "TestObserved") {
+		t.Fatalf("observed test failure lost to priority yield: %v", err)
+	}
+}
+
 func assertReleaseDescendantStopped(t *testing.T, marker string) {
 	t.Helper()
 	time.Sleep(150 * time.Millisecond)

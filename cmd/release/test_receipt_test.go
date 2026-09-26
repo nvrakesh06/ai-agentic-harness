@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -71,7 +72,7 @@ func TestReleaseReceiptRejectsDirtySourceAndInterruptedGroup(t *testing.T) {
 
 func TestReleaseBrowserGroupsNeverReuseReceipts(t *testing.T) {
 	identity, group := receiptFixture()
-	group.Tests = []string{"TestNativeVisualCapture"}
+	group.Tests = []string{"TestNativeVisualCapturePinsHeadAndStoresOutsideSource"}
 	if !releaseBrowserSensitive(group) {
 		t.Fatal("native visual group was reusable")
 	}
@@ -79,11 +80,42 @@ func TestReleaseBrowserGroupsNeverReuseReceipts(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("AIH_REAL_PLAYWRIGHT", "1")
-	if releaseTerminalAccepted("TestNativeVisualCapture", "skip") {
+	if releaseTerminalAccepted("TestNativeVisualCapturePinsHeadAndStoresOutsideSource", "skip") {
 		t.Fatal("real browser opt-in accepted a skipped visual fixture")
 	}
-	if !releaseTerminalAccepted("TestNativeVisualCapture", "pass") {
+	if !releaseTerminalAccepted("TestNativeVisualCapturePinsHeadAndStoresOutsideSource", "pass") {
 		t.Fatal("real browser opt-in rejected a passing visual fixture")
+	}
+	if !releaseTerminalAccepted("TestVisualPrepareUsesFreshDetachedCheckoutNotWriterRuntime", "skip") {
+		t.Fatal("real browser opt-in rejected an unrelated capability unit skip")
+	}
+}
+
+func TestReleaseWorkspaceAndModfileAuthorityAreRejected(t *testing.T) {
+	if err := releaseWorkspaceAllowed(`C:\workspace\go.work`); err == nil {
+		t.Fatal("active workspace was accepted")
+	}
+	if err := releaseWorkspaceAllowed("off"); err != nil {
+		t.Fatal(err)
+	}
+	for _, flags := range []string{"-modfile=outside.mod", "-modfile outside.mod"} {
+		if err := releaseGoFlagsAllowed(flags); err == nil {
+			t.Fatalf("external modfile was accepted: %q", flags)
+		}
+	}
+}
+
+func TestReleaseYieldCancellationPreservesOnlyYieldedCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errReleaseYielded)
+	if got := releaseYieldCancellation(ctx, fmt.Errorf("wrapped: %w", context.Canceled)); !errors.Is(got, errReleaseYielded) {
+		t.Fatalf("yielded cancellation = %v", got)
+	}
+	if got := releaseYieldCancellation(ctx, ctx.Err()); !errors.Is(got, errReleaseYielded) {
+		t.Fatalf("yielded ctx.Err = %v", got)
+	}
+	if got := releaseYieldCancellation(ctx, errors.New("real package failure")); got != nil {
+		t.Fatalf("real failure was converted into yield: %v", got)
 	}
 }
 

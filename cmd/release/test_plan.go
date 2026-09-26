@@ -89,6 +89,9 @@ func runCompleteReleaseTests(ctx context.Context) error {
 	defer cancel()
 	output, err := platform.Run(discovery, "", nil, "", "go", "list", "./...")
 	if err != nil {
+		if yielded := releaseYieldCancellation(ctx, err); yielded != nil {
+			return yielded
+		}
 		return fmt.Errorf("discover release package inventory: %w: %s", err, output)
 	}
 	packages := strings.Fields(output)
@@ -103,6 +106,9 @@ func runCompleteReleaseTests(ctx context.Context) error {
 	}
 	output, err = platform.Run(discovery, "", nil, "", "go", "test", "-p=1", "-list", ".", integration)
 	if err != nil {
+		if yielded := releaseYieldCancellation(ctx, err); yielded != nil {
+			return yielded
+		}
 		return fmt.Errorf("discover release integration inventory: %w: %s", err, output)
 	}
 	tests := []string{}
@@ -120,6 +126,9 @@ func runCompleteReleaseTests(ctx context.Context) error {
 	// group fails. It is not evidence that unexecuted groups passed.
 	identity, err := releaseReceiptIdentityFor(discovery, groups)
 	if err != nil {
+		if yielded := releaseYieldCancellation(ctx, err); yielded != nil {
+			return yielded
+		}
 		return err
 	}
 	manifest, err := json.MarshalIndent(releaseTestInventory{Schema: 1, Head: identity.Head, Tree: identity.Tree, WorktreeDirty: false, Groups: groups}, "", "  ")
@@ -139,6 +148,9 @@ func runCompleteReleaseTests(ctx context.Context) error {
 		current, identityErr := releaseReceiptIdentityFor(ctx, groups)
 		if identityErr != nil || current != identity {
 			if identityErr != nil {
+				if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {
+					return yielded
+				}
 				return fmt.Errorf("release test group %d/%d identity: %w", index+1, len(groups), identityErr)
 			}
 			return fmt.Errorf("release test group %d/%d identity changed; refusing receipt reuse", index+1, len(groups))
@@ -149,7 +161,7 @@ func runCompleteReleaseTests(ctx context.Context) error {
 			fmt.Printf("release test group %d/%d: cached exact-identity receipt\n", index+1, len(groups))
 			continue
 		}
-		if err := runReleaseTestCommand(ctx, "go", releaseGroupArgs(group), group.Tests); err != nil {
+		if err := runReleaseTestGroupCommand(ctx, "go", releaseGroupArgs(group), group.Tests, group.Packages); err != nil {
 			return fmt.Errorf("release test group %d/%d: %w", index+1, len(groups), err)
 		}
 		// An interrupted group reaches neither this line nor the receipt write.
@@ -157,11 +169,17 @@ func runCompleteReleaseTests(ctx context.Context) error {
 			current, identityErr = releaseReceiptIdentityFor(ctx, groups)
 			if identityErr != nil || current != identity {
 				if identityErr != nil {
+					if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {
+						return yielded
+					}
 					return fmt.Errorf("release test group %d/%d final identity: %w", index+1, len(groups), identityErr)
 				}
 				return fmt.Errorf("release test group %d/%d changed source or runtime; refusing receipt", index+1, len(groups))
 			}
 			if err := saveReleaseGroupReceipt(ctx, receipts, identity, group); err != nil {
+				if yielded := releaseYieldCancellation(ctx, err); yielded != nil {
+					return yielded
+				}
 				return fmt.Errorf("record release test group %d/%d: %w", index+1, len(groups), err)
 			}
 		}
@@ -169,6 +187,9 @@ func runCompleteReleaseTests(ctx context.Context) error {
 	current, identityErr := releaseReceiptIdentityFor(ctx, groups)
 	if identityErr != nil || current != identity {
 		if identityErr != nil {
+			if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {
+				return yielded
+			}
 			return fmt.Errorf("release test final identity: %w", identityErr)
 		}
 		return errors.New("release test final identity changed")

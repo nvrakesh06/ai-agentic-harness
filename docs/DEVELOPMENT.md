@@ -41,6 +41,8 @@ malformed, dirty, or mismatched receipts rerun. Browser, Playwright, and native
 visual groups always rerun. Vet, cross-builds, and checksums never reuse test
 receipts. Grouping avoids losing the tail of a growing Windows integration suite
 to a package-wide aggregate timeout.
+An active Go workspace or `GOFLAGS` `-modfile` authority is rejected for receipt
+reuse, so external module replacement inputs cannot be accepted implicitly.
 
 ## Application configuration
 

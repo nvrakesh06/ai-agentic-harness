@@ -74,4 +74,7 @@ func TestReleaseGroupRejectsSuccessfulExitWithMissingTest(t *testing.T) {
 	if err := runReleaseTestCommand(context.Background(), os.Args[0], args, []string{"TestActual"}); err != nil {
 		t.Fatalf("complete inventory rejected: %v", err)
 	}
+	if err := runReleaseTestGroupCommand(context.Background(), os.Args[0], args, []string{"TestActual"}, []string{"example.com/engine"}); err == nil || !strings.Contains(err.Error(), "package inventory incomplete") {
+		t.Fatalf("successful process hid missing package terminal event: %v", err)
+	}
 }

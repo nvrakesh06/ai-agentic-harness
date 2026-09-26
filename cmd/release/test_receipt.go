@@ -144,13 +144,25 @@ func releaseTerminalAccepted(test, action string) bool {
 	if action == "pass" {
 		return true
 	}
-	return action == "skip" && !(os.Getenv("AIH_REAL_PLAYWRIGHT") == "1" && releaseBrowserTest(test))
+	return action == "skip" && !(os.Getenv("AIH_REAL_PLAYWRIGHT") == "1" && releaseRealBrowserFixture(test))
+}
+
+func releaseRealBrowserFixture(test string) bool {
+	switch test {
+	case "TestNativeVisualCapturePinsHeadAndStoresOutsideSource", "TestNativeVisualCaptureReattestsIdenticalTree":
+		return true
+	default:
+		return false
+	}
 }
 
 func releaseReceiptIdentityFor(ctx context.Context, groups []releaseTestGroup) (releaseReceiptIdentity, error) {
 	run := func(name string, args ...string) (string, error) {
 		output, err := platform.Run(ctx, "", nil, "", name, args...)
 		if err != nil {
+			if yielded := releaseYieldCancellation(ctx, err); yielded != nil {
+				return "", yielded
+			}
 			return "", fmt.Errorf("release receipt identity %s: %w", name, err)
 		}
 		return strings.TrimSpace(output), nil
@@ -182,6 +194,16 @@ func releaseReceiptIdentityFor(ctx context.Context, groups []releaseTestGroup) (
 	if err != nil {
 		return releaseReceiptIdentity{}, err
 	}
+	goWork, err := run("go", "env", "GOWORK")
+	if err != nil {
+		return releaseReceiptIdentity{}, err
+	}
+	if err = releaseWorkspaceAllowed(goWork); err != nil {
+		return releaseReceiptIdentity{}, err
+	}
+	if err = releaseGoFlagsAllowed(os.Getenv("GOFLAGS")); err != nil {
+		return releaseReceiptIdentity{}, err
+	}
 	keys := append([]string(nil), releaseTestEnvironmentKeys...)
 	sort.Strings(keys)
 	environment := make([]string, 0, len(keys))
@@ -199,6 +221,22 @@ func releaseReceiptIdentityFor(ctx context.Context, groups []releaseTestGroup) (
 		Environment: releaseHash(strings.Join(environment, "\n")),
 		Resources:   releaseHash(fmt.Sprintf("timeout=%s\nengine_group_size=%d\npackage_parallelism=1\nfailfast=true", releaseTestTimeout, releaseIntegrationGroupSize)),
 	}, nil
+}
+
+func releaseWorkspaceAllowed(value string) error {
+	if value != "" && value != "off" {
+		return errors.New("release receipt reuse requires GOWORK=off; active workspaces can supply external replace authority")
+	}
+	return nil
+}
+
+func releaseGoFlagsAllowed(value string) error {
+	for _, field := range strings.Fields(value) {
+		if field == "-modfile" || strings.HasPrefix(field, "-modfile=") {
+			return errors.New("release receipt reuse does not accept GOFLAGS -modfile authority")
+		}
+	}
+	return nil
 }
 
 func releaseCleanWorktree(status string) error {
