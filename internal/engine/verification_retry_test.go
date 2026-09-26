@@ -601,11 +601,23 @@ func TestProviderAuthenticationFailureAfterScopedWriteCheckpointsSharedHoldAcros
 	seedReadyTask(t, ctx, f, "auth-blocked")
 	done := make(chan error, 1)
 	go func() { done <- engine.New(f.P).Serve(ctx) }()
-	snapshot := waitProviderAdmissionHold(t, ctx, f)
+	// The hold is published before implement returns to checkpoint the writer.
+	// Retain that pre-checkpoint identity, then compare it to the final durable
+	// state after cooperative shutdown rather than racing the two publications.
+	heldSnapshot := waitProviderAdmissionHold(t, ctx, f)
+	heldTask := heldSnapshot.Tasks["auth-blocked"]
+	if heldTask == nil || heldTask.HeadSHA == "" {
+		t.Fatalf("provider hold did not retain the pre-edit task identity: %#v", heldTask)
+	}
+	preCheckpointHead := heldTask.HeadSHA
 	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
 		t.Fatal(err)
 	}
 	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _, err := f.P.DB.Load()
+	if err != nil {
 		t.Fatal(err)
 	}
 	task := snapshot.Tasks["auth-blocked"]
@@ -615,8 +627,8 @@ func TestProviderAuthenticationFailureAfterScopedWriteCheckpointsSharedHoldAcros
 	if task.State != model.Ready || task.Blocker != nil {
 		t.Fatalf("authentication failure did not preserve schedulable implementer checkpoint: %+v", task)
 	}
-	if task.HeadSHA == "" {
-		t.Fatalf("authentication failure after a scoped write did not publish a task checkpoint: %+v", task)
+	if task.HeadSHA == "" || task.HeadSHA == preCheckpointHead {
+		t.Fatalf("authentication failure after a scoped write did not advance the pre-edit checkpoint: before=%s after=%#v", preCheckpointHead, task)
 	}
 	if len(snapshot.ProviderAdmissionHolds) != 1 {
 		t.Fatalf("authentication failure did not create shared provider hold: %#v", snapshot.ProviderAdmissionHolds)

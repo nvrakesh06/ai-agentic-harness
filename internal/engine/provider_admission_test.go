@@ -1,11 +1,13 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 )
 
 func TestProviderAdmissionSchemaScopeIgnoresPolicyAndModelProvenance(t *testing.T) {
@@ -46,5 +48,15 @@ func TestRecordProviderAdmissionHoldUsesReservedSaturation(t *testing.T) {
 	recorded, err := recordProviderAdmissionHold(s, seventh)
 	if err != nil || recorded.Class != model.ProviderAdmissionSaturated || len(s.ProviderAdmissionHolds) != model.MaxExactProviderAdmissionHolds+1 {
 		t.Fatalf("seventh exact hold = %#v len=%d err=%v", recorded, len(s.ProviderAdmissionHolds), err)
+	}
+}
+
+func TestProviderAdmissionSaturationRetainsTypedAuthenticationCause(t *testing.T) {
+	err := &providerAdmissionHeldError{
+		hold:  model.ProviderAdmissionHold{Provider: "codex", Class: model.ProviderAdmissionSaturated},
+		cause: &provider.InvocationError{Cause: errors.New("fixture authentication failure"), Failure: provider.FailureAuthentication},
+	}
+	if !provider.IsAuthenticationFailure(err) {
+		t.Fatalf("saturation hold lost the authoritative authentication cause: %v", err)
 	}
 }

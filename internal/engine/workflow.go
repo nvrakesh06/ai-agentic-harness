@@ -1529,14 +1529,18 @@ func (c *Controller) implement(id string) bool {
 		}
 		return false
 	}
-	if held, ok := providerAdmissionHeldErrorFor(e); ok {
+	if _, ok := providerAdmissionHeldErrorFor(e); ok {
 		// A provider may have edited the scoped writer worktree before returning
 		// an authentication failure. Keep the existing fenced checkpoint path so
 		// those edits become portable before the shared provider hold suppresses
 		// every task. A normal successful checkpoint remains a schedulable
 		// pre-provider state; only a failed scope/secret/publication safeguard
 		// requires the existing local recovery blocker.
-		if held.hold.Class == model.ProviderAdmissionAuthentication {
+		// A seventh exact rejection is represented by a broader saturation hold.
+		// Its durable scope must not erase the typed cause of this invocation:
+		// only the wrapped authoritative authentication result decides whether a
+		// writable task may have edits that need a fenced checkpoint.
+		if provider.IsAuthenticationFailure(e) {
 			if ce := c.checkpointAuthenticationFailure(id); ce != nil {
 				c.block(id, "Resolve checkpoint failure; local work is preserved.", ce.Error(), model.Ready)
 			}
