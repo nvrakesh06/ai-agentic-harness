@@ -363,6 +363,12 @@ func TestCaptureVisualDoesNotRunIgnoredWriterRenderer(t *testing.T) {
 	if visual == nil || len(visual.Artifacts) != 3 {
 		t.Fatalf("full capture did not produce every target: %#v", visual)
 	}
+	evidenceDir := filepath.Join(c.P.Dir, filepath.FromSlash(filepath.Dir(visual.Manifest)))
+	for _, name := range []string{"adapter-cert.pem", "adapter-key.pem", "aih-visual-runner.mjs"} {
+		if _, err := os.Stat(filepath.Join(evidenceDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("temporary visual capture file was retained as evidence: %s (%v)", name, err)
+		}
+	}
 	if got, err := os.ReadFile(prepareMarker); err != nil || string(got) != "1" {
 		t.Fatalf("prepare did not run exactly once for multi-target capture: %q %v", got, err)
 	}
@@ -421,7 +427,7 @@ func TestNativeVisualAdapter(t *testing.T) {
 				return
 			}
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte(`<!doctype html><div id="root"></div><img src="https://outside.invalid/pixel.png"><img src="/redirect-pixel"><script>new WebSocket('ws://outside.invalid/socket')</script><script src="/api-client.ts"></script>`))
+			_, _ = w.Write([]byte(`<!doctype html><main><h1>AIH native visual capture</h1><p>loopback adapter fixture</p></main><img src="https://outside.invalid/pixel.png"><img src="/redirect-pixel"><script>new WebSocket('ws://outside.invalid/socket')</script><script src="/api-client.ts"></script>`))
 		case "/detail":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(`<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:rgb(17,34,51)}</style><main>detail state</main>`))
@@ -589,6 +595,129 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	run("commit", "-m", "changed")
 	if _, err := c.captureVisual(context.Background(), effective, task, worktree); err == nil {
 		t.Fatal("stale task head reused visual evidence")
+	}
+}
+
+// TestNativeVisualCaptureReattestsIdenticalTree runs the production browser
+// runner against the disposable TLS adapter. It is opt-in because it needs a
+// locally provisioned Chrome channel and the supervisor-owned Playwright
+// module; ordinary tests continue to cover the same protocol with fixtures.
+func TestNativeVisualCaptureReattestsIdenticalTree(t *testing.T) {
+	if runtime.GOOS != "windows" || os.Getenv("AIH_REAL_PLAYWRIGHT") != "1" {
+		t.Skip("real Playwright fixture runs on an explicitly provisioned Windows browser host")
+	}
+	home, err := config.Home("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := filepath.Join(home, "tools", "node_modules", "playwright")
+	t.Setenv("AIH_PLAYWRIGHT_MODULE", module)
+	module, err = fixturePlaywrightModule(home)
+	if err != nil {
+		t.Skipf("supervisor Playwright capability unavailable: %v", err)
+	}
+	t.Setenv("AIH_VISUAL_SERVER_HELPER", "1")
+
+	c, task, _, source, run := visualCheckoutFixture(t)
+	c.P.Home = home
+	targets := []config.VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 640, Height: 360}}
+	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{
+		Server:       []string{os.Args[0], "-test.run=^TestNativeVisualAdapter$"},
+		Timeout:      30,
+		Targets:      targets,
+		InputClosure: &config.VisualInputClosure{Version: 1, Runtime: "chrome-playwright", Targets: []config.VisualInputClosureTarget{{ID: "desktop"}}},
+	}}}
+	first, err := c.captureVisual(context.Background(), effective, task, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SourceHead != task.HeadSHA || first.Closure == "" || first.Runtime == "" || first.ReuseReason != "" {
+		t.Fatalf("fresh capture provenance = %#v", first)
+	}
+	firstDir := filepath.Join(c.P.Dir, filepath.FromSlash(filepath.Dir(first.Manifest)))
+	firstImage, err := os.Open(filepath.Join(firstDir, "desktop.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstConfig, _, decodeErr := image.DecodeConfig(firstImage)
+	closeErr := firstImage.Close()
+	if decodeErr != nil || closeErr != nil || firstConfig.Width != 640 || firstConfig.Height != 360 {
+		t.Fatalf("production runner did not create a 640x360 screenshot: %#v %v %v", firstConfig, decodeErr, closeErr)
+	}
+	if _, _, err = loadVisualSeal(firstDir, task.ID, task.HeadSHA, effective.Hash, targets); err != nil {
+		t.Fatalf("fresh capture was not sealed: %v", err)
+	}
+	for _, name := range []string{"adapter-cert.pem", "adapter-key.pem", "aih-visual-runner.mjs"} {
+		if _, err := os.Stat(filepath.Join(firstDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("temporary visual capture file was retained as evidence: %s (%v)", name, err)
+		}
+	}
+
+	// This changes commit identity but preserves the complete committed tree.
+	run(source, "commit", "--allow-empty", "-m", "history-only sync")
+	secondHead := run(source, "rev-parse", "HEAD")
+	run(source, "push", "control", "HEAD:refs/heads/aih/task")
+	task.HeadSHA = secondHead
+	task.Evidence = &model.Evidence{
+		Reviews: map[string]string{"designer": "review from the source head"},
+		ReviewDispositions: map[string]model.ReviewDisposition{
+			"designer": {Disposition: "completed", SourceHead: first.Head, Runtime: "native"},
+		},
+	}
+	beforeReviews, err := json.Marshal(task.Evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := c.captureVisual(context.Background(), effective, task, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Head != secondHead || second.SourceHead != first.Head || second.Closure != first.Closure || second.Runtime != first.Runtime || second.ReuseReason != "identical declared visual input closure" {
+		t.Fatalf("identical-tree reattestation provenance = %#v", second)
+	}
+	afterReviews, err := json.Marshal(task.Evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterReviews) != string(beforeReviews) {
+		t.Fatalf("artifact reattestation modified or copied review disposition: before=%s after=%s", beforeReviews, afterReviews)
+	}
+	secondDir := filepath.Join(c.P.Dir, filepath.FromSlash(filepath.Dir(second.Manifest)))
+	seal, _, err := loadVisualSeal(secondDir, task.ID, secondHead, effective.Hash, targets)
+	if err != nil || seal.Closure == nil || seal.Closure.SourceHead != first.Head || seal.Evidence.SourceHead != first.Head {
+		t.Fatalf("reattested capture did not retain source-head provenance: %#v %v", seal, err)
+	}
+	if root := os.Getenv("AIH_LIVE_VISUAL_ARTIFACT_ROOT"); root != "" {
+		destination := filepath.Join(root, "visual-evidence")
+		if err := os.CopyFS(destination, os.DirFS(filepath.Join(c.P.Dir, "visual-evidence"))); err != nil {
+			t.Fatalf("retain live visual artifacts: %v", err)
+		}
+		t.Logf("retained live visual artifacts at %s", destination)
+	}
+
+	// A tracked-file change produces a different full-tree receipt and cannot
+	// reuse the sealed screenshot, even though target/config/runtime match.
+	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("changed tree"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	run(source, "add", "tracked.txt")
+	run(source, "commit", "-m", "tracked change")
+	thirdHead := run(source, "rev-parse", "HEAD")
+	run(source, "push", "control", "HEAD:refs/heads/aih/task")
+	runtimeIdentity, err := visualRuntimeIdentity(context.Background(), module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closure, err := visualInputClosure(context.Background(), source, effective, runtimeIdentity, thirdHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdOutput := filepath.Join(c.P.Dir, "visual-evidence", task.ID, thirdHead+"-"+effective.Hash[:16])
+	if _, ok, err := c.reattestVisualEvidence(context.Background(), filepath.Join(c.P.Dir, "visual-evidence", task.ID), thirdOutput, &model.Task{ID: task.ID, HeadSHA: thirdHead}, effective, targets, closure); err != nil || ok {
+		t.Fatalf("changed full tree reused a sealed capture: ok=%t err=%v", ok, err)
+	}
+	if _, err := os.Stat(thirdOutput); !os.IsNotExist(err) {
+		t.Fatalf("changed full tree left a reattested artifact: %v", err)
 	}
 }
 

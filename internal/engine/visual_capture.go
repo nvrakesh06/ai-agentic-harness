@@ -978,6 +978,14 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	if err = os.RemoveAll(cache); err != nil {
 		return nil, fmt.Errorf("remove visual browser cache: %w", err)
 	}
+	// The adapter credentials and AIH-owned runner are capture mechanics too.
+	// Keeping either beside retained screenshots would expose an ephemeral
+	// private key and make implementation code look like project evidence.
+	for _, path := range []string{runner, certPath, keyPath} {
+		if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("remove temporary visual capture file: %w", err)
+		}
+	}
 	sha, err = (gitx.Git{Dir: checkout.path}).SHA(ctx, "HEAD")
 	if err != nil || sha != task.HeadSHA {
 		return nil, errors.New("visual capture changed the reviewed head")
