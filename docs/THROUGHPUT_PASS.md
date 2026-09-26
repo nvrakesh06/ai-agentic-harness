@@ -224,3 +224,35 @@ skip cannot be presented as provisioned-browser proof.
 Known boundary: diagnostics, focused proofs and an architecture proposal do not
 establish improved consumer delivery. The combined exact-tree release gate,
 verified artifact activation and a real task reaching DONE remain required.
+
+## Cutoff for returning to StatMotion production
+
+The September 26 recovery is a finite release, not a requirement to finish every
+AIH architecture or performance proposal before producing more StatMotion work.
+Its schema-11 cohort restores the rejected provider output contract, preserves
+admission diagnostics, measures persistence locally, compiles immutable validation
+patterns once, and copies only capacity for capacity-only scheduler reads. Include
+the reviewed fixture phase/cleanup repairs without weakening native failure,
+retry-budget, recovery, lease or publication assertions.
+
+The return boundary is:
+
+1. The frozen integrated source passes the complete uncached release gate,
+   including provisioned-browser checks, vet and cross-builds.
+2. Publish that verified source, select its exact recorded binary, and recover
+   blocked StatMotion tasks through supported commands with durable acceptance.
+3. Observe tasks 6 and 140 admitted independently within configured capacity and
+   reaching DONE without manual scheduling reminders. Report provider output,
+   delivery time and any defect or suppression reason; queued commands and active
+   process counts do not establish useful delivery.
+
+StatMotion implementation resumes immediately after verified activation. The two
+consumer tasks supply operational acceptance while producing useful product work;
+there is no additional idle observation period or arbitrary speedup threshold.
+
+Schema-12 provider holds/public retry remain a separate release with their own
+migration and lifecycle proof. History archival, observational publication
+coalescing, broader activation automation and further review reuse are follow-up
+AIH work, driven by deployed measurements. They do not block this return unless a
+specific observed defect prevents safe delivery. Keep safeguards intact and fix
+new failures at their demonstrated boundary instead of expanding this cohort.
