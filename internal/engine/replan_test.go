@@ -124,6 +124,11 @@ func TestReplanSnapshotPreconditionAcceptsOnlyExactBaseOnlyOriginal(t *testing.T
 	if err := replanSnapshotPrecondition(s, stateRef, request); err != nil {
 		t.Fatalf("exact saved base-only original rejected before lease: %v", err)
 	}
+	s.Tasks["queued"].BaseSHA = ""
+	if err := replanSnapshotPrecondition(s, stateRef, request); err == nil {
+		t.Fatal("empty task base accepted an explicit saved-base binding")
+	}
+	s.Tasks["queued"].BaseSHA = savedBase
 	request.Originals[0].ExpectedBaseSHA = strings.Repeat("d", 40)
 	if err := replanSnapshotPrecondition(s, stateRef, request); err == nil {
 		t.Fatal("base-only original accepted a different saved base")

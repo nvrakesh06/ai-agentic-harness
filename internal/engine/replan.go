@@ -194,6 +194,13 @@ func replanEmptyOriginal(s *model.Snapshot, t *model.Task, expectedBase string) 
 	return replanUnstarted(s, t) || replanBaseOnly(s, t, expectedBase)
 }
 
+func replanRequestedEmptyOriginal(s *model.Snapshot, t *model.Task, request ReplanRequest, original ReplanOriginal) bool {
+	if original.ExpectedBaseSHA != "" {
+		return replanBaseOnly(s, t, original.ExpectedBaseSHA)
+	}
+	return replanEmptyOriginal(s, t, request.Expected.BaseSHA)
+}
+
 func replanOriginalExpectedBase(request ReplanRequest, original ReplanOriginal) string {
 	if original.ExpectedBaseSHA != "" {
 		return original.ExpectedBaseSHA
@@ -373,7 +380,7 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 			return fmt.Errorf("original task %s is not idle at its expected checkpoint", expected.TaskID)
 		}
 		if expected.HeadSHA == "" {
-			if !replanEmptyOriginal(s, t, replanOriginalExpectedBase(request, expected)) {
+			if !replanRequestedEmptyOriginal(s, t, request, expected) {
 				return fmt.Errorf("original task %s is not provably unstarted", expected.TaskID)
 			}
 		} else if t.HeadSHA != expected.HeadSHA {
@@ -509,7 +516,7 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 		}
 		for _, expected := range request.Originals {
 			t := current.Tasks[expected.TaskID]
-			if t == nil || t.State != expected.State || replanActive(current, t) || (expected.HeadSHA == "" && !replanEmptyOriginal(current, t, replanOriginalExpectedBase(request, expected))) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
+			if t == nil || t.State != expected.State || replanActive(current, t) || (expected.HeadSHA == "" && !replanRequestedEmptyOriginal(current, t, request, expected)) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
 				return fmt.Errorf("original task %s changed during replan", expected.TaskID)
 			}
 		}
@@ -626,7 +633,7 @@ func replanUnstartedRefs(ctx context.Context, p *Project, s *model.Snapshot, req
 		}
 		t := s.Tasks[expected.TaskID]
 		base := replanOriginalExpectedBase(request, expected)
-		if t == nil || !replanEmptyOriginal(s, t, base) {
+		if t == nil || !replanRequestedEmptyOriginal(s, t, request, expected) {
 			return fmt.Errorf("original task %s is not provably unstarted", expected.TaskID)
 		}
 		if t.Branch != "" {
@@ -668,7 +675,7 @@ func replanSnapshotPrecondition(s *model.Snapshot, stateRef string, request Repl
 	objective := ""
 	for _, expected := range request.Originals {
 		t := s.Tasks[expected.TaskID]
-		if t == nil || t.State != expected.State || replanActive(s, t) || t.MergeSHA != "" || t.State == model.Done || t.State == model.Superseded || (expected.HeadSHA == "" && !replanEmptyOriginal(s, t, replanOriginalExpectedBase(request, expected))) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
+		if t == nil || t.State != expected.State || replanActive(s, t) || t.MergeSHA != "" || t.State == model.Done || t.State == model.Superseded || (expected.HeadSHA == "" && !replanRequestedEmptyOriginal(s, t, request, expected)) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
 			return fmt.Errorf("original task %s is not idle at its expected checkpoint", expected.TaskID)
 		}
 		if objective == "" {
