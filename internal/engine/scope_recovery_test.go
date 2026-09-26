@@ -2,8 +2,10 @@ package engine_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,23 @@ func TestScopeRecoveryExplicitReauthorizationAndIdempotence(t *testing.T) {
 	ctx := context.Background()
 	f, manifest, before := scopeRecoveryFixture(t, ctx, "legacy-task", nil, nil)
 	defer f.P.DB.Close()
+	s, stateRef, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := legacyScopeDecisions(87)
+	s.Tasks["legacy-task"].Decisions = append([]string(nil), legacy...)
+	seeded, err := f.P.Git.StateCommit(ctx, stateRef, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateRef, New: seeded}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.DB.Save(seeded, s); err != nil {
+		t.Fatal(err)
+	}
+	manifest.ExpectedStateRef, before = seeded, seeded
 	if err := engine.RecoverScope(ctx, f.P, manifest); err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +52,7 @@ func TestScopeRecoveryExplicitReauthorizationAndIdempotence(t *testing.T) {
 	if task.Evidence != nil || task.Summary != "preserve source summary" || task.Verification == nil {
 		t.Fatalf("recovery did not invalidate only stale evidence: %#v", task)
 	}
-	if len(task.Decisions) != 1 || !strings.HasPrefix(task.Decisions[0], "AIH_SCOPE_RECOVERY_V1:") {
+	if len(task.Decisions) != len(legacy)+1 || !reflect.DeepEqual(task.Decisions[:len(legacy)], legacy) || !strings.HasPrefix(task.Decisions[len(legacy)], "AIH_SCOPE_RECOVERY_V1:") {
 		t.Fatalf("missing typed recovery decision: %#v", task.Decisions)
 	}
 	if afterRef == before {
@@ -42,10 +61,18 @@ func TestScopeRecoveryExplicitReauthorizationAndIdempotence(t *testing.T) {
 	if err = engine.RecoverScope(ctx, f.P, manifest); err != nil {
 		t.Fatalf("idempotent retry: %v", err)
 	}
-	_, retryRef, err := f.P.Git.Load(ctx)
-	if err != nil || retryRef != afterRef {
+	retried, retryRef, err := f.P.Git.Load(ctx)
+	if err != nil || retryRef != afterRef || !reflect.DeepEqual(retried.Tasks["legacy-task"].Decisions, task.Decisions) {
 		t.Fatalf("idempotent retry published a new state ref: %s -> %s (%v)", afterRef, retryRef, err)
 	}
+}
+
+func legacyScopeDecisions(count int) []string {
+	decisions := make([]string, count)
+	for i := range decisions {
+		decisions[i] = fmt.Sprintf("legacy decision %d", i)
+	}
+	return decisions
 }
 
 func TestScopeRecoveryAllowsStoppedRunAndPreflightHistory(t *testing.T) {

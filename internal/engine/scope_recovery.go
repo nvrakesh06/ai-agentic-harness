@@ -238,9 +238,6 @@ func prepareScopeRecovery(ctx context.Context, p *Project, s *model.Snapshot, st
 		if !legacyAssignmentRecoverable(task) {
 			return nil, fmt.Errorf("scope recovery task %s already has a known immutable assignment", item.ID)
 		}
-		if len(task.Decisions) >= 64 {
-			return nil, fmt.Errorf("scope recovery task %s has no bounded decision capacity", item.ID)
-		}
 		areas, err := p.Git.ClassifyAreasAtRef(ctx, effective.BaseSHA, item.Areas)
 		if err != nil {
 			return nil, fmt.Errorf("classify scope recovery task %s areas: %w", item.ID, err)

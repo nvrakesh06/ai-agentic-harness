@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,38 @@ func TestTransitionsAndBlockers(t *testing.T) {
 	Block(task, "Choose", "decision", Ready)
 	if e := Answer(task, "proceed"); e != nil || task.State != Ready || len(task.Decisions) != 1 {
 		t.Fatal(task, e)
+	}
+}
+
+func TestRecordScopeRecoveryBoundsTypedReceiptsNotLegacyDecisions(t *testing.T) {
+	task := &Task{}
+	legacy := make([]string, 87)
+	for i := range legacy {
+		legacy[i] = fmt.Sprintf("legacy decision %d", i)
+	}
+	task.Decisions = append(task.Decisions, legacy...)
+
+	record := func(id string) ScopeRecovery {
+		return ScopeRecovery{CommandID: id, ManifestHash: id, Reason: "explicit recovery"}
+	}
+	if err := RecordScopeRecovery(task, record("receipt-0")); err != nil {
+		t.Fatalf("legacy decision history prevented recovery receipt: %v", err)
+	}
+	if len(task.Decisions) != len(legacy)+1 || !reflect.DeepEqual(task.Decisions[:len(legacy)], legacy) {
+		t.Fatalf("legacy decision history changed: %#v", task.Decisions)
+	}
+	for i := 1; i < MaxScopeRecoveryRecords; i++ {
+		if err := RecordScopeRecovery(task, record(fmt.Sprintf("receipt-%d", i))); err != nil {
+			t.Fatalf("receipt %d rejected before typed limit: %v", i, err)
+		}
+	}
+	if err := RecordScopeRecovery(task, record("receipt-over-limit")); err == nil {
+		t.Fatal("unbounded typed scope recovery receipts accepted")
+	}
+	oversized := record("oversized")
+	oversized.Areas = []string{strings.Repeat("a", maxScopeRecoveryRecordBytes)}
+	if err := RecordScopeRecovery(&Task{}, oversized); err == nil {
+		t.Fatal("oversized scope recovery receipt accepted")
 	}
 }
 
