@@ -234,53 +234,51 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 }
 
 func TestReviewTimeoutPersistsPeerFindingBeforeRetryAndDefersQA(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	setupCtx, setupCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer setupCancel()
+	f, err := demo.New(setupCtx, t.TempDir(), []string{"git", "diff", "--exit-code"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.P.DB.Close()
-	configureFixtureRoleTimeouts(t, ctx, f, config.RoleTimeouts{Review: 10})
-	seedReadyTask(t, ctx, f, "mixed")
-	snapshot, stateHead, err := f.P.Git.Load(ctx)
+	configureFixtureRoleTimeouts(t, setupCtx, f, config.RoleTimeouts{Review: 10})
+	seedReadyTask(t, setupCtx, f, "mixed")
+	snapshot, stateHead, err := f.P.Git.Load(setupCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	snapshot.Tasks["mixed"].Risk = "high"
-	next, err := f.P.Git.StateCommit(ctx, stateHead, snapshot)
+	next, err := f.P.Git.StateCommit(setupCtx, stateHead, snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateHead, New: next}}); err != nil {
+	if err = f.P.Git.Publish(setupCtx, []gitx.Update{{Branch: "aih-state", Old: stateHead, New: next}}); err != nil {
 		t.Fatal(err)
 	}
 	workers := &mixedReviewDeadlineProvider{firstTimeout: make(chan struct{})}
 	f.P.Provider = workers
-	done := make(chan error, 1)
-	go func() { done <- engine.New(f.P).Serve(ctx) }()
-	stopped := false
+	workflowCtx, workflowCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer workflowCancel()
+	supervisor := newFixtureSupervisor(workflowCtx, f.P)
+	drained := false
 	defer func() {
-		if stopped {
-			return
-		}
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Errorf("supervisor did not stop after mixed review fixture failure")
+		if !drained {
+			if err := supervisor.drain("mixed review timeout cleanup"); err != nil {
+				t.Errorf("mixed review fixture supervisor drain: %v", err)
+			}
+			drained = true
 		}
 	}()
 	select {
 	case <-workers.firstTimeout:
-	case serveErr := <-done:
-		stopped = true
-		t.Fatalf("supervisor stopped before review timeout: %v", serveErr)
-	case <-time.After(30 * time.Second):
-		t.Fatal("security review did not reach its first bounded timeout")
+	case <-supervisor.completion():
+		drained = true
+		t.Fatalf("supervisor stopped before review timeout: %v %s", supervisor.completedResult(), retryFixtureStatus(f, "mixed"))
+	case <-workflowCtx.Done():
+		err := supervisor.drain("mixed review first timeout deadline")
+		drained = true
+		t.Fatalf("security review did not reach its first bounded timeout: supervisor=%v %s", err, retryFixtureStatus(f, "mixed"))
 	}
-	deadline := time.NewTimer(15 * time.Second)
-	defer deadline.Stop()
 	var last *model.Task
 	for {
 		current, _, loadErr := f.P.DB.Load()
@@ -294,24 +292,22 @@ func TestReviewTimeoutPersistsPeerFindingBeforeRetryAndDefersQA(t *testing.T) {
 			}
 		}
 		select {
-		case serveErr := <-done:
-			stopped = true
-			t.Fatalf("supervisor stopped before routed review recovery: %v", serveErr)
-		case <-deadline.C:
-			stacks := make([]byte, 1<<20)
-			n := runtime.Stack(stacks, true)
-			var evidence *model.Evidence
-			if last != nil {
-				evidence = last.Evidence
-			}
-			t.Fatalf("reviewer finding was not durably routed without running QA: security_calls=%d qa_calls=%d task=%#v evidence=%#v goroutines=\n%s", workers.securityCalls.Load(), workers.qaCalls.Load(), last, evidence, stacks[:n])
+		case <-supervisor.completion():
+			drained = true
+			t.Fatalf("supervisor stopped before routed review recovery: %v %s", supervisor.completedResult(), retryFixtureStatus(f, "mixed"))
+		case <-workflowCtx.Done():
+			err := supervisor.drain("mixed review routed recovery deadline")
+			drained = true
+			t.Fatalf("reviewer finding was not durably routed without running QA: security_calls=%d qa_calls=%d task=%#v supervisor=%v %s", workers.securityCalls.Load(), workers.qaCalls.Load(), last, err, retryFixtureStatus(f, "mixed"))
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
-	cancel()
-	serveErr := <-done
-	stopped = true
-	if serveErr != nil {
-		t.Fatal(serveErr)
+	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
+		t.Fatal(err)
+	}
+	err = supervisor.waitHandoff("mixed review timeout cooperative handoff")
+	drained = true
+	if err != nil {
+		t.Fatal(err, retryFixtureStatus(f, "mixed"))
 	}
 }
