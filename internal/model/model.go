@@ -25,6 +25,8 @@ const CapacityTransitionLimit = 20
 const MaxTaskGuidance = 8
 const MaxGuidanceBytes = 1600
 const MaxScopeRecoveryReasonBytes = 1600
+const MaxScopeRecoveryRecords = 8
+const maxScopeRecoveryRecordBytes = 16 * 1024
 
 // MaxVisualEvidenceArtifacts includes up to eight screenshots and one shared diagnostic log.
 const MaxVisualEvidenceArtifacts = 9
@@ -66,8 +68,8 @@ func ScopeRecoveryRecord(t *Task, commandID string) (ScopeRecovery, bool) {
 }
 
 // RecordScopeRecovery stores a compact typed decision in the existing durable
-// Decisions field. Recovery is intentionally bounded so a repeated operator
-// command cannot turn Decisions into an unbounded audit log.
+// Decisions field. The receipt namespace is bounded independently from legacy
+// decision history, which recovery must preserve verbatim.
 func RecordScopeRecovery(t *Task, record ScopeRecovery) error {
 	if t == nil || record.CommandID == "" || len(record.Reason) == 0 || len(record.Reason) > MaxScopeRecoveryReasonBytes || !utf8.ValidString(record.Reason) || strings.ContainsRune(record.Reason, '\x00') {
 		return errors.New("invalid scope recovery decision")
@@ -78,15 +80,28 @@ func RecordScopeRecovery(t *Task, record ScopeRecovery) error {
 		}
 		return errors.New("scope recovery command ID already records a different manifest")
 	}
-	if len(t.Decisions) >= 64 {
-		return errors.New("task decision limit reached")
-	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
+	if len(encoded) > maxScopeRecoveryRecordBytes {
+		return errors.New("scope recovery decision exceeds size limit")
+	}
+	if scopeRecoveryRecordCount(t) >= MaxScopeRecoveryRecords {
+		return errors.New("scope recovery record limit reached")
+	}
 	t.Decisions = append(t.Decisions, scopeRecoveryPrefix+string(encoded))
 	return nil
+}
+
+func scopeRecoveryRecordCount(t *Task) int {
+	count := 0
+	for _, decision := range t.Decisions {
+		if strings.HasPrefix(decision, scopeRecoveryPrefix) {
+			count++
+		}
+	}
+	return count
 }
 
 type State string
