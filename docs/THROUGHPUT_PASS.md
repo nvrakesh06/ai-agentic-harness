@@ -155,3 +155,26 @@ legacy configuration retains its prior worker-budget fallback. Historical pinned
 run context and state residence are unavailable where they were never recorded.
 Product delivery improvement must be measured after resumption, not inferred from
 parallel agent count or these passing infrastructure checks.
+
+## Validation-planning capability repair
+
+The complete gate at `a1ac844` failed in group 6/15 after all non-engine packages
+and 78 engine tests passed. `TestMissingNativeCapabilityBlocksWithoutImplementerRetry`
+reached its 90-second deadline. Review traced an unavailable native executable
+inside validation-plan toolchain discovery: the untyped error bypassed the
+execution-time capability blocker and entered ordinary source FIX recovery.
+AIH issue 139 records the reproduction, cause, throughput cost and acceptance.
+
+The repair preserves configured-check provenance in a typed planning error and
+routes it through the existing verification-only native capability handler.
+The real-Git fixture now asserts no code FIX or Advisor and cross-machine blocker
+recovery; the focused provenance and missing-tool cases passed together (29.123s).
+The repaired candidate still requires the complete uncached gate before deployment.
+
+StatMotion PR 172 consumes the shared reader-budget interface with 600/300/600
+second planning/preflight/review limits and requires schema 11. Its configuration
+parsed successfully, and `npm run validate` passed all 227 tests and both builds.
+The existing 635kB Studio bundle warning is accepted for that configuration-only
+change. An earlier operator-preview port conflict was cleared by stopping the owned
+preview before rerunning validation. Activate this policy only after AIH deployment,
+then regenerate scope manifests against its new canonical policy hash.
