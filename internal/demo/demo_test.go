@@ -88,10 +88,6 @@ func TestEndToEndRecovery(t *testing.T) {
 		t.Fatal(output.String())
 	}
 	g := gitx.Git{Dir: filepath.Join(root, "origin.git")}
-	merges, e := g.Run(ctx, "", "rev-list", "--count", "--merges", "main")
-	if e != nil || merges != "3" {
-		t.Fatal("merge train did not integrate three candidates", merges, e)
-	}
 	b, e := g.Show(ctx, "aih-state", "snapshot.json")
 	if e != nil {
 		t.Fatal(e)
@@ -101,10 +97,12 @@ func TestEndToEndRecovery(t *testing.T) {
 		t.Fatal(e)
 	}
 	bases := map[string]bool{}
+	done := map[string]bool{}
 	for _, task := range s.Tasks {
 		if task.State != model.Done {
 			continue
 		}
+		done[task.Title] = true
 		parent, e := g.SHA(ctx, task.MergeSHA+"^1")
 		if e != nil {
 			t.Fatal(e)
@@ -115,7 +113,17 @@ func TestEndToEndRecovery(t *testing.T) {
 		if !g.Ancestor(ctx, parent, task.Evidence.Head) {
 			t.Fatal("reviewed branch was not synchronized")
 		}
+		if !g.Ancestor(ctx, task.Evidence.Head, task.MergeSHA) || !g.Ancestor(ctx, task.MergeSHA, "main") {
+			t.Fatal("verified candidate was not integrated into main", task.ID)
+		}
+		content, e := g.Show(ctx, "main", "feature-"+task.Title+".txt")
+		if e != nil || strings.TrimSpace(content) != "implemented" {
+			t.Fatalf("integrated candidate content for %q = %q, err %v", task.Title, content, e)
+		}
 		bases[parent] = true
+	}
+	if len(done) != 3 || !done["alpha"] || !done["beta"] || !done["dependent"] {
+		t.Fatalf("integrated candidates = %v, want alpha, beta, and dependent", done)
 	}
 	if len(bases) != 3 {
 		t.Fatal("merge train did not advance and reverify each candidate")
