@@ -43,9 +43,10 @@ type ReplanExpected struct {
 	StateRef string `json:"state_ref"`
 }
 type ReplanOriginal struct {
-	TaskID  string      `json:"task_id"`
-	State   model.State `json:"state"`
-	HeadSHA string      `json:"head_sha"`
+	TaskID          string      `json:"task_id"`
+	State           model.State `json:"state"`
+	HeadSHA         string      `json:"head_sha"`
+	ExpectedBaseSHA string      `json:"expected_base_sha,omitempty"`
 }
 type ReplanSource struct {
 	TaskID  string `json:"task_id"`
@@ -97,7 +98,7 @@ func validateReplanRequest(r ReplanRequest) error {
 	}
 	seen := map[string]string{}
 	for _, old := range r.Originals {
-		if !replanID.MatchString(old.TaskID) || (old.HeadSHA != "" && !replanSHA.MatchString(old.HeadSHA)) {
+		if !replanID.MatchString(old.TaskID) || (old.HeadSHA != "" && !replanSHA.MatchString(old.HeadSHA)) || (old.ExpectedBaseSHA != "" && (!replanSHA.MatchString(old.ExpectedBaseSHA) || old.HeadSHA != "")) {
 			return errors.New("invalid or duplicate original task")
 		}
 		if _, duplicate := seen[old.TaskID]; duplicate {
@@ -191,6 +192,30 @@ func replanEmptyCheckpoint(s *model.Snapshot, t *model.Task, expectedBase string
 
 func replanEmptyOriginal(s *model.Snapshot, t *model.Task, expectedBase string) bool {
 	return replanUnstarted(s, t) || replanBaseOnly(s, t, expectedBase)
+}
+
+func replanOriginalExpectedBase(request ReplanRequest, original ReplanOriginal) string {
+	if original.ExpectedBaseSHA != "" {
+		return original.ExpectedBaseSHA
+	}
+	return request.Expected.BaseSHA
+}
+
+// replanBaseOnlyAncestry permits a saved planning base to lag canonical main,
+// but only along known main history. A divergent base can never be reinterpreted
+// as an unstarted task merely because it has no head.
+func replanBaseOnlyAncestry(ctx context.Context, g gitx.Git, s *model.Snapshot, request ReplanRequest) error {
+	for _, expected := range request.Originals {
+		if expected.HeadSHA != "" {
+			continue
+		}
+		t := s.Tasks[expected.TaskID]
+		base := replanOriginalExpectedBase(request, expected)
+		if replanBaseOnly(s, t, base) && !g.Ancestor(ctx, base, request.Expected.BaseSHA) {
+			return fmt.Errorf("base-only original task %s saved base is not an ancestor of canonical main", expected.TaskID)
+		}
+	}
+	return nil
 }
 
 func replanDigest(request ReplanRequest) string {
@@ -348,7 +373,7 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 			return fmt.Errorf("original task %s is not idle at its expected checkpoint", expected.TaskID)
 		}
 		if expected.HeadSHA == "" {
-			if !replanEmptyOriginal(s, t, request.Expected.BaseSHA) {
+			if !replanEmptyOriginal(s, t, replanOriginalExpectedBase(request, expected)) {
 				return fmt.Errorf("original task %s is not provably unstarted", expected.TaskID)
 			}
 		} else if t.HeadSHA != expected.HeadSHA {
@@ -366,6 +391,9 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 			}
 		}
 		originals, oldSet[t.ID] = append(originals, t), true
+	}
+	if err := replanBaseOnlyAncestry(ctx, c.P.Git, s, request); err != nil {
+		return err
 	}
 	if err := replanUnstartedRefs(ctx, c.P, s, request); err != nil {
 		return err
@@ -481,7 +509,7 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 		}
 		for _, expected := range request.Originals {
 			t := current.Tasks[expected.TaskID]
-			if t == nil || t.State != expected.State || replanActive(current, t) || (expected.HeadSHA == "" && !replanEmptyOriginal(current, t, request.Expected.BaseSHA)) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
+			if t == nil || t.State != expected.State || replanActive(current, t) || (expected.HeadSHA == "" && !replanEmptyOriginal(current, t, replanOriginalExpectedBase(request, expected))) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
 				return fmt.Errorf("original task %s changed during replan", expected.TaskID)
 			}
 		}
@@ -551,6 +579,9 @@ func Replan(ctx context.Context, project *Project, request ReplanRequest) (err e
 		return err
 	}
 	if policyRequired {
+		if err = replanBaseOnlyAncestry(ctx, project.Git, before, request); err != nil {
+			return err
+		}
 		if err = replanUnstartedRefs(ctx, project, before, request); err != nil {
 			return err
 		}
@@ -594,7 +625,8 @@ func replanUnstartedRefs(ctx context.Context, p *Project, s *model.Snapshot, req
 			continue
 		}
 		t := s.Tasks[expected.TaskID]
-		if t == nil || !replanEmptyOriginal(s, t, request.Expected.BaseSHA) {
+		base := replanOriginalExpectedBase(request, expected)
+		if t == nil || !replanEmptyOriginal(s, t, base) {
 			return fmt.Errorf("original task %s is not provably unstarted", expected.TaskID)
 		}
 		if t.Branch != "" {
@@ -602,7 +634,7 @@ func replanUnstartedRefs(ctx context.Context, p *Project, s *model.Snapshot, req
 				return fmt.Errorf("unstarted original task %s source ref exists or cannot be checked", expected.TaskID)
 			}
 		}
-		if !replanBaseOnly(s, t, request.Expected.BaseSHA) {
+		if !replanBaseOnly(s, t, base) {
 			continue
 		}
 		if t.Branch == "" {
@@ -636,7 +668,7 @@ func replanSnapshotPrecondition(s *model.Snapshot, stateRef string, request Repl
 	objective := ""
 	for _, expected := range request.Originals {
 		t := s.Tasks[expected.TaskID]
-		if t == nil || t.State != expected.State || replanActive(s, t) || t.MergeSHA != "" || t.State == model.Done || t.State == model.Superseded || (expected.HeadSHA == "" && !replanEmptyOriginal(s, t, request.Expected.BaseSHA)) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
+		if t == nil || t.State != expected.State || replanActive(s, t) || t.MergeSHA != "" || t.State == model.Done || t.State == model.Superseded || (expected.HeadSHA == "" && !replanEmptyOriginal(s, t, replanOriginalExpectedBase(request, expected))) || (expected.HeadSHA != "" && t.HeadSHA != expected.HeadSHA) {
 			return fmt.Errorf("original task %s is not idle at its expected checkpoint", expected.TaskID)
 		}
 		if objective == "" {

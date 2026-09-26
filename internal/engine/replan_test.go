@@ -39,6 +39,20 @@ func TestDecodeReplanRequestFailsClosed(t *testing.T) {
 		t.Fatal("state-unbound replan request accepted")
 	}
 	request = validReplanRequest()
+	request.Originals = append(request.Originals, ReplanOriginal{TaskID: "queued", State: model.Ready, ExpectedBaseSHA: strings.Repeat("c", 40)})
+	if err = validateReplanRequest(request); err != nil {
+		t.Fatalf("valid saved base for a headless original rejected: %v", err)
+	}
+	request.Originals[1].ExpectedBaseSHA = "not-a-sha"
+	if err = validateReplanRequest(request); err == nil {
+		t.Fatal("malformed saved base accepted")
+	}
+	request = validReplanRequest()
+	request.Originals[0].ExpectedBaseSHA = strings.Repeat("c", 40)
+	if err = validateReplanRequest(request); err == nil {
+		t.Fatal("started original accepted a saved-base field")
+	}
+	request = validReplanRequest()
 	request.Originals = append(request.Originals, ReplanOriginal{TaskID: "queued", State: model.Ready})
 	if err = validateReplanRequest(request); err != nil {
 		t.Fatalf("provably unstarted original was rejected at manifest shape: %v", err)
@@ -99,19 +113,20 @@ func TestReplanUnstartedRequiresEmptyLifecycle(t *testing.T) {
 
 func TestReplanSnapshotPreconditionAcceptsOnlyExactBaseOnlyOriginal(t *testing.T) {
 	s := model.NewSnapshot("project123")
-	base := strings.Repeat("a", 40)
+	savedBase := strings.Repeat("a", 40)
+	canonicalBase := strings.Repeat("e", 40)
 	stateRef := strings.Repeat("c", 40)
-	s.Tasks["queued"] = &model.Task{ID: "queued", ObjectiveID: "objective", State: model.Ready, Branch: "aih/queued", BaseSHA: base, FixCycles: map[string]int{}}
+	s.Tasks["queued"] = &model.Task{ID: "queued", ObjectiveID: "objective", State: model.Ready, Branch: "aih/queued", BaseSHA: savedBase, FixCycles: map[string]int{}}
 	request := validReplanRequest()
-	request.Expected.BaseSHA = base
+	request.Expected.BaseSHA = canonicalBase
 	request.Expected.StateRef = stateRef
-	request.Originals = []ReplanOriginal{{TaskID: "queued", State: model.Ready}}
+	request.Originals = []ReplanOriginal{{TaskID: "queued", State: model.Ready, ExpectedBaseSHA: savedBase}}
 	if err := replanSnapshotPrecondition(s, stateRef, request); err != nil {
-		t.Fatalf("exact base-only original rejected before lease: %v", err)
+		t.Fatalf("exact saved base-only original rejected before lease: %v", err)
 	}
-	request.Expected.BaseSHA = strings.Repeat("d", 40)
+	request.Originals[0].ExpectedBaseSHA = strings.Repeat("d", 40)
 	if err := replanSnapshotPrecondition(s, stateRef, request); err == nil {
-		t.Fatal("base-only original accepted a different request base")
+		t.Fatal("base-only original accepted a different saved base")
 	}
 }
 
