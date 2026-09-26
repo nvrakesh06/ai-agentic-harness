@@ -39,14 +39,20 @@ type mixedReviewDeadlineProvider struct {
 	firstTimeout  chan struct{}
 }
 
-// providerHoldPeerWaveProvider deliberately gives the second independent
-// review goroutine time to queue behind MaxReaders=1. The first typed provider
-// rejection must publish the shared admission hold before that queued peer can
-// acquire the reader reservation.
+// providerHoldPeerWaveProvider controls the two independent review peers around
+// the reader reservation boundary. The second peer pauses only after its first
+// admission check; the first peer then publishes the durable hold before that
+// second peer can reserve MaxReaders=1.
 type providerHoldPeerWaveProvider struct {
-	readerCalls atomic.Int32
-	qaCalls     atomic.Int32
-	firstReader chan struct{}
+	readerCalls             atomic.Int32
+	qaCalls                 atomic.Int32
+	firstReader             chan struct{}
+	secondPassedInitialGate chan struct{}
+	releaseFirstReader      chan struct{}
+	releaseSecondReader     chan struct{}
+	callbackMu              sync.Mutex
+	firstReaderRole         string
+	secondOnce              sync.Once
 }
 
 func (*mixedReviewDeadlineProvider) Name() string                   { return "codex" }
@@ -85,6 +91,25 @@ func (p *mixedReviewDeadlineProvider) Run(ctx context.Context, request provider.
 
 func (*providerHoldPeerWaveProvider) Name() string                   { return "codex" }
 func (*providerHoldPeerWaveProvider) Validate(context.Context) error { return nil }
+
+func (p *providerHoldPeerWaveProvider) beforeReaderReservation(ctx context.Context, role, taskID string) {
+	if taskID != "held-peer-wave" || (role != "reviewer" && role != "security") {
+		return
+	}
+	p.callbackMu.Lock()
+	if p.firstReaderRole == "" {
+		p.firstReaderRole = role
+		p.callbackMu.Unlock()
+		return
+	}
+	p.callbackMu.Unlock()
+	p.secondOnce.Do(func() { close(p.secondPassedInitialGate) })
+	select {
+	case <-p.releaseSecondReader:
+	case <-ctx.Done():
+	}
+}
+
 func (p *providerHoldPeerWaveProvider) Run(ctx context.Context, request provider.Request) (provider.Result, error) {
 	task, err := demo.Task(request.Prompt)
 	if err != nil {
@@ -105,15 +130,8 @@ func (p *providerHoldPeerWaveProvider) Run(ctx context.Context, request provider
 			return provider.Result{}, errors.New("queued reader reached provider after a durable admission hold")
 		}
 		close(p.firstReader)
-		// Keep the reservation occupied while the other independent role starts
-		// and waits on MaxReaders. This tests the post-reservation hold check,
-		// not just the scheduler's next tick.
-		// runReviewAttempt launches both independent roles concurrently, but this
-		// fixture intentionally has no controller-internal semaphore probe. The
-		// 200ms reservation window gives that peer a scheduling opportunity;
-		// the one-call assertion is the only behavioral boundary available here.
 		select {
-		case <-time.After(200 * time.Millisecond):
+		case <-p.releaseFirstReader:
 		case <-ctx.Done():
 			return provider.Result{}, ctx.Err()
 		}
@@ -315,9 +333,16 @@ func TestProviderAdmissionHoldRechecksQueuedReviewPeerAfterReaderReservation(t *
 	cancelSetup()
 	workflowCtx, cancelWorkflow := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancelWorkflow()
-	workers := &providerHoldPeerWaveProvider{firstReader: make(chan struct{})}
+	workers := &providerHoldPeerWaveProvider{
+		firstReader:             make(chan struct{}),
+		secondPassedInitialGate: make(chan struct{}),
+		releaseFirstReader:      make(chan struct{}),
+		releaseSecondReader:     make(chan struct{}),
+	}
 	f.P.Provider = workers
-	supervisor := newFixtureSupervisor(workflowCtx, f.P)
+	controller := engine.New(f.P)
+	engine.SetBeforeReaderReservationForTest(controller, workers.beforeReaderReservation)
+	supervisor := newFixtureSupervisorForController(workflowCtx, controller)
 	drained := false
 	defer func() {
 		if drained {
@@ -335,10 +360,22 @@ func TestProviderAdmissionHoldRechecksQueuedReviewPeerAfterReaderReservation(t *
 	case <-workflowCtx.Done():
 		t.Fatalf("reviewer/security wave did not start within bounded workflow budget: %v", workflowCtx.Err())
 	}
+	select {
+	case <-workers.secondPassedInitialGate:
+	case <-supervisor.completion():
+		drained = true
+		t.Fatalf("supervisor stopped before the queued peer passed its initial admission gate: %v", supervisor.completedResult())
+	case <-workflowCtx.Done():
+		t.Fatalf("queued peer did not pass its initial admission gate: %v", workflowCtx.Err())
+	}
+	// The first reader remains the only provider invocation while its peer is
+	// paused after the first gate. Releasing it creates the typed failure and
+	// publishes the hold before the paused peer can reserve the reader slot.
+	close(workers.releaseFirstReader)
 	_ = waitProviderAdmissionHold(t, workflowCtx, f)
-	// Let a few scheduling ticks run after the hold. A role that passed the
-	// pre-semaphore check must still be suppressed after it receives the slot.
-	time.Sleep(250 * time.Millisecond)
+	// The paused peer now proceeds to the reservation. Its required second gate
+	// sees the already-durable hold, so it must return without Provider.Run.
+	close(workers.releaseSecondReader)
 	if got := workers.readerCalls.Load(); got != 1 {
 		t.Fatalf("queued independent reader calls = %d, want exactly the initial rejected provider call", got)
 	}

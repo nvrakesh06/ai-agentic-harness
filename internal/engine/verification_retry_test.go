@@ -38,9 +38,16 @@ type fixtureSupervisor struct {
 }
 
 func newFixtureSupervisor(parent context.Context, project *engine.Project) *fixtureSupervisor {
+	return newFixtureSupervisorForController(parent, engine.New(project))
+}
+
+// newFixtureSupervisorForController starts a preconfigured controller while
+// keeping the ordinary fixture path above unchanged. Tests use it only for
+// narrow controller synchronization seams configured before Serve.
+func newFixtureSupervisorForController(parent context.Context, controller *engine.Controller) *fixtureSupervisor {
 	child, cancel := context.WithCancel(parent)
 	done := make(chan error, 1)
-	go func() { done <- engine.New(project).Serve(child) }()
+	go func() { done <- controller.Serve(child) }()
 	return &fixtureSupervisor{
 		cancel:       cancel,
 		done:         done,

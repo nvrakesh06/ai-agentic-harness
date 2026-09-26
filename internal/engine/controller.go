@@ -61,6 +61,10 @@ type Controller struct {
 	publish              func(context.Context, []gitx.Update) error
 	commandEffective     func(context.Context) (config.Effective, error)
 	interruptedDurations map[string]int64
+	// beforeReaderReservation is a nil-by-default test seam. It runs only after
+	// the first provider admission check and before a read-only role reserves a
+	// reader slot; production never configures it.
+	beforeReaderReservation func(context.Context, string, string)
 }
 
 // Preserve observed invocation exits until orderly shutdown can publish them

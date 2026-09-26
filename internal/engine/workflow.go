@@ -615,6 +615,13 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 		return provider.Result{}, err
 	}
 	if r.Name != "implementer" {
+		if c.beforeReaderReservation != nil {
+			taskID := ""
+			if t != nil {
+				taskID = t.ID
+			}
+			c.beforeReaderReservation(ctx, r.Name, taskID)
+		}
 		select {
 		case c.readers <- struct{}{}:
 			defer func() { <-c.readers }()

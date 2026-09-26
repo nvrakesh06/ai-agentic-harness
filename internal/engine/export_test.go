@@ -93,3 +93,9 @@ func RejectTaskPublishForTest(c *Controller, branch string) {
 }
 
 func RestorePublishForTest(c *Controller) { c.publish = nil }
+
+// SetBeforeReaderReservationForTest installs a test-only synchronization hook.
+// Call it before Serve; it receives no controller state and production leaves it nil.
+func SetBeforeReaderReservationForTest(c *Controller, hook func(context.Context, string, string)) {
+	c.beforeReaderReservation = hook
+}
