@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -185,6 +186,76 @@ func TestCapacityNoWorkDecisionIsStableAcrossSchedulerTicks(t *testing.T) {
 	if !reflect.DeepEqual(first.status, second.status) || secondKind != "" || second.planObjective != "" || len(second.writers) != 0 {
 		t.Fatalf("idle scheduler would create state churn: first=%#v second=%#v", first, second)
 	}
+}
+
+func TestCapacitySnapshotMatchesFullCloneAndIsDetached(t *testing.T) {
+	snapshot, _, _ := capacityFixture()
+	zone := time.FixedZone("fixture", 5*60*60+30*60)
+	snapshot.Capacity = model.Capacity{
+		Verification: []model.VerificationCheck{{Task: "task", Check: "check", Class: "heavy", Phase: "running", QueuedAt: time.Date(2026, 9, 26, 9, 0, 0, 0, zone)}},
+		Transitions:  []model.CapacityTransition{{At: time.Date(2026, 9, 26, 9, 1, 0, 0, zone), Kind: "capacity_backfill_selected", Objective: "objective"}},
+	}
+	controller := &Controller{s: snapshot}
+	want := model.Clone(snapshot).Capacity
+	got := controller.capacitySnapshot()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("capacity-only clone differs from full snapshot clone:\n got %#v\nwant %#v", got, want)
+	}
+	got.Verification[0].Check = "changed"
+	got.Transitions[0].Kind = "changed"
+	if snapshot.Capacity.Verification[0].Check != "check" || snapshot.Capacity.Transitions[0].Kind != "capacity_backfill_selected" {
+		t.Fatalf("capacity snapshot mutation reached controller state: %#v", snapshot.Capacity)
+	}
+	snapshot.Capacity.Verification[0].Phase = "complete"
+	snapshot.Capacity.Transitions[0].Objective = "other"
+	if got.Verification[0].Phase != "running" || got.Transitions[0].Objective != "objective" {
+		t.Fatalf("controller state mutation reached capacity snapshot: %#v", got)
+	}
+}
+
+func TestCapacitySnapshotMatchesFullCloneEmptyCollections(t *testing.T) {
+	snapshot, _, _ := capacityFixture()
+	snapshot.Capacity.Verification = []model.VerificationCheck{}
+	snapshot.Capacity.Transitions = []model.CapacityTransition{}
+	controller := &Controller{s: snapshot}
+	want := model.Clone(snapshot).Capacity
+	got := controller.capacitySnapshot()
+	if !reflect.DeepEqual(got, want) || got.Verification != nil || got.Transitions != nil {
+		t.Fatalf("capacity empty collection normalization = %#v, full clone = %#v", got, want)
+	}
+}
+
+func BenchmarkCapacitySnapshotCopy(b *testing.B) {
+	for _, size := range []int{512 * 1024, 2 * 1024 * 1024} {
+		snapshot := benchmarkCapacitySnapshot(size)
+		encoded, _ := json.Marshal(snapshot)
+		b.Run(fmt.Sprintf("full_snapshot/%dKiB", len(encoded)/1024), func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(encoded)))
+			for range b.N {
+				_ = model.Clone(snapshot)
+			}
+		})
+		controller := &Controller{s: snapshot}
+		b.Run(fmt.Sprintf("capacity_only/%dKiB", len(encoded)/1024), func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(encoded)))
+			for range b.N {
+				_ = controller.capacitySnapshot()
+			}
+		})
+	}
+}
+
+func benchmarkCapacitySnapshot(targetBytes int) *model.Snapshot {
+	snapshot := model.NewSnapshot("capacity-benchmark")
+	payload := strings.Repeat("e", 2048)
+	for index := 0; len(snapshot.Tasks)*len(payload) < targetBytes; index++ {
+		id := fmt.Sprintf("task-%04d", index)
+		snapshot.Tasks[id] = &model.Task{ID: id, Title: id, Objective: "benchmark", State: model.Ready, Areas: []string{"fixture.txt"}, AssignedAreas: []string{"fixture.txt"}, AssignedAreaKinds: map[string]string{"fixture.txt": model.AreaFile}, Decisions: []string{payload}}
+	}
+	snapshot.Capacity = model.Capacity{Verification: []model.VerificationCheck{{Task: "task-0000", Check: "fixture", Class: "heavy", Phase: "queued", QueuedAt: time.Now().UTC()}}, Transitions: []model.CapacityTransition{{At: time.Now().UTC(), Kind: "capacity_backfill_selected", Objective: "benchmark"}}}
+	return snapshot
 }
 
 func TestCapacityFirstObjectiveStartsImmediatelyAndLaterBackfillHonorsGrace(t *testing.T) {

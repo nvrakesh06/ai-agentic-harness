@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -310,7 +311,7 @@ func capacitySuppression(inventory admissionInventory) (string, string, string) 
 }
 
 func (c *Controller) persistCapacity(next model.Capacity, planObjective string) error {
-	previous := c.Snapshot().Capacity
+	previous := c.capacitySnapshot()
 	next.Verification = previous.Verification
 	next, eventKind := withCapacityTransition(previous, next, planObjective, time.Now().UTC())
 	if reflect.DeepEqual(previous, next) {
@@ -331,6 +332,22 @@ func (c *Controller) persistCapacity(next model.Capacity, planObjective string) 
 		return c.P.DB.Event("", "", "scheduler", "", eventKind, detail)
 	}
 	return nil
+}
+
+// capacitySnapshot returns a detached capacity view while holding the same
+// controller mutex as Snapshot. It preserves model.Clone's JSON normalization
+// (including omitempty and time encoding) without copying tasks, runs, or
+// other state that capacity persistence does not inspect.
+func (c *Controller) capacitySnapshot() model.Capacity {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.s == nil {
+		return model.Capacity{}
+	}
+	encoded, _ := json.Marshal(c.s.Capacity)
+	var capacity model.Capacity
+	_ = json.Unmarshal(encoded, &capacity)
+	return capacity
 }
 
 func withCapacityTransition(previous, next model.Capacity, planObjective string, at time.Time) (model.Capacity, string) {
