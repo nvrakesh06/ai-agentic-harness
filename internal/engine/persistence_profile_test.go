@@ -2,6 +2,7 @@ package engine
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,6 +34,31 @@ func TestPersistenceProfileIsOptInAndAggregatesOnlyFixedPhases(t *testing.T) {
 	}
 	if profile.Clone.MeanMS() != 8 || profile.Redact.Count != 0 {
 		t.Fatalf("profile mean or unmeasured phase = %#v", profile)
+	}
+}
+
+func TestPersistenceProfileSerializesConcurrentLocalAggregation(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	t.Setenv(persistenceProfileEnv, "1")
+	const samples = 24
+	var wg sync.WaitGroup
+	for range samples {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			timing := newPersistencePublicationTiming()
+			timing.phases["clone"] = time.Millisecond
+			timing.record(db)
+		}()
+	}
+	wg.Wait()
+	profile := LocalPersistenceProfile(db)
+	if profile == nil || profile.Samples != samples || profile.Clone != (PersistencePhaseTiming{Count: samples, TotalMS: samples, LastMS: 1, MaximumMS: 1}) {
+		t.Fatalf("concurrent local aggregate = %#v", profile)
 	}
 }
 

@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
@@ -14,6 +15,12 @@ const (
 	LocalPersistenceProfileKey = "persistence_profile_v1"
 	persistenceProfileEnv      = "AIH_PERSISTENCE_PROFILE"
 )
+
+// persistenceProfileMu makes the local read-modify-write aggregate atomic
+// across controllers sharing a local SQLite store. It is deliberately separate
+// from Controller.mu so observation never extends the publication critical
+// section.
+var persistenceProfileMu sync.Mutex
 
 // PersistencePhaseTiming retains a bounded aggregate for one publication
 // phase. It intentionally has no samples, paths, revisions, or error text.
@@ -80,6 +87,8 @@ func (p *persistencePublicationTiming) record(db *store.Store) {
 	if p == nil || db == nil {
 		return
 	}
+	persistenceProfileMu.Lock()
+	defer persistenceProfileMu.Unlock()
 	profile := LocalPersistenceProfile(db)
 	if profile == nil {
 		profile = &PersistenceProfile{Version: 1}

@@ -152,7 +152,7 @@ func TestLeasePulsesCoalesceRemoteWritesAndFenceTakeover(t *testing.T) {
 		t.Fatalf("renewal expiry = %s, want %s", renewed.Controller.Expires, now.Add(time.Minute))
 	}
 	profile := LocalPersistenceProfile(a.DB)
-	if profile == nil || profile.Samples != 2 || profile.MutexWait.Count != 2 || profile.Clone.Count != 3 || profile.Redact.Count != 1 || profile.StateCommit.Count != 2 || profile.Publish.Count != 2 || profile.SQLiteSave.Count != 2 {
+	if profile == nil || profile.Samples != 2 || profile.MutexWait.Count != 2 || profile.Clone.Count != 2 || profile.Redact.Count != 1 || profile.StateCommit.Count != 2 || profile.Publish.Count != 2 || profile.SQLiteSave.Count != 2 {
 		t.Fatalf("meaningful and lease publication timings = %#v", profile)
 	}
 

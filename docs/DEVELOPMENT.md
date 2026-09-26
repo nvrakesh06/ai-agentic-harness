@@ -119,8 +119,10 @@ there is no second cadence that can be misconfigured beyond the lease expiry.
 Set `AIH_PERSISTENCE_PROFILE=1` before starting the supervisor to record local,
 bounded timings for each attempted state or lease publication. `aih status` and
 `aih status --json` then show mutex wait, snapshot clone/redaction, state commit,
-publication, and SQLite-save totals, last values, and maxima. Mean is
-`total/count`; the aggregate cannot establish a percentile. This profile is local
+publication, and SQLite-save totals, last values, and maxima. Each phase count is
+the number of publication samples that included that phase, so its mean is the
+total phase cost per publication (`total/count`); the aggregate cannot establish
+a percentile. This profile is local
 SQLite observability only and never changes portable state, revisions, lease
 fencing, Git publication, or source updates. Its one local profile write per
 publication is intentionally outside the reported phase timings.
