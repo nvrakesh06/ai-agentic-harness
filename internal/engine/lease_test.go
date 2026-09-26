@@ -64,7 +64,9 @@ func TestLeasePulsesCoalesceRemoteWritesAndFenceTakeover(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	base := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	// Controller publication is fenced with a real context deadline, so this
+	// integration fixture's durable lease must also be in real future time.
+	base := time.Now().UTC()
 	now := base
 	controllerA := New(a)
 	controllerA.now = func() time.Time { return now }
@@ -218,7 +220,9 @@ func TestLocalSupervisorHealthDetectsBlockedPublicationDespiteFreshAttempt(t *te
 		t.Fatal(err)
 	}
 
-	base := time.Date(2026, 9, 25, 16, 0, 0, 0, time.UTC)
+	// This fixture enters the real publication path; keep its lease deadline
+	// future relative to context.WithDeadline rather than only to c.now.
+	base := time.Now().UTC()
 	c := New(p)
 	c.now = func() time.Time { return base }
 	if err = c.acquire(ctx); err != nil {
