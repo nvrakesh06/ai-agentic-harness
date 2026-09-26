@@ -10,33 +10,57 @@ import (
 
 func TestReleaseTestGroupsCoverInventoryExactlyOnce(t *testing.T) {
 	const engine = "example.com/aih/internal/engine"
-	inventory := []string{"TestZulu", "TestAlpha", "FuzzParser", "Example"}
-	groups, err := releaseTestGroups([]string{"example.com/aih/cmd/release", engine, "example.com/aih/internal/platform"}, engine, inventory, 2)
+	const release = "example.com/aih/cmd/release"
+	const platform = "example.com/aih/internal/platform"
+	inventory := map[string][]string{
+		release:  {"TestReleaseZulu", "TestReleaseAlpha", "FuzzRelease"},
+		engine:   {"TestZulu", "TestAlpha", "FuzzParser", "Example"},
+		platform: nil,
+	}
+	groups, err := releaseTestGroups([]string{release, engine, platform}, engine, inventory, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) != 4 || len(groups[0].Tests) != 0 || len(groups[0].Packages) != 1 || len(groups[1].Tests) != 0 || len(groups[1].Packages) != 1 {
+	if len(groups) != 5 {
 		t.Fatalf("unexpected plan: %+v", groups)
 	}
-	seen := map[string]int{}
-	for _, group := range groups[2:] {
-		if len(group.Tests) != 2 || len(group.Packages) != 1 || group.Packages[0] != engine {
-			t.Fatalf("invalid bounded integration group: %+v", group)
+	seen := map[string]map[string]int{}
+	for _, group := range groups {
+		if len(group.Packages) != 1 {
+			t.Fatalf("group has invalid packages: %+v", group)
+		}
+		pkg := group.Packages[0]
+		if len(group.Tests) > 2 {
+			t.Fatalf("package %s exceeded named-test batch bound: %+v", pkg, group)
 		}
 		args := strings.Join(releaseGroupArgs(group), " ")
-		if !strings.Contains(args, "-count=1 -failfast -timeout 15m") || !strings.Contains(args, "-run ^(") || !strings.Contains(args, ")$") {
+		if !strings.Contains(args, "-count=1 -failfast -timeout 15m") {
 			t.Fatalf("group weakened bounded uncached tests: %s", args)
 		}
+		if len(group.Tests) == 0 {
+			if pkg != platform {
+				t.Fatalf("unexpected unnamed package group: %+v", group)
+			}
+			continue
+		}
+		if !strings.Contains(args, "-run ^(") || !strings.Contains(args, ")$") {
+			t.Fatalf("named group lost exact test selection: %s", args)
+		}
+		if seen[pkg] == nil {
+			seen[pkg] = map[string]int{}
+		}
 		for _, test := range group.Tests {
-			seen[test]++
+			seen[pkg][test]++
 		}
 	}
-	for _, test := range inventory {
-		if seen[test] != 1 {
-			t.Fatalf("test %s covered %d times", test, seen[test])
+	for pkg, tests := range inventory {
+		for _, test := range tests {
+			if seen[pkg][test] != 1 {
+				t.Fatalf("package %s test %s covered %d times", pkg, test, seen[pkg][test])
+			}
 		}
 	}
-	if inventory[0] != "TestZulu" {
+	if inventory[engine][0] != "TestZulu" {
 		t.Fatal("planning mutated caller inventory")
 	}
 }
@@ -44,15 +68,16 @@ func TestReleaseTestGroupsCoverInventoryExactlyOnce(t *testing.T) {
 func TestReleaseTestGroupsRejectIncompleteOrUnsafeInventory(t *testing.T) {
 	for _, tc := range []struct {
 		packages []string
-		tests    []string
+		tests    map[string][]string
 		size     int
 	}{
 		{[]string{"engine"}, nil, 2},
-		{[]string{"other"}, []string{"TestA"}, 2},
-		{[]string{"engine", "engine"}, []string{"TestA"}, 2},
-		{[]string{"engine"}, []string{"TestA", "TestA"}, 2},
-		{[]string{"engine"}, []string{"TestA|.*"}, 2},
-		{[]string{"engine"}, []string{"TestA"}, 0},
+		{[]string{"engine"}, map[string][]string{"engine": nil}, 2},
+		{[]string{"engine", "engine"}, map[string][]string{"engine": {"TestA"}}, 2},
+		{[]string{"engine"}, map[string][]string{"engine": {"TestA", "TestA"}}, 2},
+		{[]string{"engine"}, map[string][]string{"engine": {"TestA|.*"}}, 2},
+		{[]string{"engine"}, map[string][]string{"engine": {"TestA"}}, 0},
+		{[]string{"engine"}, map[string][]string{"other": {"TestA"}}, 2},
 	} {
 		if _, err := releaseTestGroups(tc.packages, "engine", tc.tests, tc.size); err == nil {
 			t.Fatalf("accepted unsafe inventory: %+v", tc)
