@@ -275,3 +275,27 @@ func TestAcceptedBaselineFindingGetsFinalReviewDisposition(t *testing.T) {
 		t.Fatalf("accepted baseline review has no final disposition: %#v", disposition)
 	}
 }
+
+func TestReadOnlyRetryGuardCapacityPrunesOnlyStaleInputs(t *testing.T) {
+	task := &model.Task{BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("b", 40)}
+	effective := config.Effective{Hash: strings.Repeat("c", 64)}
+	current := func() model.ReadOnlyRetry {
+		return model.ReadOnlyRetry{Stage: "review", Role: "role", BaseSHA: task.BaseSHA, HeadSHA: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Attempts: 1, RemainingSeconds: 2}
+	}
+	guards := map[string]model.ReadOnlyRetry{}
+	for i := 0; i < 8; i++ {
+		guard := current()
+		guard.Role = fmt.Sprintf("role-%d", i)
+		guards["review/"+guard.Role] = guard
+	}
+	stale := guards["review/role-0"]
+	stale.BaseSHA = strings.Repeat("d", 40)
+	guards["review/role-0"] = stale
+	if !readOnlyRetrySlotAvailable(guards, "review/new-role", task, effective) || len(guards) != 7 {
+		t.Fatalf("stale retry guard did not release exactly one slot: %#v", guards)
+	}
+	guards["review/new-role"] = current()
+	if readOnlyRetrySlotAvailable(guards, "review/overflow", task, effective) || len(guards) != 8 {
+		t.Fatalf("eight current retry guards must remain bounded and preserved: %#v", guards)
+	}
+}
