@@ -61,6 +61,16 @@ func TestReplanUnstartedRequiresEmptyLifecycle(t *testing.T) {
 		t.Fatal("attempted task was accepted as unstarted")
 	}
 	task.Attempts = 0
+	task.RecoveryRequired = true
+	if replanUnstarted(s, task) {
+		t.Fatal("recovery-marked task was accepted as unstarted")
+	}
+	task.RecoveryRequired = false
+	task.FixCycles["review"] = 1
+	if replanUnstarted(s, task) {
+		t.Fatal("task with a FIX cycle was accepted as unstarted")
+	}
+	task.FixCycles["review"] = 0
 	s.Runs = []model.Run{{Task: task.ID, Outcome: "interrupted"}}
 	if replanUnstarted(s, task) {
 		t.Fatal("task with a durable run was accepted as unstarted")
