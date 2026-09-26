@@ -393,7 +393,7 @@ func validateScopeRecoveryOwnership(ctx context.Context, p *Project, effective c
 					continue
 				}
 			}
-			if !areasOverlap(item.areas, ownerAreas) {
+			if !scopeRecoveryAreasOverlap(item.areas, ownerAreas) {
 				continue
 			}
 			if !scopeRecoverySerialized(prospective.Tasks, task.ID, owner.ID) {
@@ -440,7 +440,7 @@ func provablyUnstartedLegacy(task *model.Task) bool {
 	return task != nil && task.BaseSHA == "" && task.HeadSHA == "" && (task.State == model.Planned || task.State == model.Ready) && len(task.Areas) != 0
 }
 
-func areasOverlap(a, b []gitx.Area) bool {
+func scopeRecoveryAreasOverlap(a, b []gitx.Area) bool {
 	for _, left := range a {
 		for _, right := range b {
 			if gitx.ValidateScopePaths([]gitx.Area{left}, []string{right.Pattern}) == nil || gitx.ValidateScopePaths([]gitx.Area{right}, []string{left.Pattern}) == nil {
