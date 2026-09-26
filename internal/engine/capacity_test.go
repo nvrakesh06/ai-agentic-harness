@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +29,42 @@ func TestCapacityBackfillsWriterWhenPeerEntersReview(t *testing.T) {
 	}
 	if decision.status.ActiveWriters != 0 || decision.status.ActiveReaders != 1 {
 		t.Fatalf("useful writer/reader utilization was conflated: %#v", decision.status)
+	}
+}
+
+func TestAdmissionReportUsesReservationAwareAdmissionPredicates(t *testing.T) {
+	snapshot, project, now := capacityFixture()
+	project.MaxWriters = 2
+	project.Scheduling.TargetWriters = 2
+	ready := func(id string, domains ...string) *model.Task {
+		return &model.Task{ID: id, State: model.Ready, Domains: domains, Preflight: &model.Preflight{Phase: "ready"}}
+	}
+	snapshot.Tasks["writer"] = &model.Task{ID: "writer", State: model.Running, Domains: []string{"shared"}}
+	snapshot.Tasks["prepared"] = ready("prepared", "independent")
+	snapshot.Tasks["dependency"] = ready("dependency", "dependency")
+	snapshot.Tasks["dependency"].Dependencies = []string{"producer"}
+	snapshot.Tasks["producer"] = &model.Task{ID: "producer", State: model.Review}
+	snapshot.Tasks["domain"] = ready("domain", "shared")
+	snapshot.Tasks["preflight"] = &model.Task{ID: "preflight", State: model.Ready, Domains: []string{"waiting"}, Preflight: &model.Preflight{Phase: "waiting"}}
+	snapshot.Tasks["blocked"] = &model.Task{ID: "blocked", State: model.Blocked}
+	snapshot.Objectives["decision"] = &model.Objective{ID: "decision", Blocker: "human answer required"}
+
+	active := map[string]bool{"writer": true}
+	report := AdmissionReportForReservations(snapshot, active, project, now)
+	if report.Availability != "reservation_aware" || report.Counts == nil {
+		t.Fatalf("reservation-aware report unavailable: %#v", report)
+	}
+	counts := report.Counts
+	if counts.ActiveReservations != 1 || counts.ActiveWriters != 1 || counts.ActivePreflights != 0 || counts.PreparedAdmittable != 1 || counts.DependencyBlocked != 1 || counts.DomainBlocked != 1 || counts.PreflightWaiting != 1 || counts.DecisionBlocked != 2 {
+		t.Fatalf("unexpected independent admission counts: %#v", counts)
+	}
+	decision := decideCapacity(snapshot, active, project, false, 0, now)
+	if len(decision.writers) != counts.PreparedAdmittable || len(decision.writers) != 1 || decision.writers[0].ID != "prepared" {
+		t.Fatalf("report diverged from scheduler admission: report=%#v decision=%#v", report, decision)
+	}
+	durable := DurableAdmissionReport(snapshot, "controller reservations unavailable")
+	if durable.Availability != "durable_eligibility" || durable.Counts != nil || durable.Durable == nil || durable.Durable.DependencyBlocked != 1 || durable.Durable.PreflightPending != 1 || durable.Durable.DecisionBlocked != 2 || strings.Join(durable.Unavailable, ",") != "active_reservations,prepared_admittable,domain_blocked" {
+		t.Fatalf("durable report fabricated reservation-aware counts: %#v", durable)
 	}
 }
 
