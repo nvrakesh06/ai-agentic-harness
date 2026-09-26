@@ -197,6 +197,35 @@ func TestScopeRecoveryRejectsUnsafeNeverStartedDeclarations(t *testing.T) {
 	}
 }
 
+func TestScopeRecoveryMigratesSchemaSixNeverStartedAssignment(t *testing.T) {
+	ctx := context.Background()
+	f, manifest := neverStartedScopeRecoveryFixture(t, ctx)
+	defer f.P.DB.Close()
+	s, stateRef, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Schema = 6
+	next, err := f.P.Git.StateCommit(ctx, stateRef, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateRef, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.DB.Save(next, s); err != nil {
+		t.Fatal(err)
+	}
+	manifest.ExpectedStateRef = next
+	if err = engine.RecoverScope(ctx, f.P, manifest); err != nil {
+		t.Fatalf("schema-6 unknown assignment migration rejected explicit recovery: %v", err)
+	}
+	after, _, err := f.P.Git.Load(ctx)
+	if err != nil || !reflect.DeepEqual(after.Tasks["qa-task"].AssignedAreas, []string{"tests/renderer"}) || after.Tasks["qa-task"].AssignedAreaKinds["tests/renderer"] != model.AreaDirectory {
+		t.Fatalf("schema-6 task did not receive new explicit assignment: %#v (%v)", after.Tasks["qa-task"], err)
+	}
+}
+
 func neverStartedScopeRecoveryFixture(t *testing.T, ctx context.Context) (*demo.Fixture, engine.ScopeRecoveryManifest) {
 	t.Helper()
 	f, manifest, _ := scopeRecoveryFixture(t, ctx, "legacy-task", nil, nil)

@@ -309,8 +309,13 @@ func legacyAssignmentRecoverable(task *model.Task) bool {
 func scopeRecoveryUnstarted(s *model.Snapshot, task *model.Task) bool {
 	if task == nil || (task.State != model.Planned && task.State != model.Ready) || task.BaseSHA != "" || task.HeadSHA != "" || task.MergeSHA != "" || task.PostVerifySHA != "" || task.SyncBase != "" || task.RecoveryRequired ||
 		task.Attempts != 0 || task.Rotations != 0 || task.AdvisorUsed || task.RunID != "" || task.Preflight != nil || task.Verification != nil || task.Evidence != nil || task.VisualRequired != nil || task.Blocker != nil || task.PR != 0 || len(task.Findings) != 0 || len(task.Summary) != 0 ||
-		len(task.ReportedTests) != 0 || len(task.Risks) != 0 || len(task.Decisions) != 0 || len(task.ReviewProvenance) != 0 || len(task.AssignedAreas) != 0 || len(task.AssignedAreaKinds) != 0 {
+		len(task.ReportedTests) != 0 || len(task.Risks) != 0 || len(task.Decisions) != 0 || len(task.ReviewProvenance) != 0 {
 		return false
+	}
+	for _, cycles := range task.FixCycles {
+		if cycles != 0 {
+			return false
+		}
 	}
 	for _, run := range s.Runs {
 		if run.Task == task.ID {
