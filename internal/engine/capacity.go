@@ -153,7 +153,7 @@ func capacitySuppression(s *model.Snapshot, writers map[string]bool) (string, st
 		}
 		var waiting []string
 		for _, dependency := range task.Dependencies {
-			if s.Tasks[dependency] == nil || s.Tasks[dependency].State != model.Done {
+			if !model.DependencyDone(s, dependency) {
 				waiting = append(waiting, dependency)
 			}
 		}

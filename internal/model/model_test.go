@@ -73,6 +73,39 @@ func TestSchedulerDependenciesDomainsAndBlocked(t *testing.T) {
 	}
 }
 
+func TestSupersededDependencyRequiresReplacementCompletion(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Tasks["original"] = &Task{ID: "original", ObjectiveID: "objective", State: Superseded, SupersededBy: "replacement"}
+	s.Tasks["replacement"] = &Task{ID: "replacement", ObjectiveID: "objective", State: Ready}
+	s.Tasks["dependent"] = &Task{ID: "dependent", ObjectiveID: "other", State: Ready, Dependencies: []string{"original"}}
+	if DependencyDone(s, "original") || completedDependencies(s, s.Tasks["dependent"]) {
+		t.Fatal("superseded original satisfied a dependency before successor completed")
+	}
+	s.Tasks["replacement"].State = Done
+	if !DependencyDone(s, "original") || !completedDependencies(s, s.Tasks["dependent"]) || !ObjectiveComplete(s, "objective") {
+		t.Fatal("completed replacement did not satisfy successor-aware dependency closure")
+	}
+	s.Tasks["replacement"].State = Superseded
+	s.Tasks["replacement"].SupersededBy = "original"
+	if DependencyDone(s, "original") {
+		t.Fatal("supersession cycle satisfied a dependency")
+	}
+}
+
+func TestSchemaNineMigratesWithoutInventingSupersession(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Schema = 9
+	s.Tasks["task"] = &Task{ID: "task", State: Ready}
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, changed, err := Decode(b)
+	if err != nil || !changed || recovered.Schema != StateSchema || recovered.Tasks["task"].SupersededBy != "" || recovered.Tasks["task"].Replan != nil {
+		t.Fatalf("schema nine migration invented replacement state: %#v changed=%v err=%v", recovered, changed, err)
+	}
+}
+
 func TestRunnablePrioritizesDraftPRContinuationDeterministically(t *testing.T) {
 	s := NewSnapshot("project123")
 	s.Tasks["a-new"] = &Task{ID: "a-new", State: Ready, Domains: []string{"new"}}

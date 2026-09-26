@@ -149,6 +149,18 @@ trying to reuse it as an open PR. Rewritten main history is rejected.
 
 ## Human decisions
 
+## Bounded task replacement
+
+`aih task replan --file repair.json` is a one-shot supervisor operation for an
+idle, unmerged group of tasks in one objective. The versioned manifest pins the
+current state, canonical policy, source checkpoints, and one replacement contract.
+It creates a new successor branch and records each original as `SUPERSEDED`; an
+original never becomes `DONE`, and its dependants wait for the successor's normal
+verification and integration. Phase one deliberately rejects cross-objective
+groups. A resolved operator candidate head is permitted only when it descends from
+canonical main, contains every declared source checkpoint, and validates entirely
+within the replacement's immutable areas. It never waives native checks or review.
+
 `aih answer TASK_ID "decision"` (or a task's issue number) records the answer remotely
 before rescheduling. Planning blockers use the objective ID shown by status.
 Answers should contain decisions, never credentials. Supply secrets through the

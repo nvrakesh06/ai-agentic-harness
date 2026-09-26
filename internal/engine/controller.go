@@ -641,7 +641,7 @@ func dependenciesComplete(s *model.Snapshot, t *model.Task) bool {
 		return false
 	}
 	for _, id := range t.Dependencies {
-		if s.Tasks[id] == nil || s.Tasks[id].State != model.Done {
+		if !model.DependencyDone(s, id) {
 			return false
 		}
 	}

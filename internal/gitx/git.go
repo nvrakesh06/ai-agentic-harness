@@ -20,6 +20,58 @@ import (
 
 type Git struct{ Dir string }
 
+// ReplanCheckpoint is an operator-pinned source delta. ReplanBranch applies
+// each delta to one canonical-main checkout in the supplied order. Git's
+// three-way apply tolerates overlapping identical work but rejects a real
+// conflict; it never advances a source branch.
+type ReplanCheckpoint struct{ BaseSHA, HeadSHA string }
+
+func (g Git) ReplanBranch(ctx context.Context, canonicalBase string, sources []ReplanCheckpoint, message string) (string, error) {
+	base, err := g.SHA(ctx, canonicalBase)
+	if err != nil {
+		return "", fmt.Errorf("resolve canonical replan base: %w", err)
+	}
+	if len(sources) == 0 || len(sources) > 8 {
+		return "", errors.New("replan requires 1..8 source checkpoints")
+	}
+	root, err := os.MkdirTemp("", "aih-replan-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(root)
+	path := filepath.Join(root, "checkout")
+	if err = g.Detached(ctx, path, base); err != nil {
+		return "", err
+	}
+	defer g.RemoveWorktree(context.Background(), path)
+	w := Git{Dir: path}
+	for index, source := range sources {
+		if !shaPattern.MatchString(source.BaseSHA) || !shaPattern.MatchString(source.HeadSHA) || source.BaseSHA == source.HeadSHA || !g.Ancestor(ctx, source.BaseSHA, source.HeadSHA) {
+			return "", fmt.Errorf("invalid replan source checkpoint %d", index+1)
+		}
+		patch, err := g.Run(ctx, "", "diff", "--binary", "--full-index", source.BaseSHA+".."+source.HeadSHA)
+		if err != nil || patch == "" {
+			if err != nil {
+				return "", fmt.Errorf("read replan source checkpoint %d: %w", index+1, err)
+			}
+			return "", fmt.Errorf("replan source checkpoint %d has no patch", index+1)
+		}
+		if err = safety.Check(patch); err != nil {
+			return "", fmt.Errorf("replan source checkpoint %d: %w", index+1, err)
+		}
+		if _, err = w.Run(ctx, patch, "apply", "--3way", "--index", "--whitespace=error"); err != nil {
+			return "", fmt.Errorf("replan source checkpoint %d conflicts: %w", index+1, err)
+		}
+	}
+	if _, err = w.Run(ctx, "", "diff", "--cached", "--check"); err != nil {
+		return "", fmt.Errorf("replan patch has invalid whitespace: %w", err)
+	}
+	if _, err = w.Run(ctx, "", "commit", "-m", message); err != nil {
+		return "", err
+	}
+	return w.SHA(ctx, "HEAD")
+}
+
 func (g Git) Run(ctx context.Context, input string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()

@@ -18,7 +18,7 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 9
+const StateSchema = 10
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
@@ -105,6 +105,10 @@ const (
 	PostVerify   State = "POST_VERIFY"
 	Done         State = "DONE"
 	Blocked      State = "BLOCKED_HUMAN"
+	// Superseded is a terminal record of an explicitly replaced task. It is not
+	// a successful completion: dependencies follow SupersededBy and only the
+	// replacement's DONE state can satisfy them.
+	Superseded State = "SUPERSEDED"
 )
 
 var edges = map[State][]State{
@@ -139,6 +143,8 @@ type Task struct {
 	Security          bool                        `json:"security"`
 	Roles             []string                    `json:"roles"`
 	State             State                       `json:"state"`
+	SupersededBy      string                      `json:"superseded_by,omitempty"`
+	Replan            *ReplanProvenance           `json:"replan_provenance,omitempty"`
 	Branch            string                      `json:"branch"`
 	BaseSHA           string                      `json:"base_sha,omitempty"`
 	HeadSHA           string                      `json:"head_sha,omitempty"`
@@ -596,20 +602,21 @@ type Capacity struct {
 	Transitions        []CapacityTransition `json:"transitions,omitempty"`
 }
 type Snapshot struct {
-	Schema             int                   `json:"state_schema"`
-	CreatedBy          string                `json:"created_by_version"`
-	Project            string                `json:"project"`
-	Revision           uint64                `json:"revision"`
-	Controller         Lease                 `json:"controller"`
-	Objectives         map[string]*Objective `json:"objectives"`
-	Backlog            []string              `json:"authorized_objective_backlog"`
-	Capacity           Capacity              `json:"capacity"`
-	Tasks              map[string]*Task      `json:"tasks"`
-	Runs               []Run                 `json:"runs,omitempty"`
-	Applied            map[string]bool       `json:"applied_commands"`
-	Improvements       []string              `json:"improvement_candidates,omitempty"`
-	IntegrationBlocked string                `json:"integration_blocked,omitempty"`
-	IntegrationBatch   *IntegrationBatch     `json:"integration_batch,omitempty"`
+	Schema             int                      `json:"state_schema"`
+	CreatedBy          string                   `json:"created_by_version"`
+	Project            string                   `json:"project"`
+	Revision           uint64                   `json:"revision"`
+	Controller         Lease                    `json:"controller"`
+	Objectives         map[string]*Objective    `json:"objectives"`
+	Backlog            []string                 `json:"authorized_objective_backlog"`
+	Capacity           Capacity                 `json:"capacity"`
+	Tasks              map[string]*Task         `json:"tasks"`
+	Runs               []Run                    `json:"runs,omitempty"`
+	Applied            map[string]bool          `json:"applied_commands"`
+	Replans            map[string]ReplanReceipt `json:"replan_receipts,omitempty"`
+	Improvements       []string                 `json:"improvement_candidates,omitempty"`
+	IntegrationBlocked string                   `json:"integration_blocked,omitempty"`
+	IntegrationBatch   *IntegrationBatch        `json:"integration_batch,omitempty"`
 }
 
 // IntegrationBatch is a portable reservation for the deliberately small first
@@ -626,6 +633,30 @@ type IntegrationBatch struct {
 	Tasks        []IntegrationBatchTask `json:"tasks"`
 }
 
+// ReplanProvenance records the bounded operator authorization that created a
+// successor. It belongs only to the new task; originals retain their prior
+// issue, PR, evidence, and decision history unchanged.
+type ReplanProvenance struct {
+	CommandID     string             `json:"command_id"`
+	Reason        string             `json:"reason"`
+	CandidateHead string             `json:"candidate_head,omitempty"`
+	Sources       []ReplanCheckpoint `json:"sources"`
+}
+type ReplanCheckpoint struct {
+	TaskID  string `json:"task_id"`
+	BaseSHA string `json:"base_sha"`
+	HeadSHA string `json:"head_sha"`
+	Order   int    `json:"order"`
+}
+
+// ReplanReceipt binds an idempotent operator command to its exact manifest.
+// Applied alone cannot safely distinguish a retry from a different request
+// that reused a command ID after canonical policy advanced.
+type ReplanReceipt struct {
+	Digest        string `json:"digest"`
+	ReplacementID string `json:"replacement_id"`
+}
+
 // IntegrationBatchTask keeps every member's exact reviewed head and scope.
 // Review scopes are intentionally per-task: disjoint changes cannot share one
 // scope fingerprint, even when they share the selected review roster.
@@ -638,7 +669,7 @@ type IntegrationBatchTask struct {
 
 func NewSnapshot(project string) *Snapshot {
 	return &Snapshot{Schema: StateSchema, CreatedBy: Version, Project: project,
-		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}}
+		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}, Replans: map[string]ReplanReceipt{}}
 }
 
 const (
@@ -792,6 +823,15 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		// empty so the next supervisor makes a fresh, deterministic decision.
 		s.IntegrationBatch = nil
 	}
+	if s.Schema <= 9 {
+		// Schema 10 adds explicit task replacement links. Old snapshots have no
+		// authority to infer a replacement, so preserve their lifecycle exactly.
+		for _, task := range s.Tasks {
+			if task != nil {
+				task.SupersededBy = ""
+			}
+		}
+	}
 	if migrated {
 		s.Schema = StateSchema
 	}
@@ -812,6 +852,14 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 	}
 	if s.Applied == nil {
 		s.Applied = map[string]bool{}
+	}
+	if s.Replans == nil {
+		s.Replans = map[string]ReplanReceipt{}
+	}
+	for id, receipt := range s.Replans {
+		if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(id) || !s.Applied[id] || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(receipt.Digest) || !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(receipt.ReplacementID) || s.Tasks[receipt.ReplacementID] == nil {
+			return nil, false, errors.New("invalid replan receipt")
+		}
 	}
 	for id, t := range s.Tasks {
 		if t == nil || t.ID != id || !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(id) {
@@ -909,8 +957,27 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 				}
 			}
 		}
-		if _, ok := edges[t.State]; !ok && t.State != Done {
+		if _, ok := edges[t.State]; !ok && t.State != Done && t.State != Superseded {
 			return nil, false, fmt.Errorf("unknown task state %q", t.State)
+		}
+		if t.State == Superseded {
+			if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(t.SupersededBy) || s.Tasks[t.SupersededBy] == nil || t.SupersededBy == t.ID {
+				return nil, false, errors.New("superseded task has no valid replacement")
+			}
+		} else if t.SupersededBy != "" {
+			return nil, false, errors.New("non-superseded task has replacement link")
+		}
+		if t.Replan != nil {
+			if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(t.Replan.CommandID) || strings.TrimSpace(t.Replan.Reason) == "" || len(t.Replan.Reason) > 1600 || len(t.Replan.Sources) == 0 || len(t.Replan.Sources) > 8 || (t.Replan.CandidateHead != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(t.Replan.CandidateHead)) {
+				return nil, false, errors.New("invalid replan provenance")
+			}
+			prior := 0
+			for _, source := range t.Replan.Sources {
+				if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(source.TaskID) || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(source.BaseSHA) || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(source.HeadSHA) || source.BaseSHA == source.HeadSHA || source.Order <= prior {
+					return nil, false, errors.New("invalid replan source provenance")
+				}
+				prior = source.Order
+			}
 		}
 		if t.FixCycles == nil {
 			t.FixCycles = map[string]int{}
@@ -1161,7 +1228,41 @@ var passedNativeCheckRecord = regexp.MustCompile(`^stage=native check="(?:[^"\\]
 
 func completedDependencies(s *Snapshot, task *Task) bool {
 	for _, id := range task.Dependencies {
-		if s.Tasks[id] == nil || s.Tasks[id].State != Done {
+		if !DependencyDone(s, id) {
+			return false
+		}
+	}
+	return true
+}
+
+// DependencyDone resolves explicit replacement links without ever treating a
+// superseded original as success. A corrupt replacement loop is unsatisfied.
+func DependencyDone(s *Snapshot, id string) bool {
+	seen := map[string]bool{}
+	for id != "" && !seen[id] {
+		seen[id] = true
+		t := s.Tasks[id]
+		if t == nil {
+			return false
+		}
+		switch t.State {
+		case Done:
+			return true
+		case Superseded:
+			id = t.SupersededBy
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// ObjectiveComplete applies the same successor resolution used for task
+// dependencies, so replacing a task cannot make an objective look complete
+// until the independently verified successor reaches DONE.
+func ObjectiveComplete(s *Snapshot, objectiveID string) bool {
+	for _, task := range s.Tasks {
+		if task.ObjectiveID == objectiveID && !DependencyDone(s, task.ID) {
 			return false
 		}
 	}
@@ -1406,7 +1507,7 @@ func runnableWhereOrdered(s *Snapshot, active map[string]bool, limit int, eligib
 		}
 		ok := true
 		for _, dep := range t.Dependencies {
-			if s.Tasks[dep] == nil || s.Tasks[dep].State != Done {
+			if !DependencyDone(s, dep) {
 				ok = false
 			}
 		}
