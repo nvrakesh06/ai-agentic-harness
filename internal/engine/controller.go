@@ -757,6 +757,33 @@ func (c *Controller) commands() (bool, error) {
 			_ = c.P.DB.Ack(cmd.ID, "")
 			continue
 		}
+		if cmd.Kind == "provider-retry" {
+			if cmd.Target == "" || cmd.Payload != "" {
+				_ = c.P.DB.Event("", "", "provider-retry", "", "provider_admission_probe_rejected", cmd.ID+" provider retry requires one hold key and no payload")
+				_ = c.P.DB.Ack(cmd.ID, "provider retry requires one hold key and no payload")
+				continue
+			}
+			err := c.retryProviderAdmission(cmd)
+			if errors.Is(err, errProviderAdmissionProbeWaiting) {
+				// Keep the command pending while an earlier provider request drains.
+				// The durable hold still blocks new admissions, so this cannot race a
+				// source task through the recovery probe.
+				continue
+			}
+			if err != nil {
+				providerName := ""
+				if hold, ok := c.Snapshot().ProviderAdmissionHolds[cmd.Target]; ok {
+					providerName = hold.Provider
+				}
+				_ = c.P.DB.Event("", "", "provider-retry", providerName, "provider_admission_probe_rejected", cmd.ID+" "+safety.Redact(short(err.Error(), 500)))
+				_ = c.P.DB.Ack(cmd.ID, err.Error())
+				continue
+			}
+			if err = c.P.DB.Ack(cmd.ID, ""); err != nil {
+				return false, err
+			}
+			continue
+		}
 		if e = safety.Check(cmd.Payload); e != nil {
 			_ = c.P.DB.Ack(cmd.ID, e.Error())
 			continue

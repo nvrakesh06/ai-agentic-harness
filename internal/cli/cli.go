@@ -11,6 +11,7 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/engine"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/update"
@@ -310,6 +311,34 @@ func New() *cobra.Command {
 	}})
 	task.Commands()[0].Flags().StringVar(&replanFile, "file", "", "versioned bounded replan JSON")
 	root.AddCommand(task)
+	providerCmd := &cobra.Command{Use: "provider", Short: "Provider admission recovery operations"}
+	providerCmd.AddCommand(&cobra.Command{Use: "retry <hold-key>", Short: "Queue one supervised read-only probe for an active provider admission hold", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		p, e := o.open(cmd.Context(), false)
+		if e != nil {
+			return e
+		}
+		defer p.DB.Close()
+		snapshot, _, e := p.Git.Load(cmd.Context())
+		if e != nil {
+			return e
+		}
+		hold, exists := snapshot.ProviderAdmissionHolds[args[0]]
+		if !exists {
+			return errors.New("provider admission hold is no longer present")
+		}
+		if hold.Class == model.ProviderAdmissionAuthentication {
+			if e = provider.CheckAuthentication(cmd.Context(), hold.Provider); e != nil {
+				return fmt.Errorf("restore %s login as this OS user before retrying provider admission: %w", hold.Provider, e)
+			}
+		}
+		id := model.ID()
+		if e = p.DB.Submit(store.Command{ID: id, Kind: "provider-retry", Target: args[0]}); e != nil {
+			return e
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Queued supervised provider retry %s. The active hold remains until one read-only protocol probe returns a valid completed result.\n", id)
+		return background(cmd, p)
+	}})
+	root.AddCommand(providerCmd)
 	for _, name := range []string{"stop", "handoff"} {
 		name := name
 		root.AddCommand(&cobra.Command{Use: name, Short: "Stop scheduling, checkpoint workers, and release the lease", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -713,6 +742,18 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 	}
 	if capacity.NextSafeWork != "" {
 		fmt.Fprintln(cmd.OutOrStdout(), "Next safe work:", capacity.NextSafeWork)
+	}
+	if len(s.ProviderAdmissionHolds) != 0 {
+		keys := make([]string, 0, len(s.ProviderAdmissionHolds))
+		for key := range s.ProviderAdmissionHolds {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		fmt.Fprintln(cmd.OutOrStdout(), "Provider admission holds: provider work is paused; native verification and integration remain eligible.")
+		for _, key := range keys {
+			hold := s.ProviderAdmissionHolds[key]
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s (%s; origin model %s). Repair the provider/schema, or run aih provider retry %s for one read-only probe.\n", key, hold.Class, hold.OriginModel, key)
+		}
 	}
 	for _, t := range model.Ordered(s) {
 		if blockers && t.State != model.Blocked {

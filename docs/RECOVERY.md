@@ -133,6 +133,29 @@ GitHub issue/PR creation uses stable markers to recover ambiguous responses. Bod
 updates can lag during outages. Handoff retries issue mirrors. The machine-readable
 snapshot and Git branches are the recovery authority, not a recent issue comment.
 
+## Provider admission holds
+
+An authoritative provider authentication failure or `invalid_json_schema`
+request rejection pauses provider work for its durable admission scope. It does
+not spend a task's source, Advisor, planning, or read-only retry budget. Native
+verification and integration remain eligible. Inspect the exact hold key in
+`aih status` before recovery.
+
+For an authentication hold, restore the selected provider login as the service
+OS user first. Then run `aih provider retry <hold-key>`. The command checks that
+login before it queues one supervisor-owned, bounded, read-only protocol probe.
+The probe uses a disposable checkout, never runs a task worker, and keeps the
+hold active while it runs. Only a valid completed structured response releases
+the selected active hold. A rejected probe leaves the hold in place; its local
+command outcome and sanitized event are retained for diagnosis.
+
+For an `invalid_json_schema` hold, repair the checked-in provider schema. A
+materially changed schema identity becomes admissible without deleting the
+historical hold. Changing a role model, policy, or rules hash does not reopen the
+same rejected schema. Do not edit the local command database or remote state to
+remove a hold. A successful probe records its command ID in portable applied
+state; an exact retry is acknowledged without starting another task.
+
 ## Merge conflicts and failed verification
 
 An automatic rebase conflict is aborted, then main is prepared as a pending merge

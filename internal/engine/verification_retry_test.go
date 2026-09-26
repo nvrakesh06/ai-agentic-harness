@@ -599,17 +599,16 @@ func TestProviderAuthenticationFailureAfterScopedWriteCheckpointsSharedHoldAcros
 	// shared hold must not strand that scoped edit in machine A's worktree.
 	f.Provider.AuthFailuresAfterWrite = map[string]int{"auth-blocked": 1}
 	seedReadyTask(t, ctx, f, "auth-blocked")
+	preRunHead, err := f.P.Git.SHA(ctx, "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan error, 1)
 	go func() { done <- engine.New(f.P).Serve(ctx) }()
-	// The hold is published before implement returns to checkpoint the writer.
-	// Retain that pre-checkpoint identity, then compare it to the final durable
-	// state after cooperative shutdown rather than racing the two publications.
-	heldSnapshot := waitProviderAdmissionHold(t, ctx, f)
-	heldTask := heldSnapshot.Tasks["auth-blocked"]
-	if heldTask == nil || heldTask.HeadSHA == "" {
-		t.Fatalf("provider hold did not retain the pre-edit task identity: %#v", heldTask)
-	}
-	preCheckpointHead := heldTask.HeadSHA
+	// A poll can observe the hold either side of its follow-on checkpoint. The
+	// canonical main head before the writer starts is the stable identity the
+	// new durable task head must advance, independent of that observation race.
+	_ = waitProviderAdmissionHold(t, ctx, f)
 	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
 		t.Fatal(err)
 	}
@@ -627,8 +626,8 @@ func TestProviderAuthenticationFailureAfterScopedWriteCheckpointsSharedHoldAcros
 	if task.State != model.Ready || task.Blocker != nil {
 		t.Fatalf("authentication failure did not preserve schedulable implementer checkpoint: %+v", task)
 	}
-	if task.HeadSHA == "" || task.HeadSHA == preCheckpointHead {
-		t.Fatalf("authentication failure after a scoped write did not advance the pre-edit checkpoint: before=%s after=%#v", preCheckpointHead, task)
+	if task.HeadSHA == "" || task.HeadSHA == preRunHead {
+		t.Fatalf("authentication failure after a scoped write did not advance canonical pre-run head: before=%s after=%#v", preRunHead, task)
 	}
 	if len(snapshot.ProviderAdmissionHolds) != 1 {
 		t.Fatalf("authentication failure did not create shared provider hold: %#v", snapshot.ProviderAdmissionHolds)

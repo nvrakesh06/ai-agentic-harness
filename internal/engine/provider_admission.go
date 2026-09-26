@@ -1,13 +1,20 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/provider"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/store"
 )
 
 // providerAdmissionHeldError is returned before a provider call when a durable
@@ -196,4 +203,105 @@ func providerAdmissionMessage(hold model.ProviderAdmissionHold) string {
 		return fmt.Sprintf("provider admission held: %s", hold.Rejection)
 	}
 	return fmt.Sprintf("provider admission held: %s", hold.Class)
+}
+
+var errProviderAdmissionProbeWaiting = errors.New("provider admission probe waits for active provider runs")
+
+// providerAdmissionRetryTarget confirms that the operator selected the exact
+// currently active hold. A historical schema hold whose canonical schema has
+// changed is intentionally not releasable: it is already inactive without any
+// deletion, while a policy or model change leaves the same active scope held.
+func providerAdmissionRetryTarget(s *model.Snapshot, effective config.Effective, target string) (model.ProviderAdmissionHold, error) {
+	hold, exists := s.ProviderAdmissionHolds[target]
+	if !exists {
+		return model.ProviderAdmissionHold{}, errors.New("provider admission hold is no longer present")
+	}
+	active, held := providerAdmissionHold(s, effective)
+	activeKey, keyErr := active.ScopeKey()
+	if !held || keyErr != nil || activeKey != target {
+		return model.ProviderAdmissionHold{}, errors.New("provider admission retry target is not the current active hold")
+	}
+	return hold, nil
+}
+
+// retryProviderAdmission runs one supervisor-owned, detached, read-only
+// protocol request for an exact active hold. The hold remains in force during
+// the probe, so no source task can enter through the same provider admission
+// path. Only a valid completed structured response releases the target key.
+func (c *Controller) retryProviderAdmission(cmd store.Command) error {
+	s := c.Snapshot()
+	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+	defer cancel()
+	effective, err := c.effective(ctx)
+	if err != nil {
+		return err
+	}
+	hold, err := providerAdmissionRetryTarget(s, effective, cmd.Target)
+	if err != nil {
+		return err
+	}
+	for _, run := range s.Runs {
+		if run.Provider == hold.Provider && run.Outcome == "running" {
+			return errProviderAdmissionProbeWaiting
+		}
+	}
+	runID := "provider-retry-" + cmd.ID
+	dir, err := c.P.ValidDisposableAnalysisWorktreePath(runID)
+	if err != nil {
+		return err
+	}
+	c.gitMu.Lock()
+	err = c.P.Git.Detached(ctx, dir, effective.BaseSHA)
+	c.gitMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("create read-only provider retry checkout: %w", err)
+	}
+	defer func() {
+		c.gitMu.Lock()
+		if cleanupErr := c.P.RemoveDisposableAnalysisWorktree(context.Background(), runID); cleanupErr != nil {
+			_ = c.P.DB.Event("", "", "provider-retry", hold.Provider, "provider_admission_probe_cleanup_failed", safety.Redact(cleanupErr.Error()))
+		}
+		c.gitMu.Unlock()
+	}()
+	p := c.P.Provider
+	if p.Name() != effective.Project.Provider {
+		p = provider.New(effective.Project.Provider)
+	}
+	reviewer := roles.Builtins()["reviewer"]
+	resolved := effective.Project.ResolveModel(reviewer.Name, reviewer.Capability)
+	runtimeDir := filepath.Join(c.P.Dir, "sessions", runID)
+	result, err := p.Run(ctx, provider.Request{
+		Directory: dir, Runtime: runtimeDir, Role: reviewer.Name, Model: resolved.RequestModel,
+		Prompt: "AIH provider admission recovery probe. Inspect no source and return one valid completed structured result. Do not modify files.",
+		Write:  false, Timeout: 20 * time.Second,
+	})
+	if err != nil {
+		if provider.IsAuthenticationFailure(err) {
+			return errors.New("provider authentication remains unavailable; restore the provider login before another retry")
+		}
+		return errors.New("provider admission probe did not complete successfully")
+	}
+	if result.Schema != 1 || result.Status != "completed" || strings.TrimSpace(result.Summary) == "" {
+		return errors.New("provider admission probe returned no completed structured result")
+	}
+	status, err := (gitx.Git{Dir: dir}).Run(ctx, "", "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if status != "" {
+		return errors.New("provider admission probe modified its read-only checkout")
+	}
+	if err = c.save(c.ctx, func(next *model.Snapshot) error {
+		current, ok := next.ProviderAdmissionHolds[cmd.Target]
+		if !ok || current != hold {
+			return errors.New("provider admission retry target changed during probe")
+		}
+		delete(next.ProviderAdmissionHolds, cmd.Target)
+		next.Applied[cmd.ID] = true
+		return nil
+	}); err != nil {
+		return err
+	}
+	_ = c.P.DB.Event("", "", "provider-retry", hold.Provider, "provider_admission_probe_released", cmd.ID+" "+cmd.Target)
+	return nil
 }

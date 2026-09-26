@@ -60,3 +60,36 @@ func TestProviderAdmissionSaturationRetainsTypedAuthenticationCause(t *testing.T
 		t.Fatalf("saturation hold lost the authoritative authentication cause: %v", err)
 	}
 }
+
+func TestProviderAdmissionRetryRequiresExactCurrentScope(t *testing.T) {
+	s := model.NewSnapshot("project123")
+	schema := provider.SchemaSHA256()
+	hold := model.ProviderAdmissionHold{Provider: "codex", Class: model.ProviderAdmissionRequestRejected, Rejection: model.ProviderRejectionInvalidJSONSchema, SchemaSHA256: schema, OriginPolicy: fmt.Sprintf("%064x", 1), OriginRules: fmt.Sprintf("%064x", 2), OriginModel: "normal"}
+	key, err := hold.ScopeKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ProviderAdmissionHolds[key] = hold
+	effective := config.Effective{Project: config.Project{Provider: "codex"}, Hash: fmt.Sprintf("%064x", 3)}
+	if got, err := providerAdmissionRetryTarget(s, effective, key); err != nil || got != hold {
+		t.Fatalf("exact active retry target = %#v, %v", got, err)
+	}
+	// Origin policy/model only explain the rejected request. They cannot be
+	// used to release the same schema identity.
+	effective.Hash = fmt.Sprintf("%064x", 4)
+	effective.Project.Models = map[string]string{"reviewer": "different"}
+	if _, err := providerAdmissionRetryTarget(s, effective, key); err != nil {
+		t.Fatalf("policy/model provenance unexpectedly released retry target: %v", err)
+	}
+	if _, err := providerAdmissionRetryTarget(s, effective, "missing"); err == nil {
+		t.Fatal("unknown retry target accepted")
+	}
+	// A corrected schema naturally makes this old hold inactive, without
+	// deleting its historical record.
+	if _, err := providerAdmissionRetryTarget(s, effective, key); err != nil {
+		t.Fatal(err)
+	}
+	if _, held := providerAdmissionHoldForSchema(s, effective, fmt.Sprintf("%064x", 52)); held {
+		t.Fatal("material schema repair did not reopen admission")
+	}
+}
