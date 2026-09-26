@@ -101,7 +101,7 @@ func TestPreflightEvidenceLoopAdmitsOneFixWithoutRepeatingDesigner(t *testing.T)
 		t.Fatal(err)
 	}
 	base := effective.BaseSHA
-	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: base}
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, AssignedAreas: []string{"src/labels.tsx"}, AssignedAreaKinds: map[string]string{"src/labels.tsx": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: base}
 	s.Tasks[task.ID] = task
 	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, base); err != nil {
 		t.Fatal(err)
@@ -159,7 +159,7 @@ func TestPreflightEvidenceLoopBlocksProductDecisionWithoutImplementer(t *testing
 		t.Fatal(err)
 	}
 	base := effective.BaseSHA
-	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Fix, Branch: "aih/ui", BaseSHA: base, HeadSHA: base, Attempts: 1}
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, AssignedAreas: []string{"src/labels.tsx"}, AssignedAreaKinds: map[string]string{"src/labels.tsx": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Fix, Branch: "aih/ui", BaseSHA: base, HeadSHA: base, Attempts: 1}
 	s.Tasks[task.ID] = task
 	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, base); err != nil {
 		t.Fatal(err)
@@ -232,7 +232,7 @@ func TestRecoveredCompletedDesignerIsNotRunAgain(t *testing.T) {
 	}
 	base := effective.BaseSHA
 	s.Tasks["ui"] = &model.Task{ID: "ui", Title: "ui", Objective: "Fixture UI", Acceptance: []string{"works"},
-		Areas: []string{"ui"}, Domains: []string{"ui"}, Risk: "low", UI: true,
+		Areas: []string{"ui"}, AssignedAreas: []string{"ui"}, AssignedAreaKinds: map[string]string{"ui": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true,
 		State: model.Ready, Branch: "aih/ui", BaseSHA: base, HeadSHA: base,
 		Preflight: &model.Preflight{Phase: "waiting", BaseSHA: base, HeadSHA: base,
 			Config: effective.Hash, Rules: roles.Hash(), Completed: []string{"designer"}}}
@@ -360,7 +360,7 @@ func TestImplementerCheckpointContinuesWithoutRepeatingPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: effective.BaseSHA}
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"checkpoint-continuation.txt"}, AssignedAreas: []string{"checkpoint-continuation.txt"}, AssignedAreaKinds: map[string]string{"checkpoint-continuation.txt": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: effective.BaseSHA}
 	s.Tasks[task.ID] = task
 	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, effective.BaseSHA); err != nil {
 		t.Fatal(err)
@@ -413,7 +413,7 @@ func TestRecoveredDeadlineCheckpointContinuesWithoutRepeatingPreflight(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"src/labels.tsx"}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: effective.BaseSHA}
+	task := &model.Task{ID: "ui", Title: "ui", Objective: "Repair the caption layout", Acceptance: []string{"caption fits"}, Areas: []string{"checkpoint-continuation.txt"}, AssignedAreas: []string{"checkpoint-continuation.txt"}, AssignedAreaKinds: map[string]string{"checkpoint-continuation.txt": model.AreaFile}, Domains: []string{"ui"}, Risk: "low", UI: true, State: model.Ready, Branch: "aih/ui", BaseSHA: effective.BaseSHA}
 	s.Tasks[task.ID] = task
 	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(task), task.Branch, effective.BaseSHA); err != nil {
 		t.Fatal(err)
@@ -492,7 +492,7 @@ func TestPreflightReaderQueueLeavesIndependentWriterSlotsAvailable(t *testing.T)
 		s.Tasks[item.id] = &model.Task{ID: item.id, Title: item.id, Objective: "Fixture task " + item.id,
 			Acceptance: []string{"fixture succeeds"}, Areas: []string{item.id}, Domains: []string{item.id},
 			Risk: "low", UI: item.ui, State: model.Ready, Branch: "aih/" + item.id,
-			BaseSHA: base, HeadSHA: base}
+			BaseSHA: base, HeadSHA: base, AssignedAreas: []string{item.id}, AssignedAreaKinds: map[string]string{item.id: model.AreaFile}}
 		if err = f.P.Git.Worktree(ctx, f.P.TaskPath(s.Tasks[item.id]), s.Tasks[item.id].Branch, base); err != nil {
 			t.Fatal(err)
 		}
@@ -549,7 +549,20 @@ func TestPreflightReaderQueueLeavesIndependentWriterSlotsAvailable(t *testing.T)
 		case err := <-done:
 			t.Fatalf("supervisor exited before independent writers started: %v", err)
 		case <-writerDeadline.C:
-			t.Fatal(fmt.Sprintf("reader queue suppressed writers after reader pressure: designers=%d writers=%d snapshot=%#v", workers.designers.Load(), workers.writers.Load(), current))
+			code := make(map[string]string, 2)
+			for _, id := range []string{"code_a", "code_b"} {
+				if task := current.Tasks[id]; task != nil {
+					phase, reason := "", ""
+					if task.Preflight != nil {
+						phase = task.Preflight.Phase
+					}
+					if task.Blocker != nil {
+						reason = task.Blocker.Reason
+					}
+					code[id] = fmt.Sprintf("state=%s preflight=%s blocker=%q", task.State, phase, reason)
+				}
+			}
+			t.Fatal(fmt.Sprintf("reader queue suppressed writers after reader pressure: designers=%d writers=%d code=%v snapshot=%#v", workers.designers.Load(), workers.writers.Load(), code, current))
 		case <-time.After(25 * time.Millisecond):
 		}
 	}

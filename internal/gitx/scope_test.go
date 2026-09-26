@@ -296,3 +296,78 @@ func TestValidateCommitScopeRejectsBehindAndDivergedHeads(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateCommitScopeSeparatesRevisionsFromPathsInDeepWorktree(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	for len(repo) < 208 {
+		repo = filepath.Join(repo, "d")
+	}
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if len(filepath.Join(repo, "allowed", "good.txt")) >= 260 {
+		t.Fatalf("fixture file path is too long: %d", len(filepath.Join(repo, "allowed", "good.txt")))
+	}
+
+	gitDir := t.TempDir()
+	g := gitx.Git{Dir: repo}
+	if _, err := g.Run(ctx, "", "init", "--separate-git-dir", gitDir, "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Run(ctx, "", "add", "README.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Run(ctx, "", "commit", "-m", "base"); err != nil {
+		t.Fatal(err)
+	}
+	base, err := g.SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	areas, err := g.ClassifyAreasAtRef(ctx, base, []string{"allowed/**"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "allowed"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "allowed", "good.txt"), []byte("good\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Run(ctx, "", "add", "allowed/good.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Run(ctx, "", "commit", "-m", "allowed change"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := g.SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.ValidateCommitScope(ctx, base, head, areas); err != nil {
+		t.Fatalf("in-scope deep-worktree change rejected: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(repo, "outside.txt"), []byte("outside\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Run(ctx, "", "add", "outside.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Run(ctx, "", "commit", "-m", "outside change"); err != nil {
+		t.Fatal(err)
+	}
+	head, err = g.SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = g.ValidateCommitScope(ctx, base, head, areas)
+	var scopeErr *gitx.ScopeError
+	if !errors.As(err, &scopeErr) || !reflect.DeepEqual(scopeErr.Paths, []string{"outside.txt"}) {
+		t.Fatalf("out-of-scope deep-worktree change escaped check: %#v", err)
+	}
+}

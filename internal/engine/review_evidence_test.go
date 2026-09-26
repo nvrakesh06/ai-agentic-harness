@@ -38,6 +38,22 @@ func TestBoundedFailureDiagnosticPreservesTailAfterLongSuccessfulOutput(t *testi
 	}
 }
 
+func TestReviewAuthenticationFailureTakesPrecedenceOverConcurrentFinding(t *testing.T) {
+	builtins := roles.Builtins()
+	required := []roles.Role{builtins["reviewer"], builtins["qa"]}
+	outcomes := []reviewOutcome{
+		{result: provider.Result{Status: "completed", Findings: []model.Finding{{Severity: "high", Category: "correctness", Reason: "fixture finding", Resolution: "repair fixture"}}}},
+		{err: &provider.InvocationError{Cause: errors.New("fixture provider failure"), Failure: provider.FailureAuthentication}},
+	}
+	assessment := assessReviews(required, outcomes)
+	if assessment.blocking != 0 || len(assessment.findings) != 1 {
+		t.Fatalf("mixed review assessment lost the concrete finding: %+v", assessment)
+	}
+	if !reviewAuthenticationFailure(outcomes) {
+		t.Fatal("typed review authentication failure was not detected")
+	}
+}
+
 func TestPassedCheckEvidenceDoesNotPublishOutputOrArguments(t *testing.T) {
 	secret := "ghp_" + strings.Repeat("a", 30)
 	privateFixture := "customer-email@example.invalid"
@@ -200,5 +216,86 @@ func TestReviewEvidencePayloadIsExactHeadAndPeerFree(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("reviewer prompt omitted native verification detail %q", want)
 		}
+	}
+}
+
+func TestQAWaveReceivesCompletedPeerArtifacts(t *testing.T) {
+	evidence := &model.Evidence{Base: "base", Head: strings.Repeat("a", 40), Config: "config", Rules: "rules", Reviews: map[string]string{
+		"reviewer": "reviewer exact-head summary", "security": "security exact-head summary",
+	}}
+	var payload struct {
+		Reviews map[string]string `json:"reviews"`
+		Policy  string            `json:"review_policy"`
+	}
+	if err := json.Unmarshal([]byte(reviewEvidencePayloadWithPeers(evidence, 1, true)), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Reviews["reviewer"] != "reviewer exact-head summary" || payload.Reviews["security"] != "security exact-head summary" || !strings.Contains(payload.Policy, "QA wave") {
+		t.Fatalf("QA peer payload = %#v", payload)
+	}
+	required := []roles.Role{roles.Builtins()["designer"], roles.Builtins()["qa"], roles.Builtins()["reviewer"], roles.Builtins()["security"]}
+	waves := reviewWaves(required)
+	if len(waves) != 2 || len(waves[0]) != 3 || len(waves[1]) != 1 || required[waves[1][0]].Name != "qa" {
+		t.Fatalf("review waves = %#v", waves)
+	}
+	qaOnly := reviewWaves([]roles.Role{roles.Builtins()["qa"]})
+	if len(qaOnly) != 1 || len(qaOnly[0]) != 1 || qaOnly[0][0] != 0 {
+		t.Fatalf("QA-only review wave = %#v", qaOnly)
+	}
+}
+
+func TestInProgressReviewEvidenceExcludesRoleWithFindings(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	hash := strings.Repeat("b", 64)
+	rules := roles.Hash()
+	task := &model.Task{BaseSHA: strings.Repeat("c", 40), HeadSHA: head, Evidence: &model.Evidence{
+		Base: strings.Repeat("c", 40), Head: head, Config: hash, Rules: rules,
+		ReviewRoster: []string{"reviewer", "security"}, ReviewScope: "scope", Reviews: map[string]string{"reviewer": "blocking finding", "security": "clean"},
+		ReviewDispositions: map[string]model.ReviewDisposition{"security": {Disposition: "completed", SourceHead: head, Runtime: "codex/model/1"}},
+	}}
+	effective := config.Effective{Hash: hash}
+	dispositions, summaries := inProgressReviewEvidence(task, effective, []string{"reviewer", "security"}, "scope")
+	if len(dispositions) != 1 || dispositions["security"].Disposition != "completed" || summaries["security"] != "clean" || summaries["reviewer"] != "" {
+		t.Fatalf("partial review reuse accepted a role with findings: dispositions=%#v summaries=%#v", dispositions, summaries)
+	}
+}
+
+func TestAcceptedBaselineFindingGetsFinalReviewDisposition(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	task := &model.Task{HeadSHA: head}
+	role := roles.Builtins()["reviewer"]
+	evidence := &model.Evidence{Reviews: map[string]string{}, ReviewRoster: []string{"reviewer"}, ReviewDispositions: map[string]model.ReviewDisposition{}}
+	outcomes := []reviewOutcome{{result: provider.Result{Status: "completed", Summary: "known baseline", Findings: []model.Finding{{Severity: "low", Category: "maintainability", Location: "fixture.go:1", Reason: "predates this change", Resolution: "record separately", Relevance: model.FindingBaseline}}}}}
+	assessment := assessReviews([]roles.Role{role}, outcomes)
+	if assessment.blocking >= 0 || assessment.human >= 0 || assessment.failure != nil || len(assessment.evidence) != 0 {
+		t.Fatalf("baseline review should be routable without consuming final acceptance: %#v", assessment)
+	}
+	acceptReviewDispositions(evidence, task, config.Effective{Project: config.Project{Provider: "codex"}}, []roles.Role{role}, outcomes)
+	if disposition := evidence.ReviewDispositions["reviewer"]; disposition.Disposition != "completed" || disposition.SourceHead != head || disposition.Runtime == "" {
+		t.Fatalf("accepted baseline review has no final disposition: %#v", disposition)
+	}
+}
+
+func TestReadOnlyRetryGuardCapacityPrunesOnlyStaleInputs(t *testing.T) {
+	task := &model.Task{BaseSHA: strings.Repeat("a", 40), HeadSHA: strings.Repeat("b", 40)}
+	effective := config.Effective{Hash: strings.Repeat("c", 64)}
+	current := func() model.ReadOnlyRetry {
+		return model.ReadOnlyRetry{Stage: "review", Role: "role", BaseSHA: task.BaseSHA, HeadSHA: task.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Attempts: 1, RemainingSeconds: 2}
+	}
+	guards := map[string]model.ReadOnlyRetry{}
+	for i := 0; i < 8; i++ {
+		guard := current()
+		guard.Role = fmt.Sprintf("role-%d", i)
+		guards["review/"+guard.Role] = guard
+	}
+	stale := guards["review/role-0"]
+	stale.BaseSHA = strings.Repeat("d", 40)
+	guards["review/role-0"] = stale
+	if !readOnlyRetrySlotAvailable(guards, "review/new-role", task, effective) || len(guards) != 7 {
+		t.Fatalf("stale retry guard did not release exactly one slot: %#v", guards)
+	}
+	guards["review/new-role"] = current()
+	if readOnlyRetrySlotAvailable(guards, "review/overflow", task, effective) || len(guards) != 8 {
+		t.Fatalf("eight current retry guards must remain bounded and preserved: %#v", guards)
 	}
 }

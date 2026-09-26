@@ -27,6 +27,17 @@ timeout bounds each package test binary; individual
 integration fixtures keep their own shorter context deadlines.
 Run native tests on macOS before claiming macOS runtime validation.
 
+The release runner discovers all packages and the complete native engine test
+inventory. It runs ordinary packages serially, then every engine test in serial
+groups of at most sixteen top-level tests. Subtests and fuzz seed cases remain
+included. Each group keeps the fifteen-minute deadline, uncached execution and
+fail-fast behavior. A missing terminal pass/skip event fails the gate, even if
+the process exits successfully. `dist/test-inventory.json` records planned
+coverage and reference Git identities, with an explicit dirty-worktree flag;
+it does not mean unexecuted groups passed or that uncommitted edits match the
+reference tree. Grouping avoids losing the
+tail of a growing Windows integration suite to a package-wide aggregate timeout.
+
 ## Application configuration
 
 `aih init` detects Go test/vet, common npm script names, or cargo test. Review this
@@ -49,6 +60,12 @@ scheduling:
   underutilization_grace_seconds: 30
   backlog_source: queued_objectives
 worker_timeout_seconds: 900
+# Optional read-only stage budgets. Omit a field to retain worker_timeout_seconds
+# for that stage; each explicit value is 10 seconds through worker_timeout_seconds.
+role_timeouts_seconds:
+  planning: 120
+  preflight: 180
+  review: 240
 lease_seconds: 180
 models:
   orchestrator: strong
@@ -85,6 +102,13 @@ visual_capture:
       path: /settings
       width: 1280
       height: 720
+  # Opt in to reuse only when the complete committed tracked tree is unchanged.
+  input_closure:
+    version: 1
+    runtime_identity: chrome-136-playwright-1.52
+    targets:
+      - id: desktop
+      - id: settings
 release_repo: nvrakesh06/ai-agentic-harness
 ```
 
@@ -134,6 +158,20 @@ with target IDs. Capture fails as a unit if any target, dimensions, or manifest
 mapping fails, so AIH never seals or caches a partial result. It verifies the
 worktree remains clean at the exact head before sealing hashes and gives the
 requesting reviewer one exact-head retry. Capture is evidence, never a visual pass.
+
+`input_closure` is an opt-in, fail-closed identity for history-only sync heads.
+AIH hashes the complete committed Git tree, the closure version, capture
+configuration and target definitions, a declared runtime label, and a fresh
+Playwright/Chrome/Node runtime probe. It does not infer a smaller dependency
+list: any committed file change, including a loader, lockfile, asset, adapter or
+fixture, forces a new capture. A missing closure, incomplete target list, changed
+identity or runtime, unavailable source artifact, or invalid seal always runs a
+fresh capture. When a closure matches, AIH first
+revalidates the old manifest and artifact hashes, then copies those bytes into a
+new-head local cache and writes a separate receipt naming the source and new
+heads. This reattests artifacts only: it never reuses a review disposition,
+clears findings, satisfies a missing target, or waives native checks and the
+final exact integrated-head gate.
 
 The browser package is a supervisor capability, not a project dependency. Install
 Playwright below `AIH_HOME/tools` outside every target worktree and set

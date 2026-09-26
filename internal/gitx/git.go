@@ -20,7 +20,73 @@ import (
 
 type Git struct{ Dir string }
 
+// ReplanCheckpoint is an operator-pinned source delta. ReplanBranch applies
+// each delta to one canonical-main checkout in the supplied order. Git's
+// three-way apply tolerates overlapping identical work but rejects a real
+// conflict; it never advances a source branch.
+type ReplanCheckpoint struct{ BaseSHA, HeadSHA string }
+
+func (g Git) ReplanBranch(ctx context.Context, canonicalBase string, sources []ReplanCheckpoint, message string) (string, error) {
+	base, err := g.SHA(ctx, canonicalBase)
+	if err != nil {
+		return "", fmt.Errorf("resolve canonical replan base: %w", err)
+	}
+	if len(sources) == 0 || len(sources) > 8 {
+		return "", errors.New("replan requires 1..8 source checkpoints")
+	}
+	root, err := os.MkdirTemp("", "aih-replan-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(root)
+	path := filepath.Join(root, "checkout")
+	if err = g.Detached(ctx, path, base); err != nil {
+		return "", err
+	}
+	defer g.RemoveWorktree(context.Background(), path)
+	w := Git{Dir: path}
+	for index, source := range sources {
+		if !shaPattern.MatchString(source.BaseSHA) || !shaPattern.MatchString(source.HeadSHA) || source.BaseSHA == source.HeadSHA || !g.Ancestor(ctx, source.BaseSHA, source.HeadSHA) {
+			return "", fmt.Errorf("invalid replan source checkpoint %d", index+1)
+		}
+		// A binary patch is input to a later Git process, rather than metadata
+		// for this process. Preserve its terminal newline: Run intentionally
+		// trims line-oriented command output for ordinary callers.
+		patch, err := g.runRaw(ctx, "", "diff", "--binary", "--full-index", source.BaseSHA+".."+source.HeadSHA)
+		if err != nil || patch == "" {
+			if err != nil {
+				return "", fmt.Errorf("read replan source checkpoint %d: %w", index+1, err)
+			}
+			return "", fmt.Errorf("replan source checkpoint %d has no patch", index+1)
+		}
+		if err = safety.Check(patch); err != nil {
+			return "", fmt.Errorf("replan source checkpoint %d: %w", index+1, err)
+		}
+		if _, err = w.Run(ctx, patch, "apply", "--3way", "--index", "--whitespace=error"); err != nil {
+			return "", fmt.Errorf("replan source checkpoint %d conflicts: %w", index+1, err)
+		}
+	}
+	if _, err = w.Run(ctx, "", "diff", "--cached", "--check"); err != nil {
+		return "", fmt.Errorf("replan patch has invalid whitespace: %w", err)
+	}
+	if _, err = w.Run(ctx, "", "commit", "-m", message); err != nil {
+		return "", err
+	}
+	return w.SHA(ctx, "HEAD")
+}
+
 func (g Git) Run(ctx context.Context, input string, args ...string) (string, error) {
+	out, err := g.runRaw(ctx, input, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(out, "\r\n"), nil
+}
+
+// runRaw retains Git output byte-for-byte for the narrow callers that feed it
+// back to Git. Keep Run's historical trimming behavior for every metadata
+// caller so its existing comparison contracts remain unchanged.
+func (g Git) runRaw(ctx context.Context, input string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	argv := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "user.name=AIH", "-c", "user.email=aih@localhost", "-c", "commit.gpgsign=false"}
@@ -38,7 +104,7 @@ func (g Git) Run(ctx context.Context, input string, args ...string) (string, err
 	if e != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), e, safety.Redact(out))
 	}
-	return strings.TrimRight(out, "\r\n"), nil
+	return out, nil
 }
 func Discover(ctx context.Context, dir string) (string, string, error) {
 	g := Git{dir}
@@ -231,9 +297,22 @@ var transientGitTransportErrors = []string{
 	"the requested url returned error: 504", "bad gateway", "service unavailable", "gateway timeout",
 }
 
+// publicationAttemptTimeout bounds one mutating git child. The enclosing
+// publication context stays live after this expires so its exact refs can be
+// reconciled read-only before another fenced push is considered.
+var publicationAttemptTimeout = 2 * time.Minute
+
 func transientGitTransport(err error) bool {
 	if err == nil {
 		return false
+	}
+	// A deadline is retryable only when platform proved the local child exited.
+	// Retrying an un-reaped push could race the original atomic transaction.
+	if errors.Is(err, platform.ErrProcessTerminationUncertain) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
 	}
 	message := strings.ToLower(err.Error())
 	for _, fragment := range transientGitTransportErrors {
@@ -242,6 +321,29 @@ func transientGitTransport(err error) bool {
 		}
 	}
 	return false
+}
+
+// reconcileRemoteHead is read-only and deliberately short. A lost push
+// acknowledgement must be resolved from every exact remote ref before another
+// fenced push is allowed; transient lookup failure gets two bounded retries.
+func reconcileRemoteHead(ctx context.Context, remoteHead func(context.Context, string) (string, error), branch string) (string, error) {
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		readCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		head, err := remoteHead(readCtx, branch)
+		cancel()
+		if err == nil {
+			return head, nil
+		}
+		last = err
+		if !transientGitTransport(err) {
+			return "", err
+		}
+	}
+	return "", last
 }
 
 func waitForPublicationRetry(ctx context.Context, delay time.Duration) error {
@@ -253,6 +355,13 @@ func waitForPublicationRetry(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func publicationBudgetError(last error, budget error) error {
+	if last == nil {
+		return budget
+	}
+	return fmt.Errorf("atomic publication budget expired before another mutation: %w", errors.Join(last, budget))
 }
 
 // publishWithRetry retains the exact push arguments, including every old-ref
@@ -268,23 +377,26 @@ func publishWithRetry(ctx context.Context, updates []Update, args []string,
 	var last error
 	for attempt := 0; attempt < attempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return err
+			return publicationBudgetError(last, err)
 		}
-		last = push(ctx, args)
+		attemptCtx, cancel := context.WithTimeout(ctx, publicationAttemptTimeout)
+		last = push(attemptCtx, args)
+		cancel()
 		if last == nil {
 			return nil
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return publicationBudgetError(last, err)
 		}
-		allNew, sawNew := true, false
+		allNew, sawNew, unresolved := true, false, false
 		for _, update := range updates {
-			head, err := remoteHead(ctx, update.Branch)
+			head, err := reconcileRemoteHead(ctx, remoteHead, update.Branch)
 			if err != nil {
 				allNew = false
 				if !transientGitTransport(err) {
 					return fmt.Errorf("atomic publication could not reconcile %s: %w", update.Branch, err)
 				}
+				unresolved = true
 				continue
 			}
 			if head != update.New {
@@ -300,7 +412,7 @@ func publishWithRetry(ctx context.Context, updates []Update, args []string,
 		if allNew {
 			return nil
 		}
-		if sawNew || !transientGitTransport(last) {
+		if unresolved || sawNew || !transientGitTransport(last) {
 			return fmt.Errorf("atomic publication rejected or unconfirmed; reconcile before retry: %w", last)
 		}
 		if attempt == attempts-1 {
@@ -312,7 +424,7 @@ func publishWithRetry(ctx context.Context, updates []Update, args []string,
 		}
 		log.Printf("AIH fenced publication transport retry %d/%d in %s: %s", attempt+2, attempts, delay, safety.Redact(last.Error()))
 		if err := wait(ctx, delay); err != nil {
-			return err
+			return publicationBudgetError(last, err)
 		}
 	}
 	return fmt.Errorf("atomic publication transport retry exhausted after %d attempts; run aih attach then aih resume after connectivity recovers: %w", attempts, last)
@@ -353,7 +465,7 @@ func (g Git) Checkpoint(ctx context.Context, path, task string) (string, error) 
 	if e != nil {
 		return "", e
 	}
-	changed, e := w.Run(ctx, "", "diff", "--name-only", "-z", "HEAD")
+	changed, e := w.Run(ctx, "", "diff", "--name-only", "-z", "HEAD", "--")
 	if e != nil {
 		return "", e
 	}
@@ -392,8 +504,58 @@ func (g Git) Checkpoint(ctx context.Context, path, task string) (string, error) 
 	return w.SHA(ctx, "HEAD")
 }
 
-// After an aborted rebase, prepare a merge with main for the disposable writer
-// to resolve. SyncBase in durable state recreates this on a replacement machine.
+// PrepareTaskMerge begins a current-main merge from the exact durable task
+// checkpoint. It never rewrites or replays task history. A conflict is left in
+// place for the owning writer, while every other merge failure is aborted so a
+// replacement supervisor starts from the recorded checkpoint.
+func (g Git) PrepareTaskMerge(ctx context.Context, dir, expectedHead, base string) (conflict bool, err error) {
+	w := Git{dir}
+	status, err := w.Run(ctx, "", "status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	if status != "" {
+		return false, errors.New("cannot merge main into a dirty task worktree")
+	}
+	head, err := w.SHA(ctx, "HEAD")
+	if err != nil {
+		return false, err
+	}
+	if head != expectedHead {
+		return false, errors.New("task worktree head does not match durable checkpoint")
+	}
+	if g.Ancestor(ctx, base, head) {
+		return false, nil
+	}
+	if _, err = w.Run(ctx, "", "merge", "--no-ff", "--no-commit", base); err == nil {
+		return false, nil
+	}
+	unmerged, unmergedErr := w.Run(ctx, "", "diff", "--name-only", "--diff-filter=U")
+	if unmergedErr == nil && unmerged != "" {
+		return true, nil
+	}
+	_, abortErr := w.Run(context.Background(), "", "merge", "--abort")
+	if abortErr != nil {
+		return false, errors.Join(err, abortErr)
+	}
+	return false, err
+}
+
+// RestoreTaskHead removes an uncommitted or unpublished non-conflict merge.
+// The caller must have already proved expectedHead is the durable checkpoint.
+func (g Git) RestoreTaskHead(ctx context.Context, dir, expectedHead string) error {
+	w := Git{dir}
+	if pending, err := w.SHA(ctx, "MERGE_HEAD"); err == nil && pending != "" {
+		_, err = w.Run(ctx, "", "merge", "--abort")
+		return err
+	}
+	_, err := w.Run(ctx, "", "reset", "--hard", expectedHead)
+	return err
+}
+
+// After a persisted sync conflict, prepare a merge with main for the
+// disposable writer to resolve. SyncBase recreates this on a replacement
+// machine.
 func (g Git) PrepareMerge(ctx context.Context, dir, base string) error {
 	w := Git{dir}
 	if pending, e := w.SHA(ctx, "MERGE_HEAD"); e == nil {
@@ -444,14 +606,14 @@ func (g Git) Rebase(ctx context.Context, path, base string) error {
 	return e
 }
 func (g Git) Diff(ctx context.Context, base, head string) (string, []string, error) {
-	d, e := g.Run(ctx, "", "diff", "--no-ext-diff", base+"..."+head)
+	d, e := g.Run(ctx, "", "diff", "--no-ext-diff", base+"..."+head, "--")
 	if e != nil {
 		return "", nil, e
 	}
 	// A rename must remain two changed paths here. The caller uses this list for
 	// scope and validation planning, where seeing only the destination could
 	// incorrectly classify a cross-package move as a focused local change.
-	paths, e := g.Run(ctx, "", "diff", "--no-renames", "--name-only", base+"..."+head)
+	paths, e := g.Run(ctx, "", "diff", "--no-renames", "--name-only", base+"..."+head, "--")
 	if paths == "" {
 		return d, nil, e
 	}

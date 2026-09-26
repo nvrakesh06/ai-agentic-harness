@@ -74,28 +74,45 @@ func TestCrossTaskRoutingRejectsReverseDependencyCycle(t *testing.T) {
 	}
 }
 
-func TestCrossTaskRoutingDoesNotLoseFindingToRunningOwner(t *testing.T) {
+func TestCrossTaskRoutingFailsClosedForRunningOwner(t *testing.T) {
 	origin := ownedTask("renderer", model.Review, "src/remotion", model.AreaDirectory)
 	owner := ownedTask("studio", model.Running, "src/studio", model.AreaDirectory)
 	origin.ObjectiveID, owner.ObjectiveID = "different-origin", "different-owner"
 	origin.HeadSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	s := model.NewSnapshot("ownership-test")
 	s.Tasks = map[string]*model.Task{"renderer": origin, "studio": owner}
-	route, owners := applyCrossTaskFindings(s, "renderer", []model.Finding{{Severity: "high", Location: "src/studio/live.ts:1"}}, func(model.Finding) bool { return true })
-	if !route.gated || route.unresolved || len(owners["studio"]) != 1 || origin.State != model.SyncRequired || origin.Blocker != nil {
-		t.Fatalf("running owner did not receive a durable replay handoff: route=%#v owners=%#v origin=%#v", route, owners, origin)
+	finding := model.Finding{Severity: "high", Location: "src/studio/live.ts:1"}
+	route, owners := applyCrossTaskFindings(s, "renderer", []model.Finding{finding}, func(model.Finding) bool { return true })
+	if !route.gated || !route.unresolved || len(route.local) != 1 || route.local[0] != finding || len(owners) != 0 {
+		t.Fatalf("running owner silently accepted or lost a blocking finding: route=%#v owners=%#v", route, owners)
 	}
-	if len(model.TaskGuidance(owner)) != 1 {
-		t.Fatalf("running owner has no durable routed-finding guidance: %#v", owner.Decisions)
+	if origin.State != model.Blocked || origin.Blocker == nil || origin.Blocker.Resume != model.SyncRequired {
+		t.Fatalf("origin did not retain a repairable blocker: state=%s blocker=%#v", origin.State, origin.Blocker)
 	}
-	changed := model.Finding{Severity: "high", Location: "src/studio/live.ts:1", Reason: "The revised failure still needs repair.", Resolution: "Apply the updated safe fix."}
-	route, owners = applyCrossTaskFindings(s, "renderer", []model.Finding{changed}, func(model.Finding) bool { return true })
-	if !route.gated || route.unresolved || len(owners["studio"]) != 1 || len(model.TaskGuidance(owner)) != 2 {
-		t.Fatalf("changed same-location finding did not create a fresh replay epoch: route=%#v owners=%#v guidance=%#v", route, owners, model.TaskGuidance(owner))
+	if owner.State != model.Running || len(model.TaskGuidance(owner)) != 0 || len(owner.Findings) != 0 {
+		t.Fatalf("in-flight writer was mutated without a replay guarantee: owner=%#v", owner)
 	}
-	replay, err := completeImplementation(owner, 0)
-	if err != nil || !replay || owner.State != model.Ready {
-		t.Fatalf("running owner did not enter bounded replay after handoff: replay=%t state=%s err=%v", replay, owner.State, err)
+}
+
+func TestCrossTaskRoutingAdmitsIdleOwner(t *testing.T) {
+	for _, state := range []model.State{model.Ready, model.Fix} {
+		t.Run(string(state), func(t *testing.T) {
+			origin := ownedTask("renderer", model.Review, "src/remotion", model.AreaDirectory)
+			owner := ownedTask("studio", state, "src/studio", model.AreaDirectory)
+			s := model.NewSnapshot("ownership-test")
+			s.Tasks = map[string]*model.Task{"renderer": origin, "studio": owner}
+			finding := model.Finding{Severity: "high", Location: "src/studio/live.ts:1"}
+			route, owners := applyCrossTaskFindings(s, "renderer", []model.Finding{finding}, func(model.Finding) bool { return true })
+			if !route.gated || route.unresolved || len(route.local) != 0 || len(owners["studio"]) != 1 {
+				t.Fatalf("idle owner did not receive finding: route=%#v owners=%#v", route, owners)
+			}
+			if origin.State != model.SyncRequired || origin.Blocker != nil || len(origin.Dependencies) != 1 || origin.Dependencies[0] != "studio" {
+				t.Fatalf("origin did not wait for routed owner: %#v", origin)
+			}
+			if owner.State != state || len(owner.Findings) != 1 {
+				t.Fatalf("idle owner did not retain the finding: %#v", owner)
+			}
+		})
 	}
 }
 

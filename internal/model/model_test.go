@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,38 @@ func TestTransitionsAndBlockers(t *testing.T) {
 	Block(task, "Choose", "decision", Ready)
 	if e := Answer(task, "proceed"); e != nil || task.State != Ready || len(task.Decisions) != 1 {
 		t.Fatal(task, e)
+	}
+}
+
+func TestRecordScopeRecoveryBoundsTypedReceiptsNotLegacyDecisions(t *testing.T) {
+	task := &Task{}
+	legacy := make([]string, 87)
+	for i := range legacy {
+		legacy[i] = fmt.Sprintf("legacy decision %d", i)
+	}
+	task.Decisions = append(task.Decisions, legacy...)
+
+	record := func(id string) ScopeRecovery {
+		return ScopeRecovery{CommandID: id, ManifestHash: id, Reason: "explicit recovery"}
+	}
+	if err := RecordScopeRecovery(task, record("receipt-0")); err != nil {
+		t.Fatalf("legacy decision history prevented recovery receipt: %v", err)
+	}
+	if len(task.Decisions) != len(legacy)+1 || !reflect.DeepEqual(task.Decisions[:len(legacy)], legacy) {
+		t.Fatalf("legacy decision history changed: %#v", task.Decisions)
+	}
+	for i := 1; i < MaxScopeRecoveryRecords; i++ {
+		if err := RecordScopeRecovery(task, record(fmt.Sprintf("receipt-%d", i))); err != nil {
+			t.Fatalf("receipt %d rejected before typed limit: %v", i, err)
+		}
+	}
+	if err := RecordScopeRecovery(task, record("receipt-over-limit")); err == nil {
+		t.Fatal("unbounded typed scope recovery receipts accepted")
+	}
+	oversized := record("oversized")
+	oversized.Areas = []string{strings.Repeat("a", maxScopeRecoveryRecordBytes)}
+	if err := RecordScopeRecovery(&Task{}, oversized); err == nil {
+		t.Fatal("oversized scope recovery receipt accepted")
 	}
 }
 
@@ -51,6 +84,34 @@ func TestVerificationCapacityRoundTripAndValidation(t *testing.T) {
 		t.Fatal("unknown owner accepted")
 	}
 }
+
+func TestSnapshotClonePreservesEmptyReplanReceiptLedger(t *testing.T) {
+	s := NewSnapshot("project123")
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded map[string]json.RawMessage
+	if err = json.Unmarshal(b, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := encoded["replan_receipts"]; !ok || string(got) != "{}" {
+		t.Fatalf("empty replan receipt ledger was not durably encoded: %s", b)
+	}
+	cloned := Clone(s)
+	if cloned.Replans == nil {
+		t.Fatal("clone dropped the empty replan receipt ledger")
+	}
+	delete(encoded, "replan_receipts") // Legacy snapshots remain recoverable.
+	legacy, err := json.Marshal(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, _, err := Decode(legacy)
+	if err != nil || recovered.Replans == nil {
+		t.Fatalf("legacy receipt omission was not recovered: %#v %v", recovered, err)
+	}
+}
 func TestSchedulerDependenciesDomainsAndBlocked(t *testing.T) {
 	s := NewSnapshot("project123")
 	for _, id := range []string{"a", "b", "c", "d", "e", "f"} {
@@ -70,6 +131,39 @@ func TestSchedulerDependenciesDomainsAndBlocked(t *testing.T) {
 	}
 	if got := Runnable(s, map[string]bool{"c": true}, 3); len(got) != 2 || got[0].ID != "b" {
 		t.Fatal("dependency not released")
+	}
+}
+
+func TestSupersededDependencyRequiresReplacementCompletion(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Tasks["original"] = &Task{ID: "original", ObjectiveID: "objective", State: Superseded, SupersededBy: "replacement"}
+	s.Tasks["replacement"] = &Task{ID: "replacement", ObjectiveID: "objective", State: Ready}
+	s.Tasks["dependent"] = &Task{ID: "dependent", ObjectiveID: "other", State: Ready, Dependencies: []string{"original"}}
+	if DependencyDone(s, "original") || completedDependencies(s, s.Tasks["dependent"]) {
+		t.Fatal("superseded original satisfied a dependency before successor completed")
+	}
+	s.Tasks["replacement"].State = Done
+	if !DependencyDone(s, "original") || !completedDependencies(s, s.Tasks["dependent"]) || !ObjectiveComplete(s, "objective") {
+		t.Fatal("completed replacement did not satisfy successor-aware dependency closure")
+	}
+	s.Tasks["replacement"].State = Superseded
+	s.Tasks["replacement"].SupersededBy = "original"
+	if DependencyDone(s, "original") {
+		t.Fatal("supersession cycle satisfied a dependency")
+	}
+}
+
+func TestSchemaNineMigratesWithoutInventingSupersession(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Schema = 9
+	s.Tasks["task"] = &Task{ID: "task", State: Ready}
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, changed, err := Decode(b)
+	if err != nil || !changed || recovered.Schema != StateSchema || recovered.Tasks["task"].SupersededBy != "" || recovered.Tasks["task"].Replan != nil {
+		t.Fatalf("schema nine migration invented replacement state: %#v changed=%v err=%v", recovered, changed, err)
 	}
 }
 

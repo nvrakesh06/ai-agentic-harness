@@ -18,16 +18,91 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 9
+const StateSchema = 11
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
 const MaxTaskGuidance = 8
 const MaxGuidanceBytes = 1600
+const MaxScopeRecoveryReasonBytes = 1600
+const MaxScopeRecoveryRecords = 8
+const maxScopeRecoveryRecordBytes = 16 * 1024
 
 // MaxVisualEvidenceArtifacts includes up to eight screenshots and one shared diagnostic log.
 const MaxVisualEvidenceArtifacts = 9
 const guidancePrefix = "AIH_GUIDANCE_V1:"
+const scopeRecoveryPrefix = "AIH_SCOPE_RECOVERY_V1:"
+
+// ScopeRecovery records an explicit operator authorization for a legacy task
+// whose original immutable assignment was never persisted. It deliberately
+// records the new contract rather than claiming to reconstruct history from
+// mutable plan fields or changed paths.
+type ScopeRecovery struct {
+	CommandID    string   `json:"command_id"`
+	StateRef     string   `json:"state_ref"`
+	PolicyHash   string   `json:"policy_hash"`
+	BaseSHA      string   `json:"base_sha"`
+	HeadSHA      string   `json:"head_sha"`
+	ContractHash string   `json:"contract_hash"`
+	ManifestHash string   `json:"manifest_hash"`
+	Areas        []string `json:"areas"`
+	Dependencies []string `json:"additional_dependencies,omitempty"`
+	Reason       string   `json:"reason"`
+}
+
+// ScopeRecoveryRecord returns the typed durable authorization for a command.
+func ScopeRecoveryRecord(t *Task, commandID string) (ScopeRecovery, bool) {
+	if t == nil {
+		return ScopeRecovery{}, false
+	}
+	for _, decision := range t.Decisions {
+		if !strings.HasPrefix(decision, scopeRecoveryPrefix) {
+			continue
+		}
+		var record ScopeRecovery
+		if json.Unmarshal([]byte(strings.TrimPrefix(decision, scopeRecoveryPrefix)), &record) == nil && record.CommandID == commandID {
+			return record, true
+		}
+	}
+	return ScopeRecovery{}, false
+}
+
+// RecordScopeRecovery stores a compact typed decision in the existing durable
+// Decisions field. The receipt namespace is bounded independently from legacy
+// decision history, which recovery must preserve verbatim.
+func RecordScopeRecovery(t *Task, record ScopeRecovery) error {
+	if t == nil || record.CommandID == "" || len(record.Reason) == 0 || len(record.Reason) > MaxScopeRecoveryReasonBytes || !utf8.ValidString(record.Reason) || strings.ContainsRune(record.Reason, '\x00') {
+		return errors.New("invalid scope recovery decision")
+	}
+	if prior, ok := ScopeRecoveryRecord(t, record.CommandID); ok {
+		if prior.ManifestHash == record.ManifestHash {
+			return nil
+		}
+		return errors.New("scope recovery command ID already records a different manifest")
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	if len(encoded) > maxScopeRecoveryRecordBytes {
+		return errors.New("scope recovery decision exceeds size limit")
+	}
+	if scopeRecoveryRecordCount(t) >= MaxScopeRecoveryRecords {
+		return errors.New("scope recovery record limit reached")
+	}
+	t.Decisions = append(t.Decisions, scopeRecoveryPrefix+string(encoded))
+	return nil
+}
+
+func scopeRecoveryRecordCount(t *Task) int {
+	count := 0
+	for _, decision := range t.Decisions {
+		if strings.HasPrefix(decision, scopeRecoveryPrefix) {
+			count++
+		}
+	}
+	return count
+}
 
 type State string
 
@@ -45,6 +120,10 @@ const (
 	PostVerify   State = "POST_VERIFY"
 	Done         State = "DONE"
 	Blocked      State = "BLOCKED_HUMAN"
+	// Superseded is a terminal record of an explicitly replaced task. It is not
+	// a successful completion: dependencies follow SupersededBy and only the
+	// replacement's DONE state can satisfy them.
+	Superseded State = "SUPERSEDED"
 )
 
 var edges = map[State][]State{
@@ -79,6 +158,8 @@ type Task struct {
 	Security          bool                        `json:"security"`
 	Roles             []string                    `json:"roles"`
 	State             State                       `json:"state"`
+	SupersededBy      string                      `json:"superseded_by,omitempty"`
+	Replan            *ReplanProvenance           `json:"replan_provenance,omitempty"`
 	Branch            string                      `json:"branch"`
 	BaseSHA           string                      `json:"base_sha,omitempty"`
 	HeadSHA           string                      `json:"head_sha,omitempty"`
@@ -99,10 +180,26 @@ type Task struct {
 	Decisions         []string                    `json:"decisions,omitempty"`
 	Blocker           *Blocker                    `json:"blocker,omitempty"`
 	Verification      *Verification               `json:"verification_retry_guard,omitempty"`
+	ReadOnlyRetries   map[string]ReadOnlyRetry    `json:"read_only_retries,omitempty"`
 	Evidence          *Evidence                   `json:"evidence,omitempty"`
 	ReviewProvenance  map[string]ReviewProvenance `json:"review_provenance,omitempty"`
 	VisualRequired    *VisualRequirement          `json:"visual_required,omitempty"`
 	Updated           time.Time                   `json:"updated"`
+	Timing            *TaskTiming                 `json:"timing,omitempty"`
+}
+
+// ReadOnlyRetry fences the one narrower retry available to a timed-out
+// preflight or review role. It binds the consumed budget to the
+// exact task and policy inputs so attach cannot restart a full reader budget.
+type ReadOnlyRetry struct {
+	Stage            string `json:"stage"`
+	Role             string `json:"role"`
+	BaseSHA          string `json:"base_sha"`
+	HeadSHA          string `json:"head_sha,omitempty"`
+	Config           string `json:"config"`
+	Rules            string `json:"rules"`
+	Attempts         int    `json:"attempts"`
+	RemainingSeconds int    `json:"remaining_seconds"`
 }
 
 // VisualRequirement is a durable exact-head gate created when a preflight
@@ -357,6 +454,8 @@ type Verification struct {
 	SourceEnvironment string `json:"source_environment,omitempty"`
 	HeadSHA           string `json:"head_sha"`
 	Fingerprint       string `json:"fingerprint"`
+	CheckID           string `json:"check_id,omitempty"`
+	Classification    string `json:"classification,omitempty"`
 	Attempts          int    `json:"attempts"`
 	NativeOnly        bool   `json:"native_only"`
 }
@@ -376,6 +475,10 @@ const (
 	// BlockerOriginImplementerDecision marks a worker request for a human
 	// product or implementation decision.
 	BlockerOriginImplementerDecision = "implementer-decision"
+	// BlockerOriginProviderAuthentication marks a confirmed provider CLI
+	// authentication error. It resumes the preserved task stage after the
+	// operator restores provider access.
+	BlockerOriginProviderAuthentication = "provider-authentication"
 )
 
 type Finding struct {
@@ -450,7 +553,11 @@ type ReviewDisposition struct {
 // bytes and diagnostics remain outside the portable state snapshot.
 type VisualEvidence struct {
 	Head           string           `json:"head"`
+	SourceHead     string           `json:"source_head,omitempty"`
 	Config         string           `json:"config"`
+	Closure        string           `json:"closure,omitempty"`
+	Runtime        string           `json:"runtime,omitempty"`
+	ReuseReason    string           `json:"reuse_reason,omitempty"`
 	Manifest       string           `json:"manifest"`
 	ManifestSHA256 string           `json:"manifest_sha256"`
 	Artifacts      []VisualArtifact `json:"artifacts"`
@@ -477,18 +584,21 @@ type Lease struct {
 	Expires   time.Time `json:"expires_at"`
 }
 type Run struct {
-	ID             string    `json:"id"`
-	Task           string    `json:"task"`
-	Role           string    `json:"role"`
-	Provider       string    `json:"provider"`
-	Capability     string    `json:"capability"`
-	EffectiveModel string    `json:"effective_model"`
-	Version        string    `json:"version"`
-	RulesHash      string    `json:"rules_hash"`
-	Started        time.Time `json:"started"`
-	DurationMS     int64     `json:"duration_ms"`
-	Outcome        string    `json:"outcome"`
-	Epoch          uint64    `json:"epoch"`
+	ID                string      `json:"id"`
+	Task              string      `json:"task"`
+	Role              string      `json:"role"`
+	Provider          string      `json:"provider"`
+	Capability        string      `json:"capability"`
+	EffectiveModel    string      `json:"effective_model"`
+	Version           string      `json:"version"`
+	RulesHash         string      `json:"rules_hash"`
+	Started           time.Time   `json:"started"`
+	DurationMS        int64       `json:"duration_ms"`
+	Outcome           string      `json:"outcome"`
+	Epoch             uint64      `json:"epoch"`
+	Context           *RunContext `json:"context,omitempty"`
+	DurationRecorded  bool        `json:"duration_recorded,omitempty"`
+	DurationEstimated bool        `json:"duration_estimated,omitempty"`
 }
 type CapacityTransition struct {
 	At            time.Time `json:"at"`
@@ -528,20 +638,24 @@ type Capacity struct {
 	Transitions        []CapacityTransition `json:"transitions,omitempty"`
 }
 type Snapshot struct {
-	Schema             int                   `json:"state_schema"`
-	CreatedBy          string                `json:"created_by_version"`
-	Project            string                `json:"project"`
-	Revision           uint64                `json:"revision"`
-	Controller         Lease                 `json:"controller"`
-	Objectives         map[string]*Objective `json:"objectives"`
-	Backlog            []string              `json:"authorized_objective_backlog"`
-	Capacity           Capacity              `json:"capacity"`
-	Tasks              map[string]*Task      `json:"tasks"`
-	Runs               []Run                 `json:"runs,omitempty"`
-	Applied            map[string]bool       `json:"applied_commands"`
-	Improvements       []string              `json:"improvement_candidates,omitempty"`
-	IntegrationBlocked string                `json:"integration_blocked,omitempty"`
-	IntegrationBatch   *IntegrationBatch     `json:"integration_batch,omitempty"`
+	Schema     int                   `json:"state_schema"`
+	CreatedBy  string                `json:"created_by_version"`
+	Project    string                `json:"project"`
+	Revision   uint64                `json:"revision"`
+	Controller Lease                 `json:"controller"`
+	Objectives map[string]*Objective `json:"objectives"`
+	Backlog    []string              `json:"authorized_objective_backlog"`
+	Capacity   Capacity              `json:"capacity"`
+	Tasks      map[string]*Task      `json:"tasks"`
+	Runs       []Run                 `json:"runs,omitempty"`
+	Applied    map[string]bool       `json:"applied_commands"`
+	// Always encode this initialized receipt ledger. Clone uses the portable JSON
+	// representation, so omitting an empty ledger would turn it into nil before
+	// the first accepted replan and lose the write-ready provenance invariant.
+	Replans            map[string]ReplanReceipt `json:"replan_receipts"`
+	Improvements       []string                 `json:"improvement_candidates,omitempty"`
+	IntegrationBlocked string                   `json:"integration_blocked,omitempty"`
+	IntegrationBatch   *IntegrationBatch        `json:"integration_batch,omitempty"`
 }
 
 // IntegrationBatch is a portable reservation for the deliberately small first
@@ -558,6 +672,30 @@ type IntegrationBatch struct {
 	Tasks        []IntegrationBatchTask `json:"tasks"`
 }
 
+// ReplanProvenance records the bounded operator authorization that created a
+// successor. It belongs only to the new task; originals retain their prior
+// issue, PR, evidence, and decision history unchanged.
+type ReplanProvenance struct {
+	CommandID     string             `json:"command_id"`
+	Reason        string             `json:"reason"`
+	CandidateHead string             `json:"candidate_head,omitempty"`
+	Sources       []ReplanCheckpoint `json:"sources"`
+}
+type ReplanCheckpoint struct {
+	TaskID  string `json:"task_id"`
+	BaseSHA string `json:"base_sha"`
+	HeadSHA string `json:"head_sha"`
+	Order   int    `json:"order"`
+}
+
+// ReplanReceipt binds an idempotent operator command to its exact manifest.
+// Applied alone cannot safely distinguish a retry from a different request
+// that reused a command ID after canonical policy advanced.
+type ReplanReceipt struct {
+	Digest        string `json:"digest"`
+	ReplacementID string `json:"replacement_id"`
+}
+
 // IntegrationBatchTask keeps every member's exact reviewed head and scope.
 // Review scopes are intentionally per-task: disjoint changes cannot share one
 // scope fingerprint, even when they share the selected review roster.
@@ -570,7 +708,7 @@ type IntegrationBatchTask struct {
 
 func NewSnapshot(project string) *Snapshot {
 	return &Snapshot{Schema: StateSchema, CreatedBy: Version, Project: project,
-		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}}
+		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}, Replans: map[string]ReplanReceipt{}}
 }
 
 const (
@@ -724,7 +862,28 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		// empty so the next supervisor makes a fresh, deterministic decision.
 		s.IntegrationBatch = nil
 	}
+	if s.Schema <= 9 {
+		// Schema 10 adds explicit task replacement links. Old snapshots have no
+		// authority to infer a replacement, so preserve their lifecycle exactly.
+		for _, task := range s.Tasks {
+			if task != nil {
+				task.SupersededBy = ""
+			}
+		}
+	}
 	if migrated {
+		if s.Schema <= 10 {
+			// Earlier records have no transition clock or pinned run context.
+			// Never reconstruct them from Updated or the current task revision.
+			for _, task := range s.Tasks {
+				if task != nil {
+					task.Timing = nil
+				}
+			}
+			for i := range s.Runs {
+				s.Runs[i].Context = nil
+			}
+		}
 		s.Schema = StateSchema
 	}
 	if !regexp.MustCompile(`^[a-zA-Z0-9_-]{8,80}$`).MatchString(s.Project) {
@@ -745,6 +904,14 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 	if s.Applied == nil {
 		s.Applied = map[string]bool{}
 	}
+	if s.Replans == nil {
+		s.Replans = map[string]ReplanReceipt{}
+	}
+	for id, receipt := range s.Replans {
+		if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(id) || !s.Applied[id] || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(receipt.Digest) || !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(receipt.ReplacementID) || s.Tasks[receipt.ReplacementID] == nil {
+			return nil, false, errors.New("invalid replan receipt")
+		}
+	}
 	for id, t := range s.Tasks {
 		if t == nil || t.ID != id || !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(id) {
 			return nil, false, errors.New("invalid task identity")
@@ -760,6 +927,9 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		if err := validateAssignedAreas(t); err != nil {
 			return nil, false, err
 		}
+		if err := validateTaskTiming(t); err != nil {
+			return nil, false, err
+		}
 		if t.State == Blocked && (t.Blocker == nil || t.Blocker.Question == "") {
 			return nil, false, errors.New("blocked task has no question")
 		}
@@ -769,6 +939,20 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			}
 			if v.HeadSHA != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.HeadSHA) {
 				return nil, false, errors.New("invalid verification retry revision")
+			}
+		}
+		if len(t.ReadOnlyRetries) > 8 {
+			return nil, false, errors.New("too many read-only retry guards")
+		}
+		for key, retry := range t.ReadOnlyRetries {
+			if !regexp.MustCompile(`^(pre-implementation|review)/[a-z][a-z0-9_-]{0,63}$`).MatchString(key) ||
+				(retry.Stage != "pre-implementation" && retry.Stage != "review") ||
+				!regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(retry.Role) ||
+				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(retry.BaseSHA) ||
+				(retry.HeadSHA != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(retry.HeadSHA)) ||
+				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(retry.Config) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(retry.Rules) ||
+				retry.Attempts < 1 || retry.Attempts > 2 || retry.RemainingSeconds < 0 || retry.RemainingSeconds > 86400 || key != retry.Stage+"/"+retry.Role {
+				return nil, false, errors.New("invalid read-only retry guard")
 			}
 		}
 		if v := t.VisualRequired; v != nil {
@@ -811,6 +995,12 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 				v.Manifest != "visual-evidence/"+id+"/"+v.Head+"-"+v.Config[:16]+"/manifest.json" {
 				return nil, false, errors.New("invalid visual evidence reference")
 			}
+			if v.SourceHead != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.SourceHead) {
+				return nil, false, errors.New("invalid visual evidence source revision")
+			}
+			if (v.Closure != "" || v.ReuseReason != "") && (!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(v.Closure) || strings.TrimSpace(v.Runtime) == "" || len(v.Runtime) > 160) {
+				return nil, false, errors.New("invalid visual evidence closure")
+			}
 			for _, artifact := range v.Artifacts {
 				if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}\.(png|jpg|jpeg|txt|json)$`).MatchString(artifact.Path) || strings.Contains(artifact.Path, "..") || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(artifact.SHA256) {
 					return nil, false, errors.New("invalid visual artifact reference")
@@ -835,8 +1025,27 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 				}
 			}
 		}
-		if _, ok := edges[t.State]; !ok && t.State != Done {
+		if _, ok := edges[t.State]; !ok && t.State != Done && t.State != Superseded {
 			return nil, false, fmt.Errorf("unknown task state %q", t.State)
+		}
+		if t.State == Superseded {
+			if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(t.SupersededBy) || s.Tasks[t.SupersededBy] == nil || t.SupersededBy == t.ID {
+				return nil, false, errors.New("superseded task has no valid replacement")
+			}
+		} else if t.SupersededBy != "" {
+			return nil, false, errors.New("non-superseded task has replacement link")
+		}
+		if t.Replan != nil {
+			if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(t.Replan.CommandID) || strings.TrimSpace(t.Replan.Reason) == "" || len(t.Replan.Reason) > 1600 || len(t.Replan.Sources) == 0 || len(t.Replan.Sources) > 8 || (t.Replan.CandidateHead != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(t.Replan.CandidateHead)) {
+				return nil, false, errors.New("invalid replan provenance")
+			}
+			prior := 0
+			for _, source := range t.Replan.Sources {
+				if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`).MatchString(source.TaskID) || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(source.BaseSHA) || !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(source.HeadSHA) || source.BaseSHA == source.HeadSHA || source.Order <= prior {
+					return nil, false, errors.New("invalid replan source provenance")
+				}
+				prior = source.Order
+			}
 		}
 		if t.FixCycles == nil {
 			t.FixCycles = map[string]int{}
@@ -904,6 +1113,9 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		if err := ValidateIntegrationBatch(&s, s.IntegrationBatch); err != nil {
 			return nil, false, err
 		}
+	}
+	if err := validateRunMetrics(s.Runs); err != nil {
+		return nil, false, err
 	}
 	return &s, migrated, nil
 }
@@ -1087,7 +1299,41 @@ var passedNativeCheckRecord = regexp.MustCompile(`^stage=native check="(?:[^"\\]
 
 func completedDependencies(s *Snapshot, task *Task) bool {
 	for _, id := range task.Dependencies {
-		if s.Tasks[id] == nil || s.Tasks[id].State != Done {
+		if !DependencyDone(s, id) {
+			return false
+		}
+	}
+	return true
+}
+
+// DependencyDone resolves explicit replacement links without ever treating a
+// superseded original as success. A corrupt replacement loop is unsatisfied.
+func DependencyDone(s *Snapshot, id string) bool {
+	seen := map[string]bool{}
+	for id != "" && !seen[id] {
+		seen[id] = true
+		t := s.Tasks[id]
+		if t == nil {
+			return false
+		}
+		switch t.State {
+		case Done:
+			return true
+		case Superseded:
+			id = t.SupersededBy
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// ObjectiveComplete applies the same successor resolution used for task
+// dependencies, so replacing a task cannot make an objective look complete
+// until the independently verified successor reaches DONE.
+func ObjectiveComplete(s *Snapshot, objectiveID string) bool {
+	for _, task := range s.Tasks {
+		if task.ObjectiveID == objectiveID && !DependencyDone(s, task.ID) {
 			return false
 		}
 	}
@@ -1275,6 +1521,10 @@ func Answer(t *Task, answer string) error {
 		return err
 	}
 	t.Decisions = append(t.Decisions, answer)
+	// A human answer explicitly authorizes a new read-only attempt window after
+	// a persisted deadline blocker. The old guard remains authoritative until
+	// that acknowledgement; ordinary automatic retries never clear it.
+	t.ReadOnlyRetries = nil
 	if t.Rotations >= 24 {
 		t.Decisions = append(t.Decisions, "Human authorized another bounded checkpoint rotation window.")
 		t.Rotations = 0
@@ -1332,7 +1582,7 @@ func runnableWhereOrdered(s *Snapshot, active map[string]bool, limit int, eligib
 		}
 		ok := true
 		for _, dep := range t.Dependencies {
-			if s.Tasks[dep] == nil || s.Tasks[dep].State != Done {
+			if !DependencyDone(s, dep) {
 				ok = false
 			}
 		}

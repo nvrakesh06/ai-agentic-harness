@@ -120,7 +120,7 @@ environment and recheck without starting another implementer.
 
 ## Schema compatibility and migrations
 
-The current runtime uses remote schema 9, role schema 1, rules version 1, and
+The current runtime uses remote schema 11, role schema 1, rules version 1, and
 local schema 1. Unknown newer schemas fail closed before writes. Legacy schema 0
 gains version metadata and missing maps; schema 1 reconstructs the authorized
 objective backlog deterministically. Schema 2 drops unowned verification-resource
@@ -131,17 +131,37 @@ finding relevance and blocker origin fail closed. Schema 9 adds the optional bat
 reservation; migrated snapshots always clear it rather than infer a batch from
 historical task state.
 
+Schema 10 records explicit superseded-task links and replacement receipts.
+Schema 11 adds optional task transition clocks and pinned provider-run context.
+Migrated tasks have unavailable timing until an observed transition or controller
+boundary starts a clock; old run context is never inferred from the task's current
+head. Positive historical provider durations remain usable, while unrecorded zero
+durations remain unavailable. Interrupted recovery durations use the expired lease
+boundary and are explicitly estimates.
+
 All migrated snapshots then undergo current validation. The first subsequent state
 commit keeps the original remote commit as its parent, preserving the pre-migration
-backup in Git history. Publishing schema 9 is a one-way deployment boundary: older
+backup in Git history. Publishing schema 11 is a one-way deployment boundary: older
 runtimes reject it. Upgrade every machine that may attach, resume, or take over
-before the first schema-9 save. No automatic major-version migration exists.
+before the first schema-11 save. No automatic major-version migration exists.
 
 Remote task identities and branches are constrained before use as filesystem or
 Git targets. Schema changes require tests for old fixtures and new-runtime refusal.
 Snapshots and normal state history are retained in V1; compaction is future work.
 
 ## Practical guarantees
+
+`aih throughput` (or `aih throughput --json`) reads cached durable observations
+without starting a supervisor or publishing a checkpoint. New run records pin
+base, source revision, policy, rules, role stage, and task state. Repetition groups
+require matching pinned inputs; historical runs without context are unavailable.
+Task clocks accrue lease-owned state residence, operator-blocked wait, and stopped
+time separately at task-state or controller-owner transitions. Report reads add
+the current interval on a copy; idle ticks and lease renewals do not move clocks.
+Provider milliseconds are summed invocation time, including overlapping readers,
+and are never presented as wall time or historical productive writer utilization.
+Observed cancelled invocations retain their measured duration on orderly release;
+recovery or otherwise unobserved cancellation durations are labelled estimates.
 
 Acknowledged remote state and pushed checkpoints survive deletion of all local
 project data. Unpushed changes and queued-only commands on a destroyed disk do not.

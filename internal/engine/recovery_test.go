@@ -69,7 +69,10 @@ func TestPartialGraphRecoversWithoutLocalProject(t *testing.T) {
 	states := []model.State{model.Done, model.Running, model.Review, model.Blocked, model.Ready}
 	for i, state := range states {
 		id := string(rune('a' + i))
-		task := &model.Task{ID: id, ObjectiveID: "objective", Title: id, State: state, HeadSHA: base, Branch: "aih/" + id, FixCycles: map[string]int{}}
+		// This fixture exercises ordinary interrupted-task recovery, not the
+		// legacy fail-closed route below. Seed the same immutable README boundary
+		// each recovered worktree actually contains.
+		task := &model.Task{ID: id, ObjectiveID: "objective", Title: id, Areas: []string{"README.md"}, AssignedAreas: []string{"README.md"}, AssignedAreaKinds: map[string]string{"README.md": model.AreaFile}, State: state, BaseSHA: base, HeadSHA: base, Branch: "aih/" + id, FixCycles: map[string]int{}}
 		if state == model.Blocked {
 			model.Block(task, "Choose", "decision", model.Ready)
 		}
@@ -278,20 +281,22 @@ func TestDeadlineCheckpointAndHandoffRecoverTogetherAfterMachineLoss(t *testing.
 	}
 	snapshot.Objectives["deadline-objective"] = &model.Objective{ID: "deadline-objective", Text: "recover timeout work", Planned: true}
 	snapshot.Tasks["deadline"] = &model.Task{
-		ID:          "deadline",
-		ObjectiveID: "deadline-objective",
-		Title:       "deadline",
-		Objective:   "Write recovered.txt and preserve it across the deadline.",
-		Acceptance:  []string{"recovered.txt is durable"},
-		Areas:       []string{"recovered.txt"},
-		Domains:     []string{"deadline-fixture"},
-		Risk:        "low",
-		State:       model.Ready,
-		Branch:      "aih/deadline",
-		BaseSHA:     base,
-		HeadSHA:     base,
-		Rotations:   23,
-		FixCycles:   map[string]int{},
+		ID:                "deadline",
+		ObjectiveID:       "deadline-objective",
+		Title:             "deadline",
+		Objective:         "Write recovered.txt and preserve it across the deadline.",
+		Acceptance:        []string{"recovered.txt is durable"},
+		Areas:             []string{"recovered.txt"},
+		AssignedAreas:     []string{"recovered.txt"},
+		AssignedAreaKinds: map[string]string{"recovered.txt": model.AreaFile},
+		Domains:           []string{"deadline-fixture"},
+		Risk:              "low",
+		State:             model.Ready,
+		Branch:            "aih/deadline",
+		BaseSHA:           base,
+		HeadSHA:           base,
+		Rotations:         23,
+		FixCycles:         map[string]int{},
 	}
 	nextState, err := f.P.Git.StateCommit(ctx, stateHead, snapshot)
 	if err != nil {
@@ -486,5 +491,129 @@ func TestPostVerifyHoldAndHumanRetry(t *testing.T) {
 	_ = f.P.DB.Submit(store.Command{ID: model.ID(), Kind: "handoff"})
 	if e = <-done; e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestSyncConflictCheckpointPublishesResolvedMerge(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	base, err := f.P.Git.SHA(ctx, "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &model.Task{ID: "sync", ObjectiveID: "objective", State: model.SyncRequired, Branch: "aih/sync", BaseSHA: base, AssignedAreas: []string{"README.md"}, AssignedAreaKinds: map[string]string{"README.md": model.AreaFile}, FixCycles: map[string]int{}}
+	dir := f.P.TaskPath(task)
+	if err = f.P.Git.Worktree(ctx, dir, task.Branch, base); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "README.md"), []byte("task\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	task.HeadSHA, err = f.P.Git.Checkpoint(ctx, dir, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: task.Branch, New: task.HeadSHA}}); err != nil {
+		t.Fatal(err)
+	}
+	source := gitx.Git{Dir: f.Source}
+	if err = os.WriteFile(filepath.Join(f.Source, "README.md"), []byte("main\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = source.Run(ctx, "", "add", "README.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = source.Run(ctx, "", "commit", "-m", "main conflict"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = source.Run(ctx, "", "push", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	target, err := f.P.Git.SHA(ctx, "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, h, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Objectives["objective"] = &model.Objective{ID: "objective", Planned: true}
+	s.Tasks[task.ID] = task
+	next, err := f.P.Git.StateCommit(ctx, h, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: h, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	c := engine.New(f.P)
+	if err = engine.AcquireForTest(c, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = engine.SyncTaskForTest(c, ctx, task.ID); err == nil {
+		t.Fatal("conflicting sync unexpectedly completed")
+	}
+	if got := c.Snapshot().Tasks[task.ID].SyncBase; got != target {
+		t.Fatalf("conflict did not persist sync target: %q", got)
+	}
+	local := gitx.Git{Dir: dir}
+	if _, err = local.Run(ctx, "", "update-ref", "refs/heads/"+task.Branch, base, task.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err = engine.CheckpointForTest(c, ctx, task.ID); err == nil {
+		t.Fatal("pending merge from a stale local head passed the durable-head guard")
+	}
+	if _, err = local.Run(ctx, "", "update-ref", "refs/heads/"+task.Branch, task.HeadSHA, base); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "README.md"), []byte("resolved\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	engine.RejectTaskPublishForTest(c, task.Branch)
+	if err = engine.CheckpointForTest(c, ctx, task.ID); err == nil {
+		t.Fatal("resolved merge unexpectedly published through rejected fence")
+	}
+	committed, err := (gitx.Git{Dir: dir}).SHA(ctx, "HEAD")
+	if err != nil || committed == task.HeadSHA || !f.P.Git.Ancestor(ctx, target, committed) {
+		t.Fatalf("rejected publication did not preserve local resolved merge: head=%q err=%v", committed, err)
+	}
+	if current := c.Snapshot().Tasks[task.ID]; current.HeadSHA != task.HeadSHA || current.SyncBase != target || current.BaseSHA != base {
+		t.Fatalf("failed fence advanced durable task state: %#v", current)
+	}
+	remoteHead, err := f.P.Git.RemoteHead(ctx, task.Branch)
+	if err != nil || remoteHead != task.HeadSHA {
+		t.Fatalf("failed fence advanced remote task ref: head=%q err=%v", remoteHead, err)
+	}
+	engine.RestorePublishForTest(c)
+	if err = os.WriteFile(filepath.Join(dir, "README.md"), []byte("new uncheckpointed edit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = engine.CheckpointForTest(c, ctx, task.ID); err == nil {
+		t.Fatal("dirty retry silently published the earlier local merge")
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "README.md"))
+	if err != nil || string(content) != "new uncheckpointed edit\n" {
+		t.Fatalf("failed retry lost writer edit: content=%q err=%v", content, err)
+	}
+	if current := c.Snapshot().Tasks[task.ID]; current.HeadSHA != task.HeadSHA || current.SyncBase != target {
+		t.Fatalf("dirty retry advanced durable task state: %#v", current)
+	}
+	if _, err = (gitx.Git{Dir: dir}).Run(ctx, "", "restore", "README.md"); err != nil {
+		t.Fatal(err)
+	}
+	if err = engine.CheckpointForTest(c, ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	resolved := c.Snapshot().Tasks[task.ID]
+	if resolved.BaseSHA != target || resolved.SyncBase != "" || resolved.HeadSHA == task.HeadSHA || !f.P.Git.Ancestor(ctx, target, resolved.HeadSHA) || resolved.Evidence != nil {
+		t.Fatalf("resolved sync state was not atomically published: %#v", resolved)
 	}
 }

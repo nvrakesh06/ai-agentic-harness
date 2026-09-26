@@ -89,3 +89,14 @@ func TestFreshBatchAdmissionRejectsStaleValidationPlan(t *testing.T) {
 		evidence = &model.Evidence{ValidationGate: plan.Gate, ValidationInput: plan.Input, Toolchain: plan.Toolchain, TestInputs: plan.TestInputs}
 	}
 }
+
+func TestBatchCandidateCountIsCheapAndRequiresTwoLowRiskReadyTasks(t *testing.T) {
+	snapshot := model.NewSnapshot("project")
+	snapshot.Tasks["alpha"] = &model.Task{ID: "alpha", State: model.MergeReady, Risk: "low", Evidence: &model.Evidence{}}
+	snapshot.Tasks["bravo"] = &model.Task{ID: "bravo", State: model.MergeReady, Risk: "low", Evidence: &model.Evidence{}}
+	snapshot.Tasks["high"] = &model.Task{ID: "high", State: model.MergeReady, Risk: "high", Evidence: &model.Evidence{}}
+	snapshot.Tasks["stale"] = &model.Task{ID: "stale", State: model.SyncRequired, Risk: "low", Evidence: &model.Evidence{}}
+	if got := batchCandidateCount(snapshot); got != 2 {
+		t.Fatalf("batch candidate count = %d, want 2", got)
+	}
+}

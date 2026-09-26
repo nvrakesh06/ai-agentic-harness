@@ -130,6 +130,7 @@ aih run --file requirement.md    # queues work and ensures a supervisor exists
 aih status                      # cached tasks, lease, local process status
 aih blockers
 aih answer TASK_ID "Use the existing API contract"
+aih task replan --file repair.json # one bounded, same-objective task replacement
 aih logs                        # recent durable events and diagnostic paths
 aih stop                        # stop workers, checkpoint, release ownership
 aih handoff                     # same orderly shutdown for a machine switch

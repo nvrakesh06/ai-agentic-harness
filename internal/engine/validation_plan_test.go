@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,15 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 )
+
+func TestToolchainIdentityPreservesMissingCheckProvenance(t *testing.T) {
+	check := config.Check{Name: "missing native tool", Command: []string{"aih-command-that-does-not-exist"}, Timeout: 30}
+	_, err := toolchainIdentity(t.TempDir(), []config.Check{check})
+	var unavailable *validationToolUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.check.Name != check.Name || strings.Join(unavailable.check.Command, "\x00") != strings.Join(check.Command, "\x00") {
+		t.Fatalf("missing tool lost configured check provenance: err=%v unavailable=%#v", err, unavailable)
+	}
+}
 
 func TestPostVerifyPlanUsesSourceToolchainAndControlGitInput(t *testing.T) {
 	ctx := context.Background()

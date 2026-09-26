@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/buildinfo"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
@@ -44,20 +45,33 @@ const (
 )
 
 type Controller struct {
-	P           *Project
-	mu          sync.Mutex
-	gitMu       sync.Mutex
-	s           *model.Snapshot
-	head, owner string
-	ctx         context.Context
-	cancel      context.CancelFunc
-	fatal       chan error
-	readers     chan struct{}
-	heavyChecks chan struct{}
-	lightChecks chan struct{}
-	jobs        sync.WaitGroup
-	now         func() time.Time
-	publish     func(context.Context, []gitx.Update) error
+	P                    *Project
+	mu                   sync.Mutex
+	gitMu                sync.Mutex
+	s                    *model.Snapshot
+	head, owner          string
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	fatal                chan error
+	readers              chan struct{}
+	heavyChecks          chan struct{}
+	lightChecks          chan struct{}
+	jobs                 sync.WaitGroup
+	now                  func() time.Time
+	publish              func(context.Context, []gitx.Update) error
+	commandEffective     func(context.Context) (config.Effective, error)
+	interruptedDurations map[string]int64
+}
+
+// Preserve observed invocation exits until orderly shutdown can publish them
+// with the released lease. This local buffer grants no publication authority.
+func (c *Controller) recordInterruptedDuration(id string, duration int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.interruptedDurations == nil {
+		c.interruptedDurations = map[string]int64{}
+	}
+	c.interruptedDurations[id] = duration
 }
 
 func New(p *Project) *Controller {
@@ -112,6 +126,17 @@ func leaseRenewalDue(lease model.Lease, now time.Time, duration time.Duration) b
 	return !lease.Expires.After(now.Add(duration / 2))
 }
 
+// leasePublicationContext fences mutating retries at either the currently
+// durable expiry or the proposed acquisition expiry. A failed acquisition is
+// never allowed to publish after the lease it proposes has already expired.
+func (c *Controller) leasePublicationContext(ctx context.Context, expires time.Time) (context.Context, context.CancelFunc, error) {
+	if !expires.After(c.nowUTC()) {
+		return nil, nil, ErrLease
+	}
+	publishCtx, cancel := context.WithDeadline(ctx, expires)
+	return publishCtx, cancel, nil
+}
+
 func (c *Controller) acquire(ctx context.Context) error {
 	s, h, e := c.P.Git.Load(ctx)
 	if e != nil {
@@ -127,15 +152,27 @@ func (c *Controller) acquire(ctx context.Context) error {
 	if s.Controller.Owner != "" && s.Controller.Expires.Add(5*time.Second).After(now) {
 		return fmt.Errorf("%w: held by %s until %s", ErrLease, s.Controller.Machine, s.Controller.Expires)
 	}
+	before := model.Clone(s)
+	interruptedAt := now
+	if s.Controller.Owner != "" && s.Controller.Expires.Before(interruptedAt) {
+		interruptedAt = s.Controller.Expires
+	}
+	model.FinalizeInterruptedRuns(s, interruptedAt, true)
 	s.Controller = model.Lease{Machine: c.P.Machine.ID, Owner: c.owner, Epoch: s.Controller.Epoch + 1, Heartbeat: now, Expires: now.Add(c.leaseDuration())}
 	s.Capacity = configuredCapacity(c.P.Config.Project, s.Capacity)
+	model.AccountTaskTransitions(before, s, now)
 	s.Revision++
 	next, e := c.P.Git.StateCommit(ctx, h, s)
 	if e != nil {
 		return e
 	}
 	c.traceStage("acquire: publishing controller lease")
-	if e = c.publishUpdates(ctx, []gitx.Update{{Branch: "aih-state", Old: h, New: next}}); e != nil {
+	publishCtx, publishCancel, contextErr := c.leasePublicationContext(ctx, s.Controller.Expires)
+	if contextErr != nil {
+		return contextErr
+	}
+	defer publishCancel()
+	if e = c.publishUpdates(publishCtx, []gitx.Update{{Branch: "aih-state", Old: h, New: next}}); e != nil {
 		return e
 	}
 	c.s = s
@@ -241,6 +278,7 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 		next.Controller.Heartbeat = now
 		next.Controller.Expires = now.Add(c.leaseDuration())
 	}
+	model.AccountTaskTransitions(c.s, next, now)
 	next.Revision = c.s.Revision + 1
 	c.traceStage("persist: committing state")
 	newHead, e := c.P.Git.StateCommit(ctx, c.head, next)
@@ -249,7 +287,12 @@ func (c *Controller) persist(ctx context.Context, fn func(*model.Snapshot) error
 	}
 	all := append([]gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}, updates...)
 	c.traceStage("persist: publishing state")
-	if e = c.publishUpdates(ctx, all); e != nil {
+	publishCtx, publishCancel, contextErr := c.leasePublicationContext(ctx, c.s.Controller.Expires)
+	if contextErr != nil {
+		return false, contextErr
+	}
+	defer publishCancel()
+	if e = c.publishUpdates(publishCtx, all); e != nil {
 		return false, e
 	}
 	for id, task := range next.Tasks {
@@ -285,7 +328,12 @@ func (c *Controller) renewLeaseLocked(ctx context.Context, now time.Time) (bool,
 		return false, e
 	}
 	c.traceStage("lease: publishing renewal")
-	if e = c.publishUpdates(ctx, []gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}); e != nil {
+	publishCtx, publishCancel, contextErr := c.leasePublicationContext(ctx, c.s.Controller.Expires)
+	if contextErr != nil {
+		return false, contextErr
+	}
+	defer publishCancel()
+	if e = c.publishUpdates(publishCtx, []gitx.Update{{Branch: "aih-state", Old: c.head, New: newHead}}); e != nil {
 		return false, e
 	}
 	c.s = next
@@ -446,6 +494,9 @@ func (c *Controller) Serve(parent context.Context) error {
 				delete(active, strings.TrimPrefix(id, "@merge:"))
 				merging = false
 			}
+			if id == "@batch" {
+				merging = false
+			}
 			if id == "@plan" {
 				planning = false
 			}
@@ -511,6 +562,26 @@ func (c *Controller) Serve(parent context.Context) error {
 				}
 			}
 			if !merging {
+				// A held post-merge task is the recovery boundary. Do not begin a
+				// new batch while it is unresolved.
+				if s.IntegrationBlocked == "" && batchCandidateCount(s) >= model.MinIntegrationBatchTasks {
+					batch, batchErr := c.reserveBatchIntegration()
+					if batchErr != nil {
+						ce = batchErr
+						break
+					}
+					if batch != nil {
+						merging = true
+						c.launch(func() { c.integrateBatch(batch.ID); done <- "@batch" })
+						continue
+					}
+				}
+				if held := s.Tasks[s.IntegrationBlocked]; held != nil && held.State == model.PostVerify {
+					merging = true
+					id := held.ID
+					c.launch(func() { c.integrate(id); done <- "@merge:" + id })
+					continue
+				}
 				for _, t := range model.Ordered(s) {
 					if hasActive(active, t.ID) {
 						continue
@@ -531,6 +602,7 @@ func (c *Controller) Serve(parent context.Context) error {
 	}
 	c.cancel()
 	c.jobs.Wait()
+	workersStoppedAt := c.nowUTC()
 	// Shutdown checkpoints only after all writers exited. If authority was lost,
 	// leave edits local and report them; never publish using a stale epoch.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -553,6 +625,14 @@ func (c *Controller) Serve(parent context.Context) error {
 		hbCancel()
 		<-hbDone
 		e = c.save(ctx, func(s *model.Snapshot) error {
+			model.FinalizeInterruptedRuns(s, workersStoppedAt, true)
+			for i := range s.Runs {
+				if duration, observed := c.interruptedDurations[s.Runs[i].ID]; observed && s.Runs[i].Outcome == "interrupted" {
+					s.Runs[i].DurationMS = duration
+					s.Runs[i].DurationRecorded = true
+					s.Runs[i].DurationEstimated = false
+				}
+			}
 			s.Controller.Owner = ""
 			s.Controller.Expires = time.Now().UTC()
 			s.Capacity.ActiveWriters = 0
@@ -590,7 +670,7 @@ func dependenciesComplete(s *model.Snapshot, t *model.Task) bool {
 		return false
 	}
 	for _, id := range t.Dependencies {
-		if s.Tasks[id] == nil || s.Tasks[id].State != model.Done {
+		if !model.DependencyDone(s, id) {
 			return false
 		}
 	}
@@ -663,6 +743,8 @@ func (c *Controller) commands() (bool, error) {
 			_ = c.P.DB.Ack(cmd.ID, e.Error())
 			continue
 		}
+		var answerEffective config.Effective
+		var answerEffectiveErr error
 		if cmd.Kind == "answer" {
 			task := s.Tasks[cmd.Target]
 			if task == nil {
@@ -683,6 +765,15 @@ func (c *Controller) commands() (bool, error) {
 			if e != nil {
 				_ = c.P.DB.Ack(cmd.ID, e.Error())
 				continue
+			}
+			if task != nil {
+				// Canonical resolution takes gitMu. Do it before persist takes mu:
+				// worktree preparation takes gitMu before reading the snapshot.
+				resolve := c.effective
+				if c.commandEffective != nil {
+					resolve = c.commandEffective
+				}
+				answerEffective, answerEffectiveErr = resolve(c.ctx)
 			}
 		}
 		if cmd.Kind == "assign-role" {
@@ -768,9 +859,8 @@ func (c *Controller) commands() (bool, error) {
 				// durable task checkpoint. Preserve prior guidance only when the
 				// answer proves that exact head; ordinary answers can change the task
 				// contract and must receive a fresh preflight.
-				effective, effectiveErr := c.effective(c.ctx)
-				preflightRoles, rolesErr := requiredPreflightRoles(effective, t)
-				if verificationOnly && effectiveErr == nil && rolesErr == nil && humanContinuationEvidence(t, cmd.Payload) && reusePreflightForHumanContinuation(t.Preflight, t, effective, preflightRoles) {
+				preflightRoles, rolesErr := requiredPreflightRoles(answerEffective, t)
+				if verificationOnly && answerEffectiveErr == nil && rolesErr == nil && humanContinuationEvidence(t, cmd.Payload) && reusePreflightForHumanContinuation(t.Preflight, t, answerEffective, preflightRoles) {
 					// Verification-only recovery normally resumes through SYNC_REQUIRED.
 					// The exact acknowledgement requests one bounded writer pass at the
 					// unchanged source checkpoint; native verification and review run

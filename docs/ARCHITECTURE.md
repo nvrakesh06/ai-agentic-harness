@@ -100,6 +100,15 @@ a repeated native failure at the same revision and environment after a no-change
 becomes a durable verification blocker instead of launching another equivalent writer.
 Code failures still use the normal bounded `FIX` route.
 
+A supervisor-native timeout, and a Windows npm diagnostic that explicitly reports
+`code EPERM`, `syscall unlink`, and a `node_modules` installation path, each receive
+one exact-head retry without consuming an implementer or Advisor budget. A second
+transient failure for the same native environment, head, and complete native-check plan becomes a
+verification-only `BLOCKED_HUMAN` checkpoint with a sanitized diagnostic. The retry
+does not synchronize or rebase its already-checked head; changing that head, native
+environment, or canonical check plan starts a new bounded allowance. Cancellation and
+ordinary compiler or assertion failures never use this lane.
+
 Codex uses native read-only/workspace-write permission modes and structured result
 files; canonical instructions are supplied explicitly. Claude uses safe mode and
 an explicit read-only or edit tool list, without model shell execution. Native
@@ -120,7 +129,9 @@ their launching terminal.
 3. Checkpoint; run native checks and independent required roles. Record exact base,
    head, configuration hash, rule hash and evidence.
    Successful native evidence includes bounded/redacted stdout, check/executable
-   identity and exit status. Concurrent reviewers never depend on peer approvals.
+   identity and exit status. Reviewer, security, and designer roles run concurrently;
+   built-in QA then receives their completed exact-head artifacts and remains an
+   independent acceptance gate.
    A supervisor-evidence request triggers one native refresh and role-only retry;
    concrete blocking findings still enter FIX and true decisions still block human.
 4. Reserve the merge train. If main, policy, rules or head changed, repeat checks

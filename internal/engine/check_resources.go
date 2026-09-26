@@ -54,12 +54,22 @@ func (c *Controller) checkPermit(ctx context.Context, taskID string, check confi
 		clear()
 		return nil, fmt.Errorf("invalid machine heavy-check capacity %d", slots)
 	}
-	releaseMachine, err := acquireMachineCheck(ctx, c.P.Home, slots)
+	// Announce priority demand before waiting on the machine-wide permit. A
+	// manual release gate observes this live owned lock and cooperatively yields.
+	clearWaiter, err := platform.RegisterPriorityWaiter(ctx, filepath.Join(c.P.Home, "verification"), "heavy")
 	if err != nil {
 		releaseLocal()
 		clear()
 		return nil, err
 	}
+	releaseMachine, err := acquireMachineCheck(ctx, c.P.Home, slots)
+	if err != nil {
+		clearWaiter()
+		releaseLocal()
+		clear()
+		return nil, err
+	}
+	clearWaiter()
 	if err = c.verificationState(ctx, taskID, check.Name, class, "running"); err != nil {
 		releaseMachine()
 		releaseLocal()

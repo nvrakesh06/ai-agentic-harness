@@ -65,6 +65,61 @@ project directory somewhere safe. Recreate through attach rather than copying a
 SQLite database from another machine. Never delete the authoritative `aih-state`
 branch or manually merge it into main.
 
+## Explicit legacy scope reauthorization
+
+Schema 9 intentionally blocks a started legacy task when it has no provable
+immutable assignment. Do not edit SQLite, infer an old scope from `areas` or a
+diff, or weaken that gate. An operator may instead authorize a **new** bounded
+contract with `aih scope recover --file recovery.json`. This command does not
+start providers or schedule work.
+
+First stop the supervisor, fetch state, and inspect the task checkpoint and
+retained worktree. Create a schema-1 JSON manifest from that exact remote state:
+
+```json
+{
+  "schema": 1,
+  "command_id": "scope-reauth-20260926",
+  "expected_state_ref": "<aih-state commit>",
+  "policy_hash": "<current canonical policy hash>",
+  "tasks": [{
+    "id": "legacy-task",
+    "base_sha": "<durable task base>",
+    "head_sha": "<durable task head>",
+    "contract_hash": "<existing acceptance/scope contract hash>",
+    "areas": ["internal/example"],
+    "additional_dependencies": ["predecessor-task"],
+    "reason": "Operator explicitly authorizes this new bounded ownership contract."
+  }]
+}
+```
+
+Run `aih scope recover --file recovery.json --preview` first; it performs no
+lease acquisition or publication. If its proof is accepted, run
+`aih scope recover --file recovery.json`, then inspect `aih status` and use
+`aih resume` only when the ordinary scheduler should continue. Recovery checks
+the exact state/policy, checkpoint ref,
+base-to-head and dirty-worktree paths, canonicalizes the declared areas at the
+current canonical base, preserves existing dependencies, rejects conflicts with
+unfinished owners unless a predecessor dependency gates them, and rejects cycles.
+It refuses a live owner, active work, merged work, or an already known immutable
+assignment. A successful command records the authorization in the task's typed
+decision history, invalidates preflight/review/visual approval evidence, and
+keeps findings, budgets, summaries, checkpoints, and retry guards. Blocked tasks
+remain blocked; other unmerged recovered tasks return to `READY` and must complete
+fresh preflight and verification. Reuse the same command ID only for an
+idempotent retry.
+
+A manifest may instead declare both `base_sha` and `head_sha` as empty for a
+strictly proven never-started `PLANNED` or `READY` task. Both fields must be
+empty together. AIH then requires no durable lifecycle or history, no known
+assignment, no remote task branch, and no retained task worktree. A legacy
+all-`unknown` assignment inferred by schema migration is allowed because it
+does not claim a historical boundary. AIH still
+classifies the new areas at the canonical base and applies the same ownership,
+dependency, and cycle checks. This authorizes a new immutable contract only;
+it does not restore or infer a historical checkpoint.
+
 ## Network or permission failures
 
 Git publications compare explicit expected ref revisions. A mismatch or uncertain
@@ -100,6 +155,29 @@ the repair merges. This keeps an already-merged PR's history intact rather than
 trying to reuse it as an open PR. Rewritten main history is rejected.
 
 ## Human decisions
+
+## Bounded task replacement
+
+`aih task replan --file repair.json` is a one-shot supervisor operation for an
+idle, unmerged group of tasks in one objective. The versioned manifest pins the
+exact current `aih-state` ref, canonical policy, source checkpoints, and one
+replacement contract. It can include a task with an empty checkpoint only when
+the remote snapshot proves that task was never started; such a task has no source
+patch and its declared branch must be absent remotely.
+It creates a new successor branch and records each original as `SUPERSEDED`; an
+original never becomes `DONE`, and its dependants wait for the successor's normal
+verification and integration. Phase one deliberately rejects cross-objective
+groups. Overlapping unfinished ownership remains rejected unless the prospective
+dependency graph proves the tasks are serialized in either direction; a dependency
+on an original resolves through its `SUPERSEDED` successor. Unknown started
+ownership and every concurrent overlap fail closed. A resolved operator candidate head is permitted only when it descends from
+canonical main, contains every declared source checkpoint, and validates entirely
+within the replacement's immutable areas. It never waives native checks or review.
+Inherited dependencies inside the selected group collapse into the successor while
+external predecessors remain required; an explicit replacement dependency may not
+name an original. Known immutable assignments transfer into the successor scope.
+An unstarted legacy task without a classified assignment contributes no mutable
+scope prose: the bounded replacement areas are authoritative.
 
 `aih answer TASK_ID "decision"` (or a task's issue number) records the answer remotely
 before rescheduling. Planning blockers use the objective ID shown by status.

@@ -527,7 +527,7 @@ func selectPreflights(s *model.Snapshot, active map[string]bool, guidedActive ma
 		}
 		waiting := false
 		for _, dep := range t.Dependencies {
-			if s.Tasks[dep] == nil || s.Tasks[dep].State != model.Done {
+			if !model.DependencyDone(s, dep) {
 				waiting = true
 				break
 			}
@@ -657,6 +657,17 @@ func (c *Controller) preflight(id string) {
 			return
 		}
 		if roleErr != nil {
+			if provider.IsAuthenticationFailure(roleErr) {
+				c.providerAuthenticationBlock(id, r.Name+" preflight", current.State)
+				return
+			}
+			var deadline *readOnlyDeadlineError
+			if errors.As(roleErr, &deadline) {
+				if !deadline.Retry {
+					c.readOnlyDeadlineBlock(id, deadline, model.Ready)
+				}
+				return
+			}
 			c.retry(id, "implementation", roleErr.Error())
 			return
 		}
@@ -729,7 +740,7 @@ func (c *Controller) admitWriter(id string, active map[string]bool) (bool, error
 		}
 	}
 	for _, dep := range t.Dependencies {
-		if s.Tasks[dep] == nil || s.Tasks[dep].State != model.Done {
+		if !model.DependencyDone(s, dep) {
 			return false, nil
 		}
 	}

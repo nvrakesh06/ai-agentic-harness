@@ -27,6 +27,29 @@ type validationPlan struct {
 	Checks                                              []config.Check
 }
 
+// validationToolUnavailableError preserves the configured native-check
+// identity when plan construction cannot resolve its executable. The caller
+// routes it through the same supervisor-owned capability recovery as a check
+// that fails to start, rather than spending a source FIX budget.
+type validationToolUnavailableError struct {
+	check config.Check
+	err   error
+}
+
+func (e *validationToolUnavailableError) Error() string {
+	if e == nil || e.err == nil {
+		return "verification tool is unavailable"
+	}
+	return e.err.Error()
+}
+
+func (e *validationToolUnavailableError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
 func fullValidationPlan(ctx context.Context, e config.Effective, dir, head, reason string) (validationPlan, error) {
 	return fullValidationPlanWithGitDir(ctx, e, dir, dir, head, reason)
 }
@@ -180,7 +203,7 @@ func toolchainIdentity(dir string, checks []config.Check) (string, error) {
 			var err error
 			path, err = exec.LookPath(path)
 			if err != nil {
-				return "", fmt.Errorf("resolve verification tool %q: %w", check.Command[0], err)
+				return "", &validationToolUnavailableError{check: check, err: fmt.Errorf("resolve verification tool %q: %w", check.Command[0], err)}
 			}
 		}
 		file, err := os.Open(path)

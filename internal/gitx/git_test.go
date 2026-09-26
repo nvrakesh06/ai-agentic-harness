@@ -188,11 +188,17 @@ func TestConflictRecoveryAndCheckpointMarkers(t *testing.T) {
 	if e = g.PrepareMerge(ctx, dir, base); e != nil {
 		t.Fatal(e)
 	}
+	if e = g.ValidatePendingMergeScope(ctx, dir, base, []gitx.Area{{Pattern: "README.md", Kind: gitx.AreaExplicitFile}}); e == nil {
+		t.Fatal("unresolved merge passed pending scope validation")
+	}
 	if _, e = g.Checkpoint(ctx, dir, "conflict"); e == nil {
 		t.Fatal("unresolved markers checkpointed")
 	}
 	if e = os.WriteFile(filepath.Join(dir, "README.md"), []byte("resolved task and main\n"), 0600); e != nil {
 		t.Fatal(e)
+	}
+	if e = g.ValidatePendingMergeScope(ctx, dir, base, []gitx.Area{{Pattern: "README.md", Kind: gitx.AreaExplicitFile}}); e != nil {
+		t.Fatal("resolved merge pending scope validation:", e)
 	}
 	head, e := g.Checkpoint(ctx, dir, "conflict")
 	if e != nil {
@@ -201,6 +207,9 @@ func TestConflictRecoveryAndCheckpointMarkers(t *testing.T) {
 	if !g.Ancestor(ctx, base, head) {
 		t.Fatal("resolved checkpoint lost main ancestry")
 	}
+	if e = g.ValidateCommitScope(ctx, base, head, []gitx.Area{{Pattern: "README.md", Kind: gitx.AreaExplicitFile}}); e != nil {
+		t.Fatal("resolved checkpoint scope:", e)
+	}
 	if e = g.Rebase(ctx, dir, base); e != nil {
 		t.Fatal("resolved merge must not replay old checkpoints:", e)
 	}
@@ -208,6 +217,106 @@ func TestConflictRecoveryAndCheckpointMarkers(t *testing.T) {
 		t.Fatalf("rebase changed resolved merge head: got %q, want %q, error %v", got, head, e)
 	}
 }
+
+func TestPrepareTaskMergePreservesCheckpointHistory(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	g := f.P.Git
+	taskDir := filepath.Join(f.P.Dir, "worktrees", "history")
+	if err = g.Worktree(ctx, taskDir, "aih/history", "refs/remotes/origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(taskDir, "task.txt"), []byte("checkpoint one\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c1, err := g.Checkpoint(ctx, taskDir, "history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(taskDir, "task.txt"), []byte("checkpoint two\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := g.Checkpoint(ctx, taskDir, "history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sideDir := filepath.Join(f.P.Dir, "worktrees", "history-side")
+	if err = g.Worktree(ctx, sideDir, "aih/history-side", c1); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(sideDir, "internal.txt"), []byte("internal merge\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	side, err := g.Checkpoint(ctx, sideDir, "history-side")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = (gitx.Git{Dir: taskDir}).Run(ctx, "", "merge", "--no-ff", side); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(taskDir, "task.txt"), []byte("checkpoint three\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c3, err := g.Checkpoint(ctx, taskDir, "history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := c3
+
+	source := gitx.Git{Dir: f.Source}
+	for _, name := range []string{"main-one.txt", "main-two.txt"} {
+		if err = os.WriteFile(filepath.Join(f.Source, name), []byte(name+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = source.Run(ctx, "", "add", name); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = source.Run(ctx, "", "commit", "-m", "advance "+name); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = source.Run(ctx, "", "push", "origin", "main"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = g.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	target, err := g.SHA(ctx, "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflict, err := g.PrepareTaskMerge(ctx, taskDir, before, target)
+	if err != nil || conflict {
+		t.Fatalf("prepare merge = conflict %t, error %v", conflict, err)
+	}
+	head, err := g.Checkpoint(ctx, taskDir, "history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parents, err := (gitx.Git{Dir: taskDir}).Run(ctx, "", "show", "-s", "--format=%P", head)
+	if err != nil || strings.TrimSpace(parents) != before+" "+target {
+		t.Fatalf("merge parents = %q, error %v", parents, err)
+	}
+	if !g.Ancestor(ctx, c1, head) || !g.Ancestor(ctx, c2, head) || !g.Ancestor(ctx, side, head) || !g.Ancestor(ctx, c3, head) {
+		t.Fatal("sync dropped checkpoint or internal merge history")
+	}
+	if err = g.ValidateCommitScope(ctx, target, head, []gitx.Area{{Pattern: "task.txt", Kind: gitx.AreaExplicitFile}, {Pattern: "internal.txt", Kind: gitx.AreaExplicitFile}}); err != nil {
+		t.Fatalf("task-only sync delta rejected: %v", err)
+	}
+	diff, paths, err := g.Diff(ctx, target, head)
+	if err != nil || diff == "" || strings.Join(paths, ",") != "internal.txt,task.txt" {
+		t.Fatalf("sync diff = %q paths=%v error=%v", diff, paths, err)
+	}
+	content, err := os.ReadFile(filepath.Join(taskDir, "task.txt"))
+	if err != nil || string(content) != "checkpoint three\n" {
+		t.Fatalf("checkpoint content replayed or changed: %q, %v", content, err)
+	}
+}
+
 func TestWorktreeCheckpointAndRebase(t *testing.T) {
 	ctx := context.Background()
 	f, e := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})

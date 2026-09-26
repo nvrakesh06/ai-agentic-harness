@@ -56,6 +56,7 @@ func New() *cobra.Command {
 	root.AddCommand(&cobra.Command{Use: "version", Args: cobra.NoArgs, Run: func(cmd *cobra.Command, _ []string) {
 		fmt.Fprintf(cmd.OutOrStdout(), "AIH %s · state %d · roles %d · rules %d\n", model.Version, model.StateSchema, model.RoleSchema, model.RulesVersion)
 	}})
+	root.AddCommand(throughputCommand(o))
 	root.AddCommand(&cobra.Command{Use: "install", Short: "Initialize this machine's AIH workspace", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		_, h, e := o.paths()
 		if e != nil {
@@ -236,6 +237,79 @@ func New() *cobra.Command {
 	guide.Flags().BoolVar(&operatorGuidance, "operator", false, "operator guidance scoped to the target's current head and policy")
 	guide.Flags().StringVar(&guidanceFile, "file", "", "UTF-8 correction text file (maximum 1600 bytes)")
 	root.AddCommand(guide)
+	var recoveryFile string
+	var recoveryPreview bool
+	scope := &cobra.Command{Use: "scope", Short: "Inspect or repair durable task ownership"}
+	recoverScope := &cobra.Command{Use: "recover", Short: "Apply an explicit legacy task-scope reauthorization", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if recoveryFile == "" {
+			return errors.New("scope recover requires --file")
+		}
+		input, err := os.Open(recoveryFile)
+		if err != nil {
+			return err
+		}
+		defer input.Close()
+		manifest, err := engine.DecodeScopeRecoveryManifest(input)
+		if err != nil {
+			return err
+		}
+		p, err := o.open(cmd.Context(), false)
+		if err != nil {
+			return err
+		}
+		defer p.DB.Close()
+		if recoveryPreview {
+			if err = engine.PreviewScopeRecovery(cmd.Context(), p, manifest); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Scope recovery manifest %s passed read-only validation; no lease or remote state was published.\n", manifest.CommandID)
+			return nil
+		}
+		if err = engine.RecoverScope(cmd.Context(), p, manifest); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Applied explicit scope recovery command %s. Re-run aih resume when ready; fresh preflight and verification remain required.\n", manifest.CommandID)
+		return nil
+	}}
+	recoverScope.Flags().StringVar(&recoveryFile, "file", "", "schema-1 JSON recovery manifest")
+	recoverScope.Flags().BoolVar(&recoveryPreview, "preview", false, "validate the manifest without taking a lease or publishing state")
+	scope.AddCommand(recoverScope)
+	root.AddCommand(scope)
+	var replanFile string
+	task := &cobra.Command{Use: "task", Short: "Task lifecycle operations"}
+	task.AddCommand(&cobra.Command{Use: "replan", Short: "Atomically supersede bounded idle tasks with one verified successor", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if replanFile == "" {
+			return errors.New("task replan requires --file")
+		}
+		input, err := os.Open(replanFile)
+		if err != nil {
+			return err
+		}
+		defer input.Close()
+		contents, err := io.ReadAll(io.LimitReader(input, 32*1024+1))
+		if err != nil {
+			return err
+		}
+		if len(contents) == 0 || len(contents) > 32*1024 {
+			return errors.New("replan file must contain 1..32768 bytes")
+		}
+		request, err := engine.DecodeReplanRequest(contents)
+		if err != nil {
+			return fmt.Errorf("decode replan request: %w", err)
+		}
+		p, err := o.open(cmd.Context(), true)
+		if err != nil {
+			return err
+		}
+		defer p.DB.Close()
+		if err = engine.Replan(cmd.Context(), p, request); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Applied bounded replan %s; successor %s is ready for ordinary supervisor preflight and verification.\n", request.CommandID, request.Replacement.ID)
+		return nil
+	}})
+	task.Commands()[0].Flags().StringVar(&replanFile, "file", "", "versioned bounded replan JSON")
+	root.AddCommand(task)
 	for _, name := range []string{"stop", "handoff"} {
 		name := name
 		root.AddCommand(&cobra.Command{Use: name, Short: "Stop scheduling, checkpoint workers, and release the lease", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -645,7 +719,7 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		}
 		if t.State == model.Ready {
 			for _, d := range t.Dependencies {
-				if s.Tasks[d] != nil && s.Tasks[d].State != model.Done {
+				if !model.DependencyDone(s, d) {
 					status = "WAITING_DEPENDENCIES"
 				}
 			}
@@ -747,7 +821,7 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		}
 		_ = deadlineRows.Close()
 	}
-	reviewRows, reviewErr := p.DB.DB.Query("SELECT at,task,role,kind,message FROM events WHERE kind IN ('review_evidence_refresh_requested','review_evidence_refresh_completed','review_evidence_refresh_failed','review_finding_fix','human_decision_required','visual_capture_queued','visual_capture_running','visual_capture_completed','visual_capture_failed','visual_capture_unavailable') ORDER BY id DESC LIMIT 5")
+	reviewRows, reviewErr := p.DB.DB.Query("SELECT at,task,role,kind,message FROM events WHERE kind IN ('review_evidence_refresh_requested','review_evidence_refresh_completed','review_evidence_refresh_failed','review_finding_fix','human_decision_required','visual_capture_queued','visual_capture_running','visual_capture_completed','visual_capture_reattested','visual_capture_failed','visual_capture_unavailable') ORDER BY id DESC LIMIT 5")
 	if reviewErr == nil {
 		for reviewRows.Next() {
 			var at, task, role, kind, message string
