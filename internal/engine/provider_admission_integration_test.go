@@ -54,21 +54,35 @@ func waitProviderAdmissionHold(t *testing.T, ctx context.Context, f *demo.Fixtur
 }
 
 func TestProviderAdmissionHoldSuppressesWriterAndRestartWithoutBudgets(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	setupCtx, cancelSetup := context.WithTimeout(context.Background(), 45*time.Second)
+	f, err := demo.New(setupCtx, t.TempDir(), []string{"git", "diff", "--exit-code"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.P.DB.Close()
-	configureSingleWriterProviderAdmissionFixture(t, ctx, f)
+	configureSingleWriterProviderAdmissionFixture(t, setupCtx, f)
 	f.Provider.RequestRejections = map[string]int{"first": 1}
-	seedReadyTask(t, ctx, f, "first")
-	seedReadyTask(t, ctx, f, "second")
+	seedReadyTask(t, setupCtx, f, "first")
+	seedReadyTask(t, setupCtx, f, "second")
+	cancelSetup()
 
+	firstCtx, cancelFirst := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancelFirst()
 	firstDone := make(chan error, 1)
-	go func() { firstDone <- engine.New(f.P).Serve(ctx) }()
-	s := waitProviderAdmissionHold(t, ctx, f)
+	go func() { firstDone <- engine.New(f.P).Serve(firstCtx) }()
+	firstStopped := false
+	defer func() {
+		if firstStopped {
+			return
+		}
+		_ = f.P.DB.Submit(storeCommand("handoff"))
+		select {
+		case <-firstDone:
+		case <-time.After(10 * time.Second):
+			t.Error("first provider-admission fixture supervisor did not drain")
+		}
+	}()
+	s := waitProviderAdmissionHold(t, firstCtx, f)
 	first := s.Tasks["first"]
 	if first == nil || first.State != model.Ready || first.Attempts != 0 || len(first.FixCycles) != 0 || first.AdvisorUsed {
 		t.Fatalf("initial request rejection did not preserve pre-provider checkpoint: %+v", first)
@@ -89,12 +103,32 @@ func TestProviderAdmissionHoldSuppressesWriterAndRestartWithoutBudgets(t *testin
 	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
 		t.Fatal(err)
 	}
-	if err = <-firstDone; err != nil {
-		t.Fatal(err)
+	select {
+	case err = <-firstDone:
+		firstStopped = true
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-firstCtx.Done():
+		t.Fatalf("first provider-admission fixture phase did not hand off: %v", firstCtx.Err())
 	}
 
+	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancelSecond()
 	secondDone := make(chan error, 1)
-	go func() { secondDone <- engine.New(f.P).Serve(ctx) }()
+	go func() { secondDone <- engine.New(f.P).Serve(secondCtx) }()
+	secondStopped := false
+	defer func() {
+		if secondStopped {
+			return
+		}
+		_ = f.P.DB.Submit(storeCommand("handoff"))
+		select {
+		case <-secondDone:
+		case <-time.After(10 * time.Second):
+			t.Error("restart provider-admission fixture supervisor did not drain")
+		}
+	}()
 	time.Sleep(1200 * time.Millisecond)
 	if got := f.Provider.ProviderCallCount("first"); got != 1 {
 		t.Fatalf("restart repeated rejected provider call %d times", got)
@@ -105,8 +139,14 @@ func TestProviderAdmissionHoldSuppressesWriterAndRestartWithoutBudgets(t *testin
 	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
 		t.Fatal(err)
 	}
-	if err = <-secondDone; err != nil {
-		t.Fatal(err)
+	select {
+	case err = <-secondDone:
+		secondStopped = true
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-secondCtx.Done():
+		t.Fatalf("restart provider-admission fixture phase did not hand off: %v", secondCtx.Err())
 	}
 	if s, _, loadErr := f.P.DB.Load(); loadErr != nil || len(s.ProviderAdmissionHolds) != 1 {
 		t.Fatalf("restart lost portable hold: holds=%#v err=%v", s.ProviderAdmissionHolds, loadErr)
