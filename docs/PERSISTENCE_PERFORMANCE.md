@@ -159,3 +159,32 @@ phase timings; whole-operation overhead still needs deployed measurement.
 History compaction, scheduler copy changes and publication coalescing remain
 proposals. Production phase measurements and useful delivery are the next evidence
 boundary, rather than a claim that the measured decode gain fixes all throughput.
+
+## Separate candidate: capacity-only scheduler copy
+
+`persistCapacity` needs the fresh capacity record for its no-op comparison, but
+previously obtained it by cloning the complete snapshot. A separate candidate
+(`c7369c2`, PR143) uses the same controller mutex and a capacity-only JSON round
+trip. It retains detachment, nil/empty normalization and time encoding. Native
+verification ownership is still reread inside the ordinary mutation; scheduling,
+lease timing, transition logic and publication boundaries remain unchanged.
+
+Pure tests cover full-clone equivalence, mutable-slice isolation and concurrent
+paired-value consistency. Scoped review approved the source and these tests.
+The race detector was unavailable with the host's CGO-disabled toolchain; the
+concurrency fixture is not a claim of race-detector coverage.
+
+Synthetic benchmarks on exact `c7369c2`, `GOMAXPROCS=1`, `-benchtime=100x`:
+
+| Snapshot fixture | Full snapshot copy: time / allocated bytes | Capacity-only copy: time / allocated bytes |
+| --- | ---: | ---: |
+| 631 KiB | 8.17 ms / 1,498,730 | 15.67 microseconds / 1,565 |
+| 2,521 KiB | 26.94 ms / 6,137,000 | 10.17 microseconds / 1,554 |
+
+These are synthetic local operation measurements taken while the separate
+restoration release ran. Their strongest evidence is that this read no longer
+allocates copies of unrelated task/run history. Host/GC variance remains, and
+these numbers do not establish an equivalent whole-tick or delivery speedup.
+Ignored benchmark logs retain source, command, host and fixture-size metadata.
+Lifecycle checks and an integrated release are pending. This candidate is not
+part of the frozen PR142 release and is not deployed.
