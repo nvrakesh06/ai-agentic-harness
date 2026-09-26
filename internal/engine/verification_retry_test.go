@@ -371,6 +371,45 @@ func runUntilTaskState(t *testing.T, ctx context.Context, f *demo.Fixture, id st
 	}
 }
 
+func retryFixtureStatus(f *demo.Fixture, id string) string {
+	stage := "unavailable"
+	stageAt := ""
+	if f != nil && f.P != nil && f.P.DB != nil {
+		stage = f.P.DB.Get(engine.LocalSupervisorStageKey)
+		stageAt = f.P.DB.Get(engine.LocalSupervisorStageAtKey)
+	}
+	type status struct {
+		Stage          string
+		StageAt        string
+		State          model.State
+		Attempts       int
+		Classification string
+		NativeOnly     bool
+		BlockerOrigin  string
+		Resume         model.State
+	}
+	result := status{Stage: stage, StageAt: stageAt}
+	if f == nil || f.P == nil || f.P.DB == nil {
+		return fmt.Sprintf("status=%+v", result)
+	}
+	snapshot, _, err := f.P.DB.Load()
+	if err != nil || snapshot.Tasks[id] == nil {
+		return fmt.Sprintf("status=%+v", result)
+	}
+	task := snapshot.Tasks[id]
+	result.State = task.State
+	if task.Verification != nil {
+		result.Attempts = task.Verification.Attempts
+		result.Classification = task.Verification.Classification
+		result.NativeOnly = task.Verification.NativeOnly
+	}
+	if task.Blocker != nil {
+		result.BlockerOrigin = task.Blocker.Origin
+		result.Resume = task.Blocker.Resume
+	}
+	return fmt.Sprintf("status=%+v", result)
+}
+
 func storeCommand(kind string) store.Command {
 	return store.Command{ID: model.ID(), Kind: kind}
 }
