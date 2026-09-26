@@ -377,6 +377,12 @@ func assertSameReplanBusinessState(t *testing.T, before, after *model.Snapshot) 
 	left, right := model.Clone(before), model.Clone(after)
 	left.Controller, right.Controller = model.Lease{}, model.Lease{}
 	left.Revision, right.Revision = 0, 0
+	// Lease boundaries accrue timing without changing replacement business state.
+	for _, snapshot := range []*model.Snapshot{left, right} {
+		for _, task := range snapshot.Tasks {
+			task.Timing = nil
+		}
+	}
 	if !reflect.DeepEqual(left, right) {
 		t.Fatalf("retry changed replan business state:\nbefore=%#v\nafter=%#v", left, right)
 	}

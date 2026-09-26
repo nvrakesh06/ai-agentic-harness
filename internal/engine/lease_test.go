@@ -52,6 +52,7 @@ func TestLeasePulsesCoalesceRemoteWritesAndFenceTakeover(t *testing.T) {
 	project.LeaseSeconds = 60
 	a := leaseTestProject(t, ctx, root, remote, "machine-a", project)
 	initial := model.NewSnapshot(project.ID)
+	initial.Tasks["timed"] = &model.Task{ID: "timed", State: model.Ready, Areas: []string{"README.md"}, AssignedAreas: []string{"README.md"}, AssignedAreaKinds: map[string]string{"README.md": model.AreaFile}}
 	initial.Revision = 1
 	head, err := a.Git.StateCommit(ctx, "", initial)
 	if err != nil {
@@ -102,18 +103,25 @@ func TestLeasePulsesCoalesceRemoteWritesAndFenceTakeover(t *testing.T) {
 	// window, so the scheduled heartbeat at the old boundary is coalesced.
 	if err = controllerA.save(ctx, func(s *model.Snapshot) error {
 		s.Applied["meaningful-transition"] = true
+		s.Tasks["timed"].State = model.Running
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	afterTransition := assertRevision(3)
+	if clock := afterTransition.Tasks["timed"].Timing; clock == nil || clock.StateMS[model.Ready] != 20000 || clock.State != model.Running {
+		t.Fatalf("direct state assignment was not timed: %#v", clock)
+	}
 	if afterTransition.Controller.Expires != now.Add(time.Minute) {
 		t.Fatalf("meaningful save did not refresh lease: %#v", afterTransition.Controller)
 	}
 	if err = controllerA.save(ctx, func(*model.Snapshot) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	assertRevision(3) // semantic no-op did not create a commit
+	noOp := assertRevision(3) // semantic no-op did not create a commit
+	if !noOp.Tasks["timed"].Timing.Since.Equal(afterTransition.Tasks["timed"].Timing.Since) {
+		t.Fatal("no-op persistence advanced task timing")
+	}
 
 	for _, elapsed := range []time.Duration{10 * time.Second, 20 * time.Second} {
 		now = now.Add(10 * time.Second)

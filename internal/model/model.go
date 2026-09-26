@@ -18,7 +18,7 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 10
+const StateSchema = 11
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
@@ -184,6 +184,7 @@ type Task struct {
 	ReviewProvenance  map[string]ReviewProvenance `json:"review_provenance,omitempty"`
 	VisualRequired    *VisualRequirement          `json:"visual_required,omitempty"`
 	Updated           time.Time                   `json:"updated"`
+	Timing            *TaskTiming                 `json:"timing,omitempty"`
 }
 
 // VisualRequirement is a durable exact-head gate created when a preflight
@@ -566,18 +567,21 @@ type Lease struct {
 	Expires   time.Time `json:"expires_at"`
 }
 type Run struct {
-	ID             string    `json:"id"`
-	Task           string    `json:"task"`
-	Role           string    `json:"role"`
-	Provider       string    `json:"provider"`
-	Capability     string    `json:"capability"`
-	EffectiveModel string    `json:"effective_model"`
-	Version        string    `json:"version"`
-	RulesHash      string    `json:"rules_hash"`
-	Started        time.Time `json:"started"`
-	DurationMS     int64     `json:"duration_ms"`
-	Outcome        string    `json:"outcome"`
-	Epoch          uint64    `json:"epoch"`
+	ID                string      `json:"id"`
+	Task              string      `json:"task"`
+	Role              string      `json:"role"`
+	Provider          string      `json:"provider"`
+	Capability        string      `json:"capability"`
+	EffectiveModel    string      `json:"effective_model"`
+	Version           string      `json:"version"`
+	RulesHash         string      `json:"rules_hash"`
+	Started           time.Time   `json:"started"`
+	DurationMS        int64       `json:"duration_ms"`
+	Outcome           string      `json:"outcome"`
+	Epoch             uint64      `json:"epoch"`
+	Context           *RunContext `json:"context,omitempty"`
+	DurationRecorded  bool        `json:"duration_recorded,omitempty"`
+	DurationEstimated bool        `json:"duration_estimated,omitempty"`
 }
 type CapacityTransition struct {
 	At            time.Time `json:"at"`
@@ -851,6 +855,18 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		}
 	}
 	if migrated {
+		if s.Schema <= 10 {
+			// Earlier records have no transition clock or pinned run context.
+			// Never reconstruct them from Updated or the current task revision.
+			for _, task := range s.Tasks {
+				if task != nil {
+					task.Timing = nil
+				}
+			}
+			for i := range s.Runs {
+				s.Runs[i].Context = nil
+			}
+		}
 		s.Schema = StateSchema
 	}
 	if !regexp.MustCompile(`^[a-zA-Z0-9_-]{8,80}$`).MatchString(s.Project) {
@@ -892,6 +908,9 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			}
 		}
 		if err := validateAssignedAreas(t); err != nil {
+			return nil, false, err
+		}
+		if err := validateTaskTiming(t); err != nil {
 			return nil, false, err
 		}
 		if t.State == Blocked && (t.Blocker == nil || t.Blocker.Question == "") {
@@ -1063,6 +1082,9 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		if err := ValidateIntegrationBatch(&s, s.IntegrationBatch); err != nil {
 			return nil, false, err
 		}
+	}
+	if err := validateRunMetrics(s.Runs); err != nil {
+		return nil, false, err
 	}
 	return &s, migrated, nil
 }
