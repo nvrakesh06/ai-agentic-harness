@@ -121,6 +121,8 @@ func TestValidateNewPlanAreasAtRefRejectsPlannerProseButPreservesLiteralNames(t 
 		{"src/studio/Planner.tsx (new)"},
 		{"src/demo-capture/adapter.ts (comments only)"},
 		{"tests/studio-project-service.test.ts and focused direction-service tests"},
+		{"docs/reference/ and accompanying notes"},
+		{"docs/why and docs/how.md"},
 		{"src/Planner.tsx (new), tests/studio-project-service.test.ts"},
 	} {
 		if err := g.ValidateNewPlanAreasAtRef(ctx, "HEAD", areas); err == nil {
@@ -131,6 +133,8 @@ func TestValidateNewPlanAreasAtRefRejectsPlannerProseButPreservesLiteralNames(t 
 		{"README.md"},
 		{"future feature (draft).md"},
 		{"future-file.ts"},
+		{"docs/why and how.md"},
+		{"src/rock and roll.ts"},
 		{"literal (new)"},
 		{"known and literal.md"},
 	} {

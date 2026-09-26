@@ -160,7 +160,36 @@ func planAreaAnnotation(raw string) bool {
 
 func planAreaConjunction(raw string) bool {
 	lower := strings.ToLower(raw)
-	return strings.Contains(lower, " and ") || strings.Contains(lower, " or ")
+	for _, connector := range []string{" and ", " or "} {
+		index := strings.Index(lower, connector)
+		if index < 0 {
+			continue
+		}
+		before, after := strings.TrimSpace(raw[:index]), strings.TrimSpace(raw[index+len(connector):])
+		// This is deliberately lexical, not a guess about every legal filename.
+		// An absent path remains a valid future filename unless the connector joins
+		// a completed file/directory expression or another repository path.
+		if planAreaCompletePath(before) || strings.Contains(after, "/") || strings.Contains(after, `\`) {
+			return true
+		}
+	}
+	return false
+}
+
+func planAreaCompletePath(value string) bool {
+	if strings.HasSuffix(value, "/") || strings.HasSuffix(value, "/**") {
+		return true
+	}
+	ext := path.Ext(value)
+	if len(ext) < 2 {
+		return false
+	}
+	for _, r := range ext[1:] {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateScopePaths verifies both tracked and newly-created paths against a
