@@ -1374,6 +1374,17 @@ func (c *Controller) handleVerificationError(id string, err error) {
 		c.providerAuthenticationBlock(id, "review", model.Review)
 		return
 	}
+	var unavailableTool *validationToolUnavailableError
+	if errors.As(err, &unavailableTool) {
+		check := unavailableTool.check
+		c.verificationFailure(id, &checkFailure{
+			name:    check.Name,
+			command: filepath.Base(check.Command[0]),
+			err:     unavailableTool,
+			check:   check,
+		})
+		return
+	}
 	var readOnlyDeadline *readOnlyDeadlineError
 	if errors.As(err, &readOnlyDeadline) {
 		if readOnlyDeadline.Retry {
