@@ -160,7 +160,10 @@ patch and its declared branch must be absent remotely.
 It creates a new successor branch and records each original as `SUPERSEDED`; an
 original never becomes `DONE`, and its dependants wait for the successor's normal
 verification and integration. Phase one deliberately rejects cross-objective
-groups. A resolved operator candidate head is permitted only when it descends from
+groups. Overlapping unfinished ownership remains rejected unless the prospective
+dependency graph proves the tasks are serialized in either direction; a dependency
+on an original resolves through its `SUPERSEDED` successor. Unknown started
+ownership and every concurrent overlap fail closed. A resolved operator candidate head is permitted only when it descends from
 canonical main, contains every declared source checkpoint, and validates entirely
 within the replacement's immutable areas. It never waives native checks or review.
 

@@ -69,34 +69,77 @@ func TestReplanPublishesMergedSuccessorAndExactRetryDoesNotReplayBusinessState(t
 	assertSameReplanBusinessState(t, retried, collided)
 }
 
+func TestReplanAllowsOverlappingOwnerSerializedThroughSupersededOriginal(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	f, request := replanFixture(t, ctx)
+	defer f.P.DB.Close()
+	addOverlappingReplanOwner(t, ctx, f, &request, []string{"alpha"})
+
+	if err := engine.Replan(ctx, f.P, request); err != nil {
+		t.Fatal(err)
+	}
+	after, _, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPublishedReplan(t, ctx, f, after, request)
+	owner := after.Tasks["qa"]
+	if owner == nil || owner.State != model.Ready || !reflect.DeepEqual(owner.Dependencies, []string{"alpha"}) || after.Tasks["alpha"].SupersededBy != request.Replacement.ID || model.DependencyDone(after, "alpha") {
+		t.Fatalf("overlapping owner was not durably serialized through successor: owner=%#v alpha=%#v", owner, after.Tasks["alpha"])
+	}
+}
+
+func TestReplanRejectsUnrelatedOverlappingOwner(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	f, request := replanFixture(t, ctx)
+	defer f.P.DB.Close()
+	addOverlappingReplanOwner(t, ctx, f, &request, nil)
+
+	if err := engine.Replan(ctx, f.P, request); err == nil || !strings.Contains(err.Error(), "overlaps unfinished task qa") {
+		t.Fatalf("unrelated overlapping owner was accepted: %v", err)
+	}
+	after, _, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Tasks[request.Replacement.ID] != nil || after.Applied[request.CommandID] {
+		t.Fatalf("unrelated overlap published successor state: %#v", after)
+	}
+	if successor, err := f.P.Git.RemoteHead(ctx, "aih/repair"); err != nil || successor != "" {
+		t.Fatalf("unrelated overlap published successor ref: %q %v", successor, err)
+	}
+}
+
 func TestReplanRejectsOutOfScopeCandidateBeforeSuccessorPublication(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	f, request := replanFixture(t, ctx)
 	defer f.P.DB.Close()
 
-	// Construct a candidate which has every source checkpoint but adds a file
-	// outside the replacement's immutable scope. This exercises the candidate
-	// ancestry and full-scope gate with a real merge commit and remote ref.
-	sources := make([]gitx.ReplanCheckpoint, 0, len(request.Sources))
-	for _, source := range request.Sources {
-		sources = append(sources, gitx.ReplanCheckpoint{BaseSHA: source.BaseSHA, HeadSHA: source.HeadSHA})
-	}
-	head, err := f.P.Git.ReplanBranch(ctx, request.Expected.BaseSHA, sources, "fixture candidate")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = f.P.Git.Run(ctx, "", "branch", "aih/candidate", head); err != nil {
-		t.Fatal(err)
-	}
+	// Construct a candidate which is a real descendant of every source head,
+	// then add a file outside the replacement's immutable scope. ReplanBranch
+	// transfers patch content but deliberately does not preserve source ancestry,
+	// so it cannot represent an operator-provided candidate for this gate.
+	var err error
 	candidateDir := filepath.Join(t.TempDir(), "candidate")
-	if err = f.P.Git.Worktree(ctx, candidateDir, "aih/candidate", head); err != nil {
+	if err = f.P.Git.Worktree(ctx, candidateDir, "aih/candidate", request.Expected.BaseSHA); err != nil {
 		t.Fatal(err)
+	}
+	candidate := gitx.Git{Dir: candidateDir}
+	for _, source := range request.Sources {
+		if _, err = candidate.Run(ctx, "", "merge", "--no-ff", "--no-commit", source.HeadSHA); err != nil {
+			t.Fatalf("merge source %s into candidate: %v", source.TaskID, err)
+		}
+		if _, err = candidate.Checkpoint(ctx, candidateDir, "candidate-"+source.TaskID); err != nil {
+			t.Fatalf("checkpoint candidate source %s: %v", source.TaskID, err)
+		}
 	}
 	if err = os.WriteFile(filepath.Join(candidateDir, "outside.txt"), []byte("outside scope\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	candidateHead, err := f.P.Git.Checkpoint(ctx, candidateDir, "candidate")
+	candidateHead, err := candidate.Checkpoint(ctx, candidateDir, "candidate")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,6 +306,23 @@ func replanFixture(t *testing.T, ctx context.Context) (*demo.Fixture, engine.Rep
 		Reason:      "combine the two blocked fixture checkpoints",
 	}
 	return f, request
+}
+
+func addOverlappingReplanOwner(t *testing.T, ctx context.Context, f *demo.Fixture, request *engine.ReplanRequest, dependencies []string) {
+	t.Helper()
+	s, stateHead, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Tasks["qa"] = &model.Task{ID: "qa", ObjectiveID: "batch", Title: "qa", Objective: "fixture", Acceptance: []string{"done"}, Dependencies: append([]string(nil), dependencies...), Areas: []string{"feature-alpha.txt"}, AssignedAreas: []string{"feature-alpha.txt"}, AssignedAreaKinds: map[string]string{"feature-alpha.txt": model.AreaFile}, Domains: []string{"qa"}, Risk: "low", State: model.Ready, Branch: "aih/qa", FixCycles: map[string]int{}}
+	next, err := f.P.Git.StateCommit(ctx, stateHead, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateHead, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	request.Expected.StateRef = next
 }
 
 func assertPublishedReplan(t *testing.T, ctx context.Context, f *demo.Fixture, snapshot *model.Snapshot, request engine.ReplanRequest) {
