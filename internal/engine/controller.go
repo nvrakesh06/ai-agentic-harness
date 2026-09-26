@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/buildinfo"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
@@ -44,20 +45,21 @@ const (
 )
 
 type Controller struct {
-	P           *Project
-	mu          sync.Mutex
-	gitMu       sync.Mutex
-	s           *model.Snapshot
-	head, owner string
-	ctx         context.Context
-	cancel      context.CancelFunc
-	fatal       chan error
-	readers     chan struct{}
-	heavyChecks chan struct{}
-	lightChecks chan struct{}
-	jobs        sync.WaitGroup
-	now         func() time.Time
-	publish     func(context.Context, []gitx.Update) error
+	P                *Project
+	mu               sync.Mutex
+	gitMu            sync.Mutex
+	s                *model.Snapshot
+	head, owner      string
+	ctx              context.Context
+	cancel           context.CancelFunc
+	fatal            chan error
+	readers          chan struct{}
+	heavyChecks      chan struct{}
+	lightChecks      chan struct{}
+	jobs             sync.WaitGroup
+	now              func() time.Time
+	publish          func(context.Context, []gitx.Update) error
+	commandEffective func(context.Context) (config.Effective, error)
 }
 
 func New(p *Project) *Controller {
@@ -712,6 +714,8 @@ func (c *Controller) commands() (bool, error) {
 			_ = c.P.DB.Ack(cmd.ID, e.Error())
 			continue
 		}
+		var answerEffective config.Effective
+		var answerEffectiveErr error
 		if cmd.Kind == "answer" {
 			task := s.Tasks[cmd.Target]
 			if task == nil {
@@ -732,6 +736,15 @@ func (c *Controller) commands() (bool, error) {
 			if e != nil {
 				_ = c.P.DB.Ack(cmd.ID, e.Error())
 				continue
+			}
+			if task != nil {
+				// Canonical resolution takes gitMu. Do it before persist takes mu:
+				// worktree preparation takes gitMu before reading the snapshot.
+				resolve := c.effective
+				if c.commandEffective != nil {
+					resolve = c.commandEffective
+				}
+				answerEffective, answerEffectiveErr = resolve(c.ctx)
 			}
 		}
 		if cmd.Kind == "assign-role" {
@@ -817,9 +830,8 @@ func (c *Controller) commands() (bool, error) {
 				// durable task checkpoint. Preserve prior guidance only when the
 				// answer proves that exact head; ordinary answers can change the task
 				// contract and must receive a fresh preflight.
-				effective, effectiveErr := c.effective(c.ctx)
-				preflightRoles, rolesErr := requiredPreflightRoles(effective, t)
-				if verificationOnly && effectiveErr == nil && rolesErr == nil && humanContinuationEvidence(t, cmd.Payload) && reusePreflightForHumanContinuation(t.Preflight, t, effective, preflightRoles) {
+				preflightRoles, rolesErr := requiredPreflightRoles(answerEffective, t)
+				if verificationOnly && answerEffectiveErr == nil && rolesErr == nil && humanContinuationEvidence(t, cmd.Payload) && reusePreflightForHumanContinuation(t.Preflight, t, answerEffective, preflightRoles) {
 					// Verification-only recovery normally resumes through SYNC_REQUIRED.
 					// The exact acknowledgement requests one bounded writer pass at the
 					// unchanged source checkpoint; native verification and review run
