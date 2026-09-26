@@ -138,7 +138,7 @@ The integration branch contains the four throughput lanes and the earlier
 reviewed recovery batch. Focused native/metrics fixtures passed together (183.545s),
 combined model/config/roles/CLI/release unit checks passed, and the supported
 read-only scope preview passed against stopped StatMotion revision 4894.
-Final reader fixtures and the complete release gate remain required before deployment.
+Final reader fixtures passed; the complete release gate remains required before deployment.
 
 The QA-wave fixture originally used a 45-second wait with two independently
 merging tasks. Timeout stacks showed active serialized Git publication, rather
@@ -170,6 +170,15 @@ routes it through the existing verification-only native capability handler.
 The real-Git fixture now asserts no code FIX or Advisor and cross-machine blocker
 recovery; the focused provenance and missing-tool cases passed together (29.123s).
 The repaired candidate still requires the complete uncached gate before deployment.
+
+The next gate at `f5e59bc` was deliberately cancelled after review confirmed a
+separate existing capability-continuation fixture used the `aih-state` commit as
+its task code baseline. It had reported no assertion failure when cancelled.
+The fixture now uses the exact `origin/main` code SHA for `BaseSHA`, retaining the
+state SHA only as the state-publication CAS parent. Source ancestry validation is
+unchanged. The corrected writer-checkpoint/capability-continuation fixture passed
+in isolation (49.271s). A new frozen candidate requires the complete gate; cancelled
+or partial runs are not passing release evidence.
 
 StatMotion PR 172 consumes the shared reader-budget interface with 600/300/600
 second planning/preflight/review limits and requires schema 11. Its configuration
