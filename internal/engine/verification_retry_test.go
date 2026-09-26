@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -26,10 +27,14 @@ var errFixtureSupervisorUndrained = errors.New("fixture supervisor did not drain
 // fixtureSupervisor owns the child context started by a real-Git fixture. A
 // fixture must drain it before deferred SQLite cleanup can run.
 type fixtureSupervisor struct {
-	cancel       context.CancelFunc
-	done         <-chan error
-	drainTimeout time.Duration
-	watchdog     func(string)
+	cancel         context.CancelFunc
+	done           <-chan error
+	drainTimeout   time.Duration
+	watchdog       func(string)
+	completionOnce sync.Once
+	completed      chan struct{}
+	resultMu       sync.Mutex
+	result         error
 }
 
 func newFixtureSupervisor(parent context.Context, project *engine.Project) *fixtureSupervisor {
@@ -120,6 +125,27 @@ func TestFixtureSupervisorHandoffTimeoutCancelsBeforeWatchdog(t *testing.T) {
 	}
 }
 
+func TestFixtureSupervisorCachesNonNilChildResultAcrossCleanup(t *testing.T) {
+	done := make(chan error, 1)
+	done <- errors.New("child failed")
+	cancelled := false
+	supervisor := &fixtureSupervisor{
+		cancel:       func() { cancelled = true },
+		done:         done,
+		drainTimeout: time.Second,
+		watchdog:     func(string) { t.Fatal("watchdog ran after child exit") },
+	}
+	if err := supervisor.waitHandoff("status=fixture"); err == nil || err.Error() != "child failed" {
+		t.Fatalf("handoff error = %v", err)
+	}
+	if err := supervisor.drain("status=fixture"); err == nil || err.Error() != "child failed" {
+		t.Fatalf("cached cleanup error = %v", err)
+	}
+	if !cancelled {
+		t.Fatal("cleanup did not cancel after failed handoff")
+	}
+}
+
 // drain cancels the child on failure cleanup, then waits through the
 // controller's bounded shutdown allowance. The watchdog is process-level by
 // design: returning would allow a caller's deferred DB.Close to race Serve.
@@ -129,6 +155,26 @@ func (s *fixtureSupervisor) drain(diagnostic string) error {
 	}
 	s.cancel()
 	return s.waitAfterCancel(diagnostic)
+}
+
+func (s *fixtureSupervisor) completion() <-chan struct{} {
+	s.completionOnce.Do(func() {
+		s.completed = make(chan struct{})
+		go func() {
+			err := <-s.done
+			s.resultMu.Lock()
+			s.result = err
+			s.resultMu.Unlock()
+			close(s.completed)
+		}()
+	})
+	return s.completed
+}
+
+func (s *fixtureSupervisor) completedResult() error {
+	s.resultMu.Lock()
+	defer s.resultMu.Unlock()
+	return s.result
 }
 
 // waitHandoff preserves a queued handoff's cooperative shutdown path. If that
@@ -141,8 +187,8 @@ func (s *fixtureSupervisor) waitHandoff(diagnostic string) error {
 	timer := time.NewTimer(s.drainTimeout)
 	defer timer.Stop()
 	select {
-	case err := <-s.done:
-		return err
+	case <-s.completion():
+		return s.completedResult()
 	case <-timer.C:
 		s.cancel()
 		return s.waitAfterCancel(diagnostic)
@@ -153,8 +199,8 @@ func (s *fixtureSupervisor) waitAfterCancel(diagnostic string) error {
 	timer := time.NewTimer(s.drainTimeout)
 	defer timer.Stop()
 	select {
-	case err := <-s.done:
-		return err
+	case <-s.completion():
+		return s.completedResult()
 	case <-timer.C:
 		s.watchdog(diagnostic)
 		return errFixtureSupervisorUndrained
@@ -275,9 +321,10 @@ func runUntilTaskState(t *testing.T, ctx context.Context, f *demo.Fixture, id st
 	drained := false
 	defer func() {
 		if !drained {
-			if err := supervisor.drain(retryFixtureStatus(f, id)); err != nil {
+			if err := supervisor.drain("fixture cleanup"); err != nil {
 				t.Errorf("fixture supervisor drain during cleanup: %v", err)
 			}
+			drained = true
 		}
 	}()
 	wantedStates := map[model.State]bool{}
@@ -290,20 +337,21 @@ func runUntilTaskState(t *testing.T, ctx context.Context, f *demo.Fixture, id st
 			if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
 				t.Fatal(err)
 			}
-			if err = supervisor.waitHandoff(retryFixtureStatus(f, id)); err != nil {
-				t.Fatal(err)
-			}
+			handoffErr := supervisor.waitHandoff("fixture cooperative handoff")
 			drained = true
+			if handoffErr != nil {
+				t.Fatal(handoffErr, retryFixtureStatus(f, id))
+			}
 			return snapshot.Tasks[id]
 		}
 		select {
-		case err = <-supervisor.done:
+		case <-supervisor.completion():
 			drained = true
-			t.Fatal("supervisor stopped before target state", err)
+			t.Fatal("supervisor stopped before target state", supervisor.completedResult(), retryFixtureStatus(f, id))
 		case <-ctx.Done():
-			diagnostic := retryFixtureStatus(f, id)
-			stopErr := supervisor.drain(diagnostic)
+			stopErr := supervisor.drain("fixture workflow deadline")
 			drained = true
+			diagnostic := retryFixtureStatus(f, id)
 			t.Fatalf("%v waiting for %s; supervisor=%v %s", ctx.Err(), strings.Join(func() []string {
 				states := make([]string, 0, len(wanted))
 				for _, state := range wanted {
