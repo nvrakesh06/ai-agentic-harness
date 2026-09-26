@@ -218,7 +218,8 @@ func prepareScopeRecovery(ctx context.Context, p *Project, s *model.Snapshot, st
 	seen := map[string]bool{}
 	prepared := make([]scopeRecoveryPrepared, 0, len(manifest.Tasks))
 	for _, item := range manifest.Tasks {
-		if !scopeRecoveryTaskID.MatchString(item.ID) || seen[item.ID] || !scopeRecoverySHA.MatchString(item.BaseSHA) || !scopeRecoverySHA.MatchString(item.HeadSHA) || !scopeRecoveryHash.MatchString(item.ContractHash) || strings.TrimSpace(item.Reason) != item.Reason || item.Reason == "" || len(item.Reason) > model.MaxScopeRecoveryReasonBytes {
+		emptyCheckpoint := item.BaseSHA == "" && item.HeadSHA == ""
+		if !scopeRecoveryTaskID.MatchString(item.ID) || seen[item.ID] || (item.BaseSHA == "") != (item.HeadSHA == "") || (!emptyCheckpoint && (!scopeRecoverySHA.MatchString(item.BaseSHA) || !scopeRecoverySHA.MatchString(item.HeadSHA))) || !scopeRecoveryHash.MatchString(item.ContractHash) || strings.TrimSpace(item.Reason) != item.Reason || item.Reason == "" || len(item.Reason) > model.MaxScopeRecoveryReasonBytes {
 			return nil, errors.New("invalid scope recovery task declaration")
 		}
 		if err := safety.Check(item.Reason); err != nil {
@@ -238,21 +239,32 @@ func prepareScopeRecovery(ctx context.Context, p *Project, s *model.Snapshot, st
 		if !legacyAssignmentRecoverable(task) {
 			return nil, fmt.Errorf("scope recovery task %s already has a known immutable assignment", item.ID)
 		}
+		if emptyCheckpoint && !scopeRecoveryUnstarted(s, task) {
+			return nil, fmt.Errorf("scope recovery task %s is not provably never started", item.ID)
+		}
+		if emptyCheckpoint && task.Branch == "" {
+			return nil, fmt.Errorf("scope recovery task %s has no declared branch", item.ID)
+		}
 		areas, err := p.Git.ClassifyAreasAtRef(ctx, effective.BaseSHA, item.Areas)
 		if err != nil {
 			return nil, fmt.Errorf("classify scope recovery task %s areas: %w", item.ID, err)
 		}
-		if err = p.Git.ValidateCommitScope(ctx, item.BaseSHA, item.HeadSHA, areas); err != nil {
-			return nil, fmt.Errorf("validate scope recovery task %s checkpoint: %w", item.ID, err)
-		}
 		remoteHead, err := p.Git.RemoteHead(ctx, task.Branch)
-		if err != nil || remoteHead != item.HeadSHA {
-			if err != nil {
-				return nil, fmt.Errorf("read scope recovery task %s checkpoint ref: %w", item.ID, err)
-			}
-			return nil, fmt.Errorf("scope recovery task %s checkpoint ref differs from its declared head", item.ID)
+		if err != nil {
+			return nil, fmt.Errorf("read scope recovery task %s checkpoint ref: %w", item.ID, err)
 		}
-		if err = validateRetainedScopeRecoveryWorktree(ctx, p, task, areas); err != nil {
+		if emptyCheckpoint {
+			if remoteHead != "" {
+				return nil, fmt.Errorf("scope recovery task %s has a remote branch despite an empty checkpoint", item.ID)
+			}
+			if err = validateAbsentScopeRecoveryWorktree(p, task); err != nil {
+				return nil, err
+			}
+		} else if err = p.Git.ValidateCommitScope(ctx, item.BaseSHA, item.HeadSHA, areas); err != nil {
+			return nil, fmt.Errorf("validate scope recovery task %s checkpoint: %w", item.ID, err)
+		} else if remoteHead != item.HeadSHA {
+			return nil, fmt.Errorf("scope recovery task %s checkpoint ref differs from its declared head", item.ID)
+		} else if err = validateRetainedScopeRecoveryWorktree(ctx, p, task, areas); err != nil {
 			return nil, err
 		}
 		dependencies, err := additionalDependencies(s, task, item.AdditionalDependencies)
@@ -286,6 +298,35 @@ func legacyAssignmentRecoverable(task *model.Task) bool {
 	for _, area := range task.AssignedAreas {
 		if task.AssignedAreaKinds[area] != model.AreaUnknown {
 			return false
+		}
+	}
+	return true
+}
+
+// scopeRecoveryUnstarted proves that an empty manifest checkpoint names only a
+// task that has never acquired implementation, verification, or review state.
+// Empty revisions are not a wildcard for a task with any durable lifecycle.
+func scopeRecoveryUnstarted(s *model.Snapshot, task *model.Task) bool {
+	if task == nil || (task.State != model.Planned && task.State != model.Ready) || task.BaseSHA != "" || task.HeadSHA != "" || task.MergeSHA != "" || task.PostVerifySHA != "" || task.SyncBase != "" || task.RecoveryRequired ||
+		task.Attempts != 0 || task.Rotations != 0 || task.AdvisorUsed || task.RunID != "" || task.Preflight != nil || task.Verification != nil || task.Evidence != nil || task.VisualRequired != nil || task.Blocker != nil || task.PR != 0 || len(task.Findings) != 0 || len(task.Summary) != 0 ||
+		len(task.ReportedTests) != 0 || len(task.Risks) != 0 || len(task.Decisions) != 0 || len(task.ReviewProvenance) != 0 || len(task.AssignedAreas) != 0 || len(task.AssignedAreaKinds) != 0 {
+		return false
+	}
+	for _, run := range s.Runs {
+		if run.Task == task.ID {
+			return false
+		}
+	}
+	for _, check := range s.Capacity.Verification {
+		if check.Task == task.ID {
+			return false
+		}
+	}
+	if s.IntegrationBatch != nil {
+		for _, member := range s.IntegrationBatch.Tasks {
+			if member.ID == task.ID {
+				return false
+			}
 		}
 	}
 	return true
@@ -337,6 +378,15 @@ func validateRetainedScopeRecoveryWorktree(ctx context.Context, p *Project, task
 		return fmt.Errorf("validate scope recovery task %s retained worktree: %w", task.ID, err)
 	}
 	return nil
+}
+
+func validateAbsentScopeRecoveryWorktree(p *Project, task *model.Task) error {
+	if _, err := os.Stat(p.TaskPath(task)); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect scope recovery task %s worktree: %w", task.ID, err)
+	}
+	return fmt.Errorf("scope recovery task %s has a retained worktree despite an empty checkpoint", task.ID)
 }
 
 func additionalDependencies(s *model.Snapshot, task *model.Task, requested []string) ([]string, error) {

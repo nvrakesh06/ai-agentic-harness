@@ -75,6 +75,173 @@ func legacyScopeDecisions(count int) []string {
 	return decisions
 }
 
+func TestScopeRecoveryAcceptsMixedStartedAndNeverStartedContracts(t *testing.T) {
+	ctx := context.Background()
+	f, manifest, _ := scopeRecoveryFixture(t, ctx, "legacy-task", nil, nil)
+	defer f.P.DB.Close()
+	base := manifest.Tasks[0].BaseSHA
+
+	api := &model.Task{ID: "api-task", ObjectiveID: "objective", Title: "api", Objective: "explicit legacy reauthorization", Acceptance: []string{"api recovery scope"}, Areas: []string{"mutable-api-area"}, State: model.Blocked, Branch: "aih/api-task", BaseSHA: base, FixCycles: map[string]int{}}
+	model.Block(api, "Stay blocked", "legacy scope needs explicit authorization", model.Ready)
+	apiWorktree := f.P.TaskPath(api)
+	if err := f.P.Git.Worktree(ctx, apiWorktree, api.Branch, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(apiWorktree, "api"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(apiWorktree, "api", "owned.txt"), []byte("api\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	head, err := f.P.Git.Checkpoint(ctx, apiWorktree, api.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.HeadSHA = head
+	qa := &model.Task{ID: "qa-task", ObjectiveID: "objective", Title: "qa", Objective: "explicit legacy reauthorization", Acceptance: []string{"qa recovery scope"}, Areas: []string{"tests/**"}, State: model.Ready, Branch: "aih/qa-task", FixCycles: map[string]int{}}
+
+	s, stateRef, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Tasks[api.ID], s.Tasks[qa.ID] = api, qa
+	next, err := f.P.Git.StateCommit(ctx, stateRef, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: api.Branch, New: api.HeadSHA}, {Branch: "aih-state", Old: stateRef, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.DB.Save(next, s); err != nil {
+		t.Fatal(err)
+	}
+	manifest.ExpectedStateRef = next
+	manifest.Tasks = append(manifest.Tasks,
+		engine.ScopeRecoveryTask{ID: api.ID, BaseSHA: api.BaseSHA, HeadSHA: api.HeadSHA, ContractHash: engine.ScopeRecoveryContractHash(api), Areas: []string{"api/**"}, Reason: "Operator explicitly authorizes the bounded API ownership contract."},
+		engine.ScopeRecoveryTask{ID: qa.ID, ContractHash: engine.ScopeRecoveryContractHash(qa), Areas: []string{"tests/renderer/**"}, AdditionalDependencies: []string{"legacy-task"}, Reason: "Operator explicitly narrows never-started QA ownership to renderer tests."},
+	)
+
+	if err = engine.RecoverScope(ctx, f.P, manifest); err != nil {
+		t.Fatal(err)
+	}
+	after, _, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := after.Tasks[api.ID].AssignedAreas; !reflect.DeepEqual(got, []string{"api"}) || after.Tasks[api.ID].AssignedAreaKinds["api"] != model.AreaDirectory {
+		t.Fatalf("disjoint started API task was not recovered: %#v", after.Tasks[api.ID])
+	}
+	if got := after.Tasks[qa.ID].AssignedAreas; !reflect.DeepEqual(got, []string{"tests/renderer"}) || after.Tasks[qa.ID].AssignedAreaKinds["tests/renderer"] != model.AreaDirectory || !reflect.DeepEqual(after.Tasks[qa.ID].Dependencies, []string{"legacy-task"}) || after.Tasks[qa.ID].BaseSHA != "" || after.Tasks[qa.ID].HeadSHA != "" {
+		t.Fatalf("never-started QA task was not narrowly and explicitly recovered: %#v", after.Tasks[qa.ID])
+	}
+}
+
+func TestScopeRecoveryRejectsUnsafeNeverStartedDeclarations(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name   string
+		change func(*demo.Fixture, *engine.ScopeRecoveryManifest)
+	}{
+		{"one empty revision", func(f *demo.Fixture, manifest *engine.ScopeRecoveryManifest) {
+			base, err := f.P.Git.SHA(ctx, "refs/remotes/origin/main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest.Tasks[0].BaseSHA = base
+		}},
+		{"stale contract", func(_ *demo.Fixture, manifest *engine.ScopeRecoveryManifest) {
+			manifest.Tasks[0].ContractHash = strings.Repeat("a", 64)
+		}},
+		{"stale state", func(_ *demo.Fixture, manifest *engine.ScopeRecoveryManifest) {
+			manifest.ExpectedStateRef = strings.Repeat("b", 40)
+		}},
+		{"historical run", func(f *demo.Fixture, manifest *engine.ScopeRecoveryManifest) {
+			updateNeverStartedScopeState(t, ctx, f, manifest, func(s *model.Snapshot) {
+				s.Runs = append(s.Runs, model.Run{ID: "interrupted", Task: "qa-task", Outcome: "interrupted"})
+			})
+		}},
+		{"remote branch", func(f *demo.Fixture, _ *engine.ScopeRecoveryManifest) {
+			base, err := f.P.Git.SHA(ctx, "refs/remotes/origin/main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih/qa-task", New: base}}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"retained worktree", func(f *demo.Fixture, _ *engine.ScopeRecoveryManifest) {
+			base, err := f.P.Git.SHA(ctx, "refs/remotes/origin/main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = f.P.Git.Worktree(ctx, f.P.TaskPath(&model.Task{ID: "qa-task"}), "aih/qa-task", base); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"existing assignment", func(f *demo.Fixture, manifest *engine.ScopeRecoveryManifest) {
+			updateNeverStartedScopeState(t, ctx, f, manifest, func(s *model.Snapshot) {
+				s.Tasks["qa-task"].AssignedAreas = []string{"tests/renderer"}
+				s.Tasks["qa-task"].AssignedAreaKinds = map[string]string{"tests/renderer": model.AreaDirectory}
+			})
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f, manifest := neverStartedScopeRecoveryFixture(t, ctx)
+			defer f.P.DB.Close()
+			test.change(f, &manifest)
+			if err := engine.PreviewScopeRecovery(ctx, f.P, manifest); err == nil {
+				t.Fatal("unsafe never-started scope recovery declaration was accepted")
+			}
+		})
+	}
+}
+
+func neverStartedScopeRecoveryFixture(t *testing.T, ctx context.Context) (*demo.Fixture, engine.ScopeRecoveryManifest) {
+	t.Helper()
+	f, manifest, _ := scopeRecoveryFixture(t, ctx, "legacy-task", nil, nil)
+	s, stateRef, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Tasks["legacy-task"].State, s.Tasks["legacy-task"].Blocker = model.Done, nil
+	qa := &model.Task{ID: "qa-task", ObjectiveID: "objective", Title: "qa", Objective: "explicit legacy reauthorization", Acceptance: []string{"qa recovery scope"}, Areas: []string{"tests/**"}, State: model.Ready, Branch: "aih/qa-task", FixCycles: map[string]int{}}
+	s.Tasks[qa.ID] = qa
+	next, err := f.P.Git.StateCommit(ctx, stateRef, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateRef, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.DB.Save(next, s); err != nil {
+		t.Fatal(err)
+	}
+	manifest.ExpectedStateRef = next
+	manifest.Tasks = []engine.ScopeRecoveryTask{{ID: qa.ID, ContractHash: engine.ScopeRecoveryContractHash(qa), Areas: []string{"tests/renderer/**"}, Reason: "Operator explicitly narrows never-started QA ownership to renderer tests."}}
+	return f, manifest
+}
+
+func updateNeverStartedScopeState(t *testing.T, ctx context.Context, f *demo.Fixture, manifest *engine.ScopeRecoveryManifest, change func(*model.Snapshot)) {
+	t.Helper()
+	s, stateRef, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change(s)
+	next, err := f.P.Git.StateCommit(ctx, stateRef, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateRef, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.DB.Save(next, s); err != nil {
+		t.Fatal(err)
+	}
+	manifest.ExpectedStateRef = next
+}
+
 func TestScopeRecoveryAllowsStoppedRunAndPreflightHistory(t *testing.T) {
 	ctx := context.Background()
 	f, manifest, _ := scopeRecoveryFixture(t, ctx, "legacy-task", nil, nil)
