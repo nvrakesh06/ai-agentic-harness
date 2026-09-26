@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -280,11 +281,15 @@ func TestReviewTimeoutPersistsPeerFindingBeforeRetryAndDefersQA(t *testing.T) {
 	}
 	deadline := time.NewTimer(15 * time.Second)
 	defer deadline.Stop()
+	var last *model.Task
 	for {
 		current, _, loadErr := f.P.DB.Load()
 		if loadErr == nil {
 			task := current.Tasks["mixed"]
-			if task != nil && task.Evidence != nil && len(task.Findings) == 1 && task.Findings[0].Severity == "high" && task.ReadOnlyRetries["review/security"].Attempts == 1 && task.FixCycles["reviewer"] == 1 && workers.qaCalls.Load() == 0 && task.Evidence.ReviewDispositions["reviewer"].Disposition == "" {
+			last = task
+			if task != nil && task.Evidence != nil && slices.ContainsFunc(task.Findings, func(finding model.Finding) bool {
+				return finding.Role == "reviewer" && finding.Severity == "high" && finding.Category == "regression" && finding.Location == "feature-mixed.txt:1" && finding.Relevance == model.FindingChanged
+			}) && task.ReadOnlyRetries["review/security"].Attempts == 1 && task.FixCycles["reviewer"] == 1 && workers.qaCalls.Load() == 0 && task.Evidence.ReviewDispositions["reviewer"].Disposition == "" {
 				break
 			}
 		}
@@ -293,7 +298,13 @@ func TestReviewTimeoutPersistsPeerFindingBeforeRetryAndDefersQA(t *testing.T) {
 			stopped = true
 			t.Fatalf("supervisor stopped before routed review recovery: %v", serveErr)
 		case <-deadline.C:
-			t.Fatal("reviewer finding was not durably routed without running QA")
+			stacks := make([]byte, 1<<20)
+			n := runtime.Stack(stacks, true)
+			var evidence *model.Evidence
+			if last != nil {
+				evidence = last.Evidence
+			}
+			t.Fatalf("reviewer finding was not durably routed without running QA: security_calls=%d qa_calls=%d task=%#v evidence=%#v goroutines=\n%s", workers.securityCalls.Load(), workers.qaCalls.Load(), last, evidence, stacks[:n])
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
