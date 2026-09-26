@@ -24,10 +24,8 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
 )
 
-// releaseTestTimeout bounds a single package test binary. The engine package
-// creates real temporary Git repositories and can take more than ten minutes
-// on a loaded, serialized Windows host. Fifteen minutes leaves room for the
-// complete package while retaining bounded fixture-level admission deadlines.
+// releaseTestTimeout bounds each test binary. Large integration packages run
+// their complete discovered inventory in serial groups, retaining this bound.
 const releaseTestTimeout = "15m"
 
 const releasePermitWait = 2 * time.Minute
@@ -76,7 +74,7 @@ func release() error {
 	// Serialize package workers: the suite intentionally exercises real Git and
 	// process lifecycles, and concurrent package runs can make its bounded
 	// Windows timings unreliable on a constrained development machine.
-	if e := runReleaseTests(ctx); e != nil {
+	if e := runCompleteReleaseTests(ctx); e != nil {
 		return e
 	}
 	if e := run(ctx, nil, "go", "vet", "./..."); e != nil {
@@ -135,6 +133,10 @@ func release() error {
 // output, so a log line containing the word "fail" cannot cancel the gate.
 func runReleaseTests(ctx context.Context) error {
 	name, args := releaseTestCommand()
+	return runReleaseTestCommand(ctx, name, args, nil)
+}
+
+func runReleaseTestCommand(ctx context.Context, name string, args []string, expected []string) error {
 	fmt.Println(name, strings.Join(args, " "))
 	process, err := platform.StartManaged(ctx, "", nil, name, args...)
 	if err != nil {
@@ -147,6 +149,7 @@ func runReleaseTests(ctx context.Context) error {
 	go func() { <-ctx.Done(); process.Close() }()
 
 	var failedPackage string
+	completed := map[string]bool{}
 	scanner := bufio.NewScanner(process.Stdout)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
@@ -157,7 +160,13 @@ func runReleaseTests(ctx context.Context) error {
 			Package string
 			Test    string
 		}
-		if json.Unmarshal([]byte(line), &event) == nil && event.Action == "fail" && event.Package != "" && event.Test == "" {
+		if json.Unmarshal([]byte(line), &event) != nil {
+			continue
+		}
+		if event.Action == "pass" || event.Action == "skip" {
+			completed[event.Test] = true
+		}
+		if event.Action == "fail" && event.Package != "" && event.Test == "" {
 			failedPackage = event.Package
 			process.Close()
 			break
@@ -177,7 +186,15 @@ func runReleaseTests(ctx context.Context) error {
 	if scanErr != nil {
 		return fmt.Errorf("read go test JSON output: %w", scanErr)
 	}
-	return waitErr
+	if waitErr != nil {
+		return waitErr
+	}
+	for _, test := range expected {
+		if !completed[test] {
+			return fmt.Errorf("release test inventory incomplete: %s has no terminal pass/skip event", test)
+		}
+	}
+	return nil
 }
 
 // acquireReleaseMachinePermit owns its interrupt handler only while waiting for
