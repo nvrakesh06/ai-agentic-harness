@@ -18,7 +18,7 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 11
+const StateSchema = 12
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
@@ -27,6 +27,11 @@ const MaxGuidanceBytes = 1600
 const MaxScopeRecoveryReasonBytes = 1600
 const MaxScopeRecoveryRecords = 8
 const maxScopeRecoveryRecordBytes = 16 * 1024
+const MaxProviderAdmissionHolds = 8
+const MaxExactProviderAdmissionHolds = 6
+
+var sha256Pattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+var providerAdmissionModelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$`)
 
 // MaxVisualEvidenceArtifacts includes up to eight screenshots and one shared diagnostic log.
 const MaxVisualEvidenceArtifacts = 9
@@ -656,6 +661,94 @@ type Snapshot struct {
 	Improvements       []string                 `json:"improvement_candidates,omitempty"`
 	IntegrationBlocked string                   `json:"integration_blocked,omitempty"`
 	IntegrationBatch   *IntegrationBatch        `json:"integration_batch,omitempty"`
+	// ProviderAdmissionHolds records only provider-owned, authoritative
+	// admission failures. It deliberately contains no provider diagnostics or
+	// task-local retry counters: those remain outside portable state.
+	ProviderAdmissionHolds map[string]ProviderAdmissionHold `json:"provider_admission_holds"`
+}
+
+const (
+	ProviderAdmissionAuthentication    = "authentication"
+	ProviderAdmissionRequestRejected   = "request_rejected"
+	ProviderAdmissionSaturated         = "saturated"
+	ProviderRejectionInvalidJSONSchema = "invalid_json_schema"
+)
+
+// ProviderAdmissionHold is a bounded, portable provider-admission fence. Key
+// selection follows the failure's scope: schema rejection keys include only
+// the provider and exact schema digest; authentication applies to every model
+// for that provider. Origin fields explain the canonical request that first
+// observed the failure but never widen or narrow suppression.
+type ProviderAdmissionHold struct {
+	Provider     string `json:"provider"`
+	Class        string `json:"class"`
+	Rejection    string `json:"rejection,omitempty"`
+	SchemaSHA256 string `json:"schema_sha256,omitempty"`
+	OriginPolicy string `json:"origin_policy,omitempty"`
+	OriginRules  string `json:"origin_rules,omitempty"`
+	OriginModel  string `json:"origin_model,omitempty"`
+}
+
+// ProviderAdmissionHoldKey returns the deterministic scope key. It rejects
+// unrecognized provider or failure combinations rather than deriving a hold
+// from untrusted text.
+func ProviderAdmissionHoldKey(provider, class, rejection, schemaSHA256 string) (string, error) {
+	if provider != "codex" && provider != "claude-code" {
+		return "", errors.New("invalid provider admission provider")
+	}
+	switch class {
+	case ProviderAdmissionAuthentication:
+		if rejection != "" || schemaSHA256 != "" {
+			return "", errors.New("invalid authentication admission scope")
+		}
+		return provider + ":authentication", nil
+	case ProviderAdmissionRequestRejected:
+		if rejection != ProviderRejectionInvalidJSONSchema || !sha256Pattern.MatchString(schemaSHA256) {
+			return "", errors.New("invalid request rejection admission scope")
+		}
+		return provider + ":request_rejected:" + rejection + ":" + schemaSHA256, nil
+	case ProviderAdmissionSaturated:
+		if rejection != "" || schemaSHA256 != "" {
+			return "", errors.New("invalid saturated admission scope")
+		}
+		return provider + ":saturated", nil
+	default:
+		return "", errors.New("invalid provider admission class")
+	}
+}
+
+func (h ProviderAdmissionHold) ScopeKey() (string, error) {
+	return ProviderAdmissionHoldKey(h.Provider, h.Class, h.Rejection, h.SchemaSHA256)
+}
+
+func validateProviderAdmissionHolds(holds map[string]ProviderAdmissionHold) error {
+	if len(holds) > MaxProviderAdmissionHolds {
+		return errors.New("too many provider admission holds")
+	}
+	exact, saturated := 0, 0
+	saturatedProviders := map[string]bool{}
+	for key, hold := range holds {
+		expected, err := hold.ScopeKey()
+		if err != nil || key != expected {
+			return errors.New("invalid provider admission hold key")
+		}
+		if !sha256Pattern.MatchString(hold.OriginPolicy) || !sha256Pattern.MatchString(hold.OriginRules) || !providerAdmissionModelPattern.MatchString(hold.OriginModel) {
+			return errors.New("invalid provider admission hold provenance")
+		}
+		if hold.Class == ProviderAdmissionSaturated {
+			saturated++
+			if saturatedProviders[hold.Provider] {
+				return errors.New("duplicate provider admission saturation hold")
+			}
+			saturatedProviders[hold.Provider] = true
+		} else {
+			exact++
+		}
+	}
+	if exact > MaxExactProviderAdmissionHolds || saturated > 2 {
+		return errors.New("invalid provider admission hold capacity")
+	}
+	return nil
 }
 
 // IntegrationBatch is a portable reservation for the deliberately small first
@@ -708,7 +801,7 @@ type IntegrationBatchTask struct {
 
 func NewSnapshot(project string) *Snapshot {
 	return &Snapshot{Schema: StateSchema, CreatedBy: Version, Project: project,
-		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}, Replans: map[string]ReplanReceipt{}}
+		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}, Replans: map[string]ReplanReceipt{}, ProviderAdmissionHolds: map[string]ProviderAdmissionHold{}}
 }
 
 const (
@@ -871,6 +964,12 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			}
 		}
 	}
+	if s.Schema <= 11 {
+		// Version 12 introduces provider-wide admission holds. Earlier portable
+		// state never carried a trustworthy provider rejection identity, so it
+		// cannot manufacture a hold or clear historical task checkpoints.
+		s.ProviderAdmissionHolds = nil
+	}
 	if migrated {
 		if s.Schema <= 10 {
 			// Earlier records have no transition clock or pinned run context.
@@ -906,6 +1005,12 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 	}
 	if s.Replans == nil {
 		s.Replans = map[string]ReplanReceipt{}
+	}
+	if s.ProviderAdmissionHolds == nil {
+		s.ProviderAdmissionHolds = map[string]ProviderAdmissionHold{}
+	}
+	if err := validateProviderAdmissionHolds(s.ProviderAdmissionHolds); err != nil {
+		return nil, false, err
 	}
 	for id, receipt := range s.Replans {
 		if !stateIdentifierPattern.MatchString(id) || !s.Applied[id] || !stateHashPattern.MatchString(receipt.Digest) || !stateIdentifierPattern.MatchString(receipt.ReplacementID) || s.Tasks[receipt.ReplacementID] == nil {

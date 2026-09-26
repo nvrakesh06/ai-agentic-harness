@@ -254,20 +254,25 @@ func (h *Hub) Pull(ctx context.Context, n int) (github.Pull, error) {
 }
 
 type Worker struct {
-	Active            atomic.Int32
-	Max               atomic.Int32
-	ReviewActive      atomic.Int32
-	ReviewMax         atomic.Int32
-	mu                sync.Mutex
-	reviewPair        reviewPair
-	Reviews           []string
-	Failures          map[string]int
-	AuthFailures      map[string]int
-	EnvironmentBlocks map[string]int
-	Implementations   map[string]int
-	Advisors          map[string]int
-	NoChanges         map[string]bool
-	ScratchTooling    map[string]bool
+	Active       atomic.Int32
+	Max          atomic.Int32
+	ReviewActive atomic.Int32
+	ReviewMax    atomic.Int32
+	mu           sync.Mutex
+	reviewPair   reviewPair
+	Reviews      []string
+	Failures     map[string]int
+	AuthFailures map[string]int
+	// AuthFailuresAfterWrite exercises the supervisor checkpoint that must
+	// preserve scoped edits if a provider loses authentication after writing.
+	AuthFailuresAfterWrite map[string]int
+	RequestRejections      map[string]int
+	ProviderCalls          map[string]int
+	EnvironmentBlocks      map[string]int
+	Implementations        map[string]int
+	Advisors               map[string]int
+	NoChanges              map[string]bool
+	ScratchTooling         map[string]bool
 }
 
 // reviewPair is a demo-only rendezvous for the two independent peers used to
@@ -332,11 +337,36 @@ func (w *Worker) AdvisorCount(title string) int {
 	return w.Advisors[title]
 }
 
+// ProviderCallCount is test-only fixture evidence that an admission hold
+// prevented a second provider process invocation for the same role or task.
+func (w *Worker) ProviderCallCount(key string) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.ProviderCalls[key]
+}
+
+func (w *Worker) requestRejected(key string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.ProviderCalls == nil {
+		w.ProviderCalls = map[string]int{}
+	}
+	w.ProviderCalls[key]++
+	if w.RequestRejections[key] == 0 {
+		return false
+	}
+	w.RequestRejections[key]--
+	return true
+}
+
 func (w *Worker) Name() string                   { return "codex" }
 func (w *Worker) Validate(context.Context) error { return nil }
 func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, error) {
 	result := provider.Result{Schema: 1, Status: "completed", Summary: "Deterministic independent fixture check passed."}
 	if r.Role == "orchestrator" {
+		if w.requestRejected("orchestrator") {
+			return result, &provider.InvocationError{Cause: errors.New("fixture request rejected"), Failure: provider.FailureRequestRejected, Rejection: provider.RejectionInvalidJSONSchema}
+		}
 		for _, key := range []string{"alpha", "beta", "human", "dependent"} {
 			p := model.PlanTask{Key: key, Title: key, Objective: "Create " + key + " fixture", Acceptance: []string{"feature-" + key + ".txt contains implemented"}, Areas: []string{"feature-" + key + ".txt"}, Domains: []string{key}, Risk: "low"}
 			// This recovery demo exercises a serial merge train. The separate
@@ -357,6 +387,9 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 	task, e := Task(r.Prompt)
 	if e != nil {
 		return result, e
+	}
+	if w.requestRejected(r.Role+":"+task.Title) || w.requestRejected(task.Title) {
+		return result, &provider.InvocationError{Cause: errors.New("fixture request rejected"), Failure: provider.FailureRequestRejected, Rejection: provider.RejectionInvalidJSONSchema}
 	}
 	if r.Role == "implementer" {
 		n := w.Active.Add(1)
@@ -390,6 +423,10 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 		if authFailure {
 			w.AuthFailures[task.Title]--
 		}
+		authFailureAfterWrite := w.AuthFailuresAfterWrite[task.Title] > 0
+		if authFailureAfterWrite {
+			w.AuthFailuresAfterWrite[task.Title]--
+		}
 		environmentBlock := w.EnvironmentBlocks[task.Title] > 0
 		if environmentBlock {
 			w.EnvironmentBlocks[task.Title]--
@@ -407,6 +444,9 @@ func (w *Worker) Run(ctx context.Context, r provider.Request) (provider.Result, 
 		}
 		if e = os.WriteFile(filepath.Join(r.Directory, "feature-"+task.Title+".txt"), []byte("implemented\n"), 0600); e != nil {
 			return result, e
+		}
+		if authFailureAfterWrite {
+			return result, &provider.InvocationError{Cause: errors.New("fixture provider invocation failed after scoped write"), Failure: provider.FailureAuthentication}
 		}
 		if w.ScratchTooling[task.Title] {
 			if r.Scratch == "" {

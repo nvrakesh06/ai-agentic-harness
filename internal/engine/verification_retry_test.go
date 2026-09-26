@@ -819,7 +819,7 @@ func TestImplementationFailureKeepsNormalFixLoop(t *testing.T) {
 	}
 }
 
-func TestProviderAuthenticationFailurePreservesTaskBudgetAndSkipsAdvisor(t *testing.T) {
+func TestProviderAuthenticationFailureAfterScopedWriteCheckpointsSharedHoldAcrossAttach(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
@@ -827,14 +827,42 @@ func TestProviderAuthenticationFailurePreservesTaskBudgetAndSkipsAdvisor(t *test
 		t.Fatal(err)
 	}
 	defer f.P.DB.Close()
-	f.Provider.AuthFailures = map[string]int{"auth-blocked": 1}
+	// The worker writes first, then returns a typed authentication failure. The
+	// shared hold must not strand that scoped edit in machine A's worktree.
+	f.Provider.AuthFailuresAfterWrite = map[string]int{"auth-blocked": 1}
 	seedReadyTask(t, ctx, f, "auth-blocked")
-	task := runUntilTaskState(t, ctx, f, "auth-blocked", model.Blocked)
+	preRunHead, err := f.P.Git.SHA(ctx, "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- engine.New(f.P).Serve(ctx) }()
+	// A poll can observe the hold either side of its follow-on checkpoint. The
+	// canonical main head before the writer starts is the stable identity the
+	// new durable task head must advance, independent of that observation race.
+	_ = waitProviderAdmissionHold(t, ctx, f)
+	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _, err := f.P.DB.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := snapshot.Tasks["auth-blocked"]
 	if task.Attempts != 0 || len(task.FixCycles) != 0 || task.AdvisorUsed {
 		t.Fatalf("authentication failure consumed task recovery budget: %+v", task)
 	}
-	if task.Blocker == nil || task.Blocker.Origin != model.BlockerOriginProviderAuthentication || task.Blocker.Resume != model.Ready {
-		t.Fatalf("authentication failure did not preserve implementer stage: %+v", task.Blocker)
+	if task.State != model.Ready || task.Blocker != nil {
+		t.Fatalf("authentication failure did not preserve schedulable implementer checkpoint: %+v", task)
+	}
+	if task.HeadSHA == "" || task.HeadSHA == preRunHead {
+		t.Fatalf("authentication failure after a scoped write did not advance canonical pre-run head: before=%s after=%#v", preRunHead, task)
+	}
+	if len(snapshot.ProviderAdmissionHolds) != 1 {
+		t.Fatalf("authentication failure did not create shared provider hold: %#v", snapshot.ProviderAdmissionHolds)
 	}
 	if got := f.Provider.ImplementationCount("auth-blocked"); got != 1 {
 		t.Fatalf("implementer calls = %d, want one failed provider invocation", got)
@@ -842,7 +870,31 @@ func TestProviderAuthenticationFailurePreservesTaskBudgetAndSkipsAdvisor(t *test
 	if got := f.Provider.AdvisorCount("auth-blocked"); got != 0 {
 		t.Fatalf("advisor calls = %d, want none after authentication failure", got)
 	}
-	if strings.Contains(task.Blocker.Reason, "fixture provider invocation failed") {
+	if task.Blocker != nil && strings.Contains(task.Blocker.Reason, "fixture provider invocation failed") {
 		t.Fatalf("raw provider diagnostic entered blocker: %q", task.Blocker.Reason)
+	}
+
+	// A separate machine must reconstruct the published source checkpoint from
+	// state and the task branch; a provider hold cannot make local edits the
+	// only surviving copy of work completed before authentication failed.
+	replacement, err := f.Open(ctx, filepath.Join(f.Root, "auth-machine-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.DB.Close()
+	if err = replacement.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered, _, err := replacement.DB.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredTask := recovered.Tasks["auth-blocked"]
+	if recoveredTask == nil || recoveredTask.HeadSHA != task.HeadSHA {
+		t.Fatalf("attach lost authentication checkpoint: recovered=%#v want_head=%s", recoveredTask, task.HeadSHA)
+	}
+	content, err := os.ReadFile(filepath.Join(replacement.TaskPath(recoveredTask), "feature-auth-blocked.txt"))
+	if err != nil || strings.TrimSpace(string(content)) != "implemented" {
+		t.Fatalf("attach lost source written before authentication failure: %q %v", content, err)
 	}
 }

@@ -153,6 +153,15 @@ func reviewAuthenticationFailure(outcomes []reviewOutcome) bool {
 	return false
 }
 
+func reviewProviderAdmissionFailure(outcomes []reviewOutcome) bool {
+	for _, outcome := range outcomes {
+		if isProviderAdmissionHeld(outcome.err) {
+			return true
+		}
+	}
+	return false
+}
+
 func supervisorEvidenceText(text string) bool {
 	text = strings.ToLower(text)
 	for _, decision := range []string{"product decision", "choose whether", "accept risk", "authorize an exception", "approve an exception", "production access", "destructive migration", "provide credentials", "threat model", "security boundary", "trusted workspace", "race condition"} {
@@ -602,12 +611,22 @@ func (c *Controller) recordReadOnlyDeadline(e config.Effective, stage string, r 
 }
 
 func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effective, r roles.Role, t *model.Task, dir, objective, diff, evidence string, complete func(*model.Snapshot, provider.Result, error) error, explicitReadRef string) (provider.Result, error) {
+	if err := c.providerAdmissionGate(e, t); err != nil {
+		return provider.Result{}, err
+	}
 	if r.Name != "implementer" {
 		select {
 		case c.readers <- struct{}{}:
 			defer func() { <-c.readers }()
 		case <-ctx.Done():
 			return provider.Result{}, ctx.Err()
+		}
+		// A concurrent peer can publish a durable provider hold while this role
+		// waits for a reader reservation. Recheck after acquiring the slot and
+		// before creating a run or dispatching the provider: otherwise every
+		// queued peer that passed the first check would still invoke it.
+		if err := c.providerAdmissionGate(e, t); err != nil {
+			return provider.Result{}, err
 		}
 		if t != nil && t.Preflight != nil && t.Preflight.Phase == "waiting" {
 			if err := c.mutate(func(s *model.Snapshot) error {
@@ -762,6 +781,7 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 			err = &readOnlyDeadlineError{Stage: readOnlyStage, Role: r.Name, Retry: retry, err: err}
 		}
 	}
+	observedHold, admissionFailure := providerAdmissionFailure(e, resolved, err)
 	outcome := result.Status
 	if err != nil {
 		outcome = "failed"
@@ -770,6 +790,7 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 		c.recordInterruptedDuration(id, time.Since(started).Milliseconds())
 	}
 	if ctx.Err() == nil {
+		var durableHold model.ProviderAdmissionHold
 		saveErr := c.mutate(func(s *model.Snapshot) error {
 			// A failed provider call has no durable acceptance acknowledgement, so
 			// retain the record for at-least-once recovery. A structured result is
@@ -784,6 +805,14 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 					s.Runs[i].Outcome = outcome
 				}
 			}
+			if admissionFailure {
+				var holdErr error
+				durableHold, holdErr = recordProviderAdmissionHold(s, observedHold)
+				if holdErr != nil {
+					return holdErr
+				}
+				providerAdmissionCheckpoint(s.Tasks[taskID])
+			}
 			if complete != nil {
 				return complete(s, result, err)
 			}
@@ -791,6 +820,10 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 		})
 		if saveErr != nil {
 			return result, saveErr
+		}
+		if admissionFailure {
+			_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "provider_admission_held", providerAdmissionMessage(durableHold))
+			return result, &providerAdmissionHeldError{hold: durableHold, cause: err}
 		}
 	}
 	_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "worker_exit", fmt.Sprintf("outcome=%s capability=%s effective_model=%s", outcome, resolved.Capability, resolved.EffectiveModel))
@@ -852,6 +885,9 @@ func (c *Controller) plan(id string) {
 		c.planFailure(id, e)
 		return
 	}
+	if _, held := c.providerAdmissionHeld(effective); held {
+		return
+	}
 	runID := model.ID()
 	dir, e := c.P.ValidDisposableAnalysisWorktreePath(runID)
 	if e != nil {
@@ -869,6 +905,9 @@ func (c *Controller) plan(id string) {
 	}()
 	r, e := c.role(c.ctx, effective, roles.Builtins()["orchestrator"], nil, dir, o.Text, "", "")
 	if e != nil {
+		if isProviderAdmissionHeld(e) {
+			return
+		}
 		c.planFailure(id, e)
 		return
 	}
@@ -1368,6 +1407,9 @@ func (c *Controller) work(id string, write bool) {
 }
 
 func (c *Controller) handleVerificationError(id string, err error) {
+	if isProviderAdmissionHeld(err) {
+		return
+	}
 	if provider.IsAuthenticationFailure(err) {
 		// Review calls have already placed the task in Review, so resume that
 		// same gate after the operator restores the provider session.
@@ -1484,6 +1526,24 @@ func (c *Controller) implement(id string) bool {
 	if e == nil && r.RecoveredDeadlineHandoff {
 		if ce := c.recoveredCheckpoint(c.ctx, id, r); ce != nil {
 			c.block(id, "Resolve recovered checkpoint publication failure; local work is preserved.", ce.Error(), model.Ready)
+		}
+		return false
+	}
+	if _, ok := providerAdmissionHeldErrorFor(e); ok {
+		// A provider may have edited the scoped writer worktree before returning
+		// an authentication failure. Keep the existing fenced checkpoint path so
+		// those edits become portable before the shared provider hold suppresses
+		// every task. A normal successful checkpoint remains a schedulable
+		// pre-provider state; only a failed scope/secret/publication safeguard
+		// requires the existing local recovery blocker.
+		// A seventh exact rejection is represented by a broader saturation hold.
+		// Its durable scope must not erase the typed cause of this invocation:
+		// only the wrapped authoritative authentication result decides whether a
+		// writable task may have edits that need a fenced checkpoint.
+		if provider.IsAuthenticationFailure(e) {
+			if ce := c.checkpointAuthenticationFailure(id); ce != nil {
+				c.block(id, "Resolve checkpoint failure; local work is preserved.", ce.Error(), model.Ready)
+			}
 		}
 		return false
 	}
@@ -1785,12 +1845,18 @@ func (c *Controller) retry(id, kind, reason string) {
 	}
 	if count > limit {
 		if !t.AdvisorUsed {
-			if c.mutate(func(s *model.Snapshot) error { s.Tasks[id].AdvisorUsed = true; return nil }) != nil {
-				return
-			}
 			effective, e := c.effective(c.ctx)
 			if e == nil {
+				if _, held := c.providerAdmissionHeld(effective); held {
+					return
+				}
 				result, re := c.role(c.ctx, effective, roles.Builtins()["advisor"], t, c.P.TaskPath(t), "Investigate failure and recommend one final bounded approach: "+reason, "", "")
+				if isProviderAdmissionHeld(re) {
+					return
+				}
+				if c.mutate(func(s *model.Snapshot) error { s.Tasks[id].AdvisorUsed = true; return nil }) != nil {
+					return
+				}
 				if re == nil && result.Status == "completed" {
 					_ = c.mutate(func(s *model.Snapshot) error {
 						task := s.Tasks[id]
@@ -2285,6 +2351,9 @@ func (c *Controller) verifyReview(id string) error {
 	if e = c.preserveReviewFindings(id, assessment.findings); e != nil {
 		return e
 	}
+	if reviewProviderAdmissionFailure(outcomes) {
+		return nil
+	}
 	if reviewAuthenticationFailure(outcomes) {
 		c.providerAuthenticationBlock(id, "review", model.Review)
 		return nil
@@ -2392,6 +2461,9 @@ func (c *Controller) verifyReview(id string) error {
 		refreshAssessment := assessReviews(refreshRoles, refreshed, reviewFindingBlocksOrigin(t, paths, refreshRoles))
 		if e = c.preserveReviewFindings(id, refreshAssessment.findings); e != nil {
 			return e
+		}
+		if reviewProviderAdmissionFailure(refreshed) {
+			return nil
 		}
 		if reviewAuthenticationFailure(refreshed) {
 			c.providerAuthenticationBlock(id, "review", model.Review)
