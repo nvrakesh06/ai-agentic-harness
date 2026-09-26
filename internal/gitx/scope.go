@@ -198,7 +198,7 @@ func (g Git) ValidatePendingMergeScope(ctx context.Context, worktree, base strin
 	if err != nil {
 		return err
 	}
-	paths, err := g.Run(ctx, "", "diff", "--no-renames", "--name-only", "-z", base, tree)
+	paths, err := g.Run(ctx, "", "diff", "--no-renames", "--name-only", "-z", base, tree, "--")
 	if err != nil {
 		return err
 	}
@@ -219,7 +219,7 @@ func (g Git) ValidateCommitScope(ctx context.Context, base, head string, areas [
 	if !g.Ancestor(ctx, baseSHA, headSHA) {
 		return fmt.Errorf("scope head %s does not descend from immutable base %s", headSHA, baseSHA)
 	}
-	out, err := g.Run(ctx, "", "diff", "--no-renames", "--name-only", "-z", baseSHA+".."+headSHA)
+	out, err := g.Run(ctx, "", "diff", "--no-renames", "--name-only", "-z", baseSHA+".."+headSHA, "--")
 	if err != nil {
 		return err
 	}
@@ -251,7 +251,7 @@ func changedWorktreePaths(ctx context.Context, g Git) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	unstaged, err := g.Run(ctx, "", "diff", "--no-renames", "--name-only", "-z", "HEAD")
+	unstaged, err := g.Run(ctx, "", "diff", "--no-renames", "--name-only", "-z", "HEAD", "--")
 	if err != nil {
 		return nil, err
 	}
