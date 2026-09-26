@@ -24,20 +24,21 @@ scope fencing, exact-head evidence reuse, and a merge train. Reuse them.
 
 ```mermaid
 flowchart LR
-  B[Existing ten-PR batch: full release gate] --> I[Integrate exact verified tree]
+  B[Existing ten-PR batch: reviewed source candidate] --> C
   R[94 and 3: reader budgets and review waves] --> C[Combined candidate]
   N[Transient native checks: one supervisor retry] --> C
   M[88: transition accounting and run provenance] --> C
   T[45: complete bounded release test inventory] --> C
-  I --> C
   C --> O[Operational fixtures and scoped review]
   O --> G[One combined full release gate]
-  G --> A[Build and verify selected AIH binary]
+  G --> I[Integrate exact verified tree]
+  I --> A[Build and verify selected AIH binary]
   A --> P[Preview then apply explicit product scope recovery]
   P --> S[Resume independent StatMotion tasks]
 ```
 
-The three implementation tasks use separate worktrees. They may write concurrently;
+The three delegated implementation tasks and the supervisor's release fix use
+separate worktrees. They may write concurrently;
 heavy validation is serialized through the existing resource model. Native retry
 owns check handling, review work owns role dispatch, and metrics owns run-record
 creation/completion and transition accounting. Integrate frequently and resolve
