@@ -49,7 +49,10 @@ func (g Git) ReplanBranch(ctx context.Context, canonicalBase string, sources []R
 		if !shaPattern.MatchString(source.BaseSHA) || !shaPattern.MatchString(source.HeadSHA) || source.BaseSHA == source.HeadSHA || !g.Ancestor(ctx, source.BaseSHA, source.HeadSHA) {
 			return "", fmt.Errorf("invalid replan source checkpoint %d", index+1)
 		}
-		patch, err := g.Run(ctx, "", "diff", "--binary", "--full-index", source.BaseSHA+".."+source.HeadSHA)
+		// A binary patch is input to a later Git process, rather than metadata
+		// for this process. Preserve its terminal newline: Run intentionally
+		// trims line-oriented command output for ordinary callers.
+		patch, err := g.runRaw(ctx, "", "diff", "--binary", "--full-index", source.BaseSHA+".."+source.HeadSHA)
 		if err != nil || patch == "" {
 			if err != nil {
 				return "", fmt.Errorf("read replan source checkpoint %d: %w", index+1, err)
@@ -73,6 +76,17 @@ func (g Git) ReplanBranch(ctx context.Context, canonicalBase string, sources []R
 }
 
 func (g Git) Run(ctx context.Context, input string, args ...string) (string, error) {
+	out, err := g.runRaw(ctx, input, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(out, "\r\n"), nil
+}
+
+// runRaw retains Git output byte-for-byte for the narrow callers that feed it
+// back to Git. Keep Run's historical trimming behavior for every metadata
+// caller so its existing comparison contracts remain unchanged.
+func (g Git) runRaw(ctx context.Context, input string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	argv := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "user.name=AIH", "-c", "user.email=aih@localhost", "-c", "commit.gpgsign=false"}
@@ -90,7 +104,7 @@ func (g Git) Run(ctx context.Context, input string, args ...string) (string, err
 	if e != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), e, safety.Redact(out))
 	}
-	return strings.TrimRight(out, "\r\n"), nil
+	return out, nil
 }
 func Discover(ctx context.Context, dir string) (string, string, error) {
 	g := Git{dir}
