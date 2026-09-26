@@ -226,9 +226,22 @@ func TestReviewTimeoutPersistsPeerFindingBeforeRetryAndDefersQA(t *testing.T) {
 	f.P.Provider = workers
 	done := make(chan error, 1)
 	go func() { done <- engine.New(f.P).Serve(ctx) }()
+	stopped := false
+	defer func() {
+		if stopped {
+			return
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Errorf("supervisor did not stop after mixed review fixture failure")
+		}
+	}()
 	select {
 	case <-workers.firstTimeout:
 	case serveErr := <-done:
+		stopped = true
 		t.Fatalf("supervisor stopped before review timeout: %v", serveErr)
 	case <-time.After(30 * time.Second):
 		t.Fatal("security review did not reach its first bounded timeout")
@@ -239,23 +252,23 @@ func TestReviewTimeoutPersistsPeerFindingBeforeRetryAndDefersQA(t *testing.T) {
 		current, _, loadErr := f.P.DB.Load()
 		if loadErr == nil {
 			task := current.Tasks["mixed"]
-			if task != nil && len(task.Findings) == 1 && task.Findings[0].Severity == "high" && task.ReadOnlyRetries["review/security"].Attempts == 1 {
-				if task.FixCycles["reviewer"] != 1 || workers.qaCalls.Load() != 0 || task.Evidence.ReviewDispositions["reviewer"].Disposition != "" {
-					t.Fatalf("review timeout bypassed finding/auth recovery semantics: task=%#v qa=%d", task, workers.qaCalls.Load())
-				}
+			if task != nil && task.Evidence != nil && len(task.Findings) == 1 && task.Findings[0].Severity == "high" && task.ReadOnlyRetries["review/security"].Attempts == 1 && task.FixCycles["reviewer"] == 1 && workers.qaCalls.Load() == 0 && task.Evidence.ReviewDispositions["reviewer"].Disposition == "" {
 				break
 			}
 		}
 		select {
 		case serveErr := <-done:
-			t.Fatalf("supervisor stopped before partial review progress: %v", serveErr)
+			stopped = true
+			t.Fatalf("supervisor stopped before routed review recovery: %v", serveErr)
 		case <-deadline.C:
-			t.Fatal("partial reviewer finding was not persisted before retry")
+			t.Fatal("reviewer finding was not durably routed without running QA")
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
 	cancel()
-	if err = <-done; err != nil {
-		t.Fatal(err)
+	serveErr := <-done
+	stopped = true
+	if serveErr != nil {
+		t.Fatal(serveErr)
 	}
 }
