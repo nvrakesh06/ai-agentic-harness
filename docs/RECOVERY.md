@@ -133,6 +133,27 @@ GitHub issue/PR creation uses stable markers to recover ambiguous responses. Bod
 updates can lag during outages. Handoff retries issue mirrors. The machine-readable
 snapshot and Git branches are the recovery authority, not a recent issue comment.
 
+## Schema-12 provider-admission rollout
+
+Schema 12 is a future provider-admission-hold deployment, separate from the
+schema-11 restoration release. Do not publish a schema-12 snapshot from that
+restoration or select a schema-12 binary by accident.
+
+Before the first schema-12 state publication, select the exact reviewed schema-12
+binary on every machine that can attach, resume, hand off, or take over this
+project. Stop every supervisor using an older binary, including enabled user
+services that could restart after a reboot. Verify the replacement with `aih
+doctor`, then use `aih attach`/`aih status` before `aih resume`. Keep the prior
+binary available only for rollback before the first schema-12 save; once that save
+is acknowledged, an older runtime rejects the newer snapshot before writes and
+cannot safely attach or take ownership.
+
+Migration from schema 11 and earlier initializes an empty provider-hold map. It
+does not infer a provider-wide hold from old task blockers, and it retains every
+legacy task blocker unchanged. The new map has room for six exact holds and two
+provider-specific saturation holds. Saturation is fail-closed and never evicts an
+active exact hold.
+
 ## Provider admission holds
 
 An authoritative provider authentication failure or `invalid_json_schema`
@@ -144,17 +165,22 @@ verification and integration remain eligible. Inspect the exact hold key in
 For an authentication hold, restore the selected provider login as the service
 OS user first. Then run `aih provider retry <hold-key>`. The command checks that
 login before it queues one supervisor-owned, bounded, read-only protocol probe.
-The probe uses a disposable checkout, never runs a task worker, and keeps the
-hold active while it runs. Only a valid completed structured response releases
-the selected active hold. A rejected probe leaves the hold in place; its local
-command outcome and sanitized event are retained for diagnosis.
+The probe waits for active requests from that provider to finish, uses a disposable
+checkout, never runs a task worker, and keeps the hold active while it runs. Only
+a valid completed structured response and a clean disposable checkout release the
+selected active hold. That removal and the command's portable applied receipt are
+one state publication, so replay of the exact command makes no second provider
+call. A failed or malformed probe leaves the hold in place and records a rejected
+local command outcome and sanitized event.
 
 For an `invalid_json_schema` hold, repair the checked-in provider schema. A
 materially changed schema identity becomes admissible without deleting the
 historical hold. Changing a role model, policy, or rules hash does not reopen the
-same rejected schema. Do not edit the local command database or remote state to
-remove a hold. A successful probe records its command ID in portable applied
-state; an exact retry is acknowledged without starting another task.
+same rejected schema. A retry must name an exact *currently active* hold; an old
+schema hold is not released just because a different schema is now admissible.
+Do not edit the local command database or remote state to remove a hold. AIH
+classifies only its typed provider authentication and schema-rejection results;
+quoted provider output is never a recovery authority.
 
 ## Merge conflicts and failed verification
 

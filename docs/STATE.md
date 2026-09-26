@@ -37,7 +37,7 @@ machines. Install normal Git/provider credentials independently on each machine.
 `aih-state:snapshot.json` stores `state_schema`, `created_by_version`, project
 identity, revision, controller lease, objectives, tasks, runs, accepted command IDs,
 the ordered authorized objective backlog, capacity policy/status, improvement
-candidates and the integration hold. Capacity state records active/target/maximum
+candidates, the integration hold, and provider admission holds. Capacity state records active/target/maximum
 writer utilization, queued preflight count, reader utilization, backlog cursor, grace boundary, latest
 backfill selection, a machine-readable suppression reason and the bounded tail of
 underutilization/selection/suppression transitions. It also records queued and
@@ -128,7 +128,7 @@ environment and recheck without starting another implementer.
 
 ## Schema compatibility and migrations
 
-The current runtime uses remote schema 11, role schema 1, rules version 1, and
+The current runtime uses remote schema 12, role schema 1, rules version 1, and
 local schema 1. Unknown newer schemas fail closed before writes. Legacy schema 0
 gains version metadata and missing maps; schema 1 reconstructs the authorized
 objective backlog deterministically. Schema 2 drops unowned verification-resource
@@ -147,11 +147,23 @@ head. Positive historical provider durations remain usable, while unrecorded zer
 durations remain unavailable. Interrupted recovery durations use the expired lease
 boundary and are explicitly estimates.
 
+Schema 12 adds `provider_admission_holds`, a bounded portable map for only
+authoritative provider authentication and `invalid_json_schema` rejections. A
+schema-12 hold key is either the provider authentication scope, or the provider,
+rejection class, and schema digest; canonical policy, rules, and model are retained
+as origin provenance but do not widen a schema rejection's key. At most six exact
+holds and two provider-specific saturation holds fit in the eight-record map. A
+full exact set never evicts a current hold: it records the affected provider's
+fail-closed saturation hold instead. Migration from schema 11 or earlier creates
+an empty hold map even if an old fixture carried similarly named data. Earlier
+state has no trustworthy provider-wide identity, so migration neither invents a
+hold nor clears, rewrites, or recovers historical task-local blockers.
+
 All migrated snapshots then undergo current validation. The first subsequent state
 commit keeps the original remote commit as its parent, preserving the pre-migration
-backup in Git history. Publishing schema 11 is a one-way deployment boundary: older
+backup in Git history. Publishing schema 12 is a one-way deployment boundary: older
 runtimes reject it. Upgrade every machine that may attach, resume, or take over
-before the first schema-11 save. No automatic major-version migration exists.
+before the first schema-12 save. No automatic major-version migration exists.
 
 Remote task identities and branches are constrained before use as filesystem or
 Git targets. Schema changes require tests for old fixtures and new-runtime refusal.

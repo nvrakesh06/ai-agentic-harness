@@ -115,6 +115,19 @@ an explicit read-only or edit tool list, without model shell execution. Native
 checks are supervisor-owned. Authentication remains in the provider's normal local
 installation. Providers do not receive GitHub token environment variables.
 
+An authoritative provider authentication failure or an `invalid_json_schema`
+rejection creates a schema-12 portable admission hold before any task-local retry
+route. The hold suppresses planning, preflight, writing, review, and Advisor calls
+for its active provider scope without consuming their budgets; native verification
+and integration remain schedulable. Authentication is keyed to the provider. A
+schema rejection is keyed to the provider and exact output-schema digest, so a
+policy, rules, or model change cannot repeatedly reopen it. Origin policy, rules,
+and model remain audit provenance only. The bounded map keeps six exact holds plus
+one non-evicting saturation hold per supported provider. A public retry is a queued,
+supervisor-owned read-only protocol probe. It never dispatches a task worker and
+removes only its selected active hold together with the command's portable applied
+receipt after a valid completed response.
+
 Windows workers start suspended, join a kill-on-close Job Object, then resume.
 Unix workers use an owned process group and pipe-lifeline guardian so supervisor
 death also kills descendants on Linux and macOS. Deliberately daemonizing hostile code is
