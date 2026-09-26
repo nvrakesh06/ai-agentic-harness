@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -165,7 +166,13 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 			stopped = true
 			t.Fatalf("supervisor stopped before durable QA wave: %v state=%#v qa_failure=%v", serveErr, last, workers.qaPeerFailure.Load())
 		case <-deadline.C:
-			t.Fatalf("review waves did not durably complete: reviewer=%d security=%d QA=%d independent=%d state=%#v qa_failure=%v", workers.auditedReviewer.Load(), workers.auditedSecurity.Load(), workers.auditedQA.Load(), workers.independent.Load(), last, workers.qaPeerFailure.Load())
+			stacks := make([]byte, 1<<20)
+			n := runtime.Stack(stacks, true)
+			var evidence *model.Evidence
+			if last != nil {
+				evidence = last.Evidence
+			}
+			t.Fatalf("review waves did not durably complete: reviewer=%d security=%d QA=%d independent=%d task_state=%#v evidence=%#v qa_failure=%v goroutines=\n%s", workers.auditedReviewer.Load(), workers.auditedSecurity.Load(), workers.auditedQA.Load(), workers.independent.Load(), last, evidence, workers.qaPeerFailure.Load(), stacks[:n])
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
