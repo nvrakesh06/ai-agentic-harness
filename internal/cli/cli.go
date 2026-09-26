@@ -236,6 +236,41 @@ func New() *cobra.Command {
 	guide.Flags().BoolVar(&operatorGuidance, "operator", false, "operator guidance scoped to the target's current head and policy")
 	guide.Flags().StringVar(&guidanceFile, "file", "", "UTF-8 correction text file (maximum 1600 bytes)")
 	root.AddCommand(guide)
+	var replanFile string
+	task := &cobra.Command{Use: "task", Short: "Task lifecycle operations"}
+	task.AddCommand(&cobra.Command{Use: "replan", Short: "Atomically supersede bounded idle tasks with one verified successor", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if replanFile == "" {
+			return errors.New("task replan requires --file")
+		}
+		input, err := os.Open(replanFile)
+		if err != nil {
+			return err
+		}
+		defer input.Close()
+		contents, err := io.ReadAll(io.LimitReader(input, 32*1024+1))
+		if err != nil {
+			return err
+		}
+		if len(contents) == 0 || len(contents) > 32*1024 {
+			return errors.New("replan file must contain 1..32768 bytes")
+		}
+		request, err := engine.DecodeReplanRequest(contents)
+		if err != nil {
+			return fmt.Errorf("decode replan request: %w", err)
+		}
+		p, err := o.open(cmd.Context(), true)
+		if err != nil {
+			return err
+		}
+		defer p.DB.Close()
+		if err = engine.Replan(cmd.Context(), p, request); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Applied bounded replan %s; successor %s is ready for ordinary supervisor preflight and verification.\n", request.CommandID, request.Replacement.ID)
+		return nil
+	}})
+	task.Commands()[0].Flags().StringVar(&replanFile, "file", "", "versioned bounded replan JSON")
+	root.AddCommand(task)
 	for _, name := range []string{"stop", "handoff"} {
 		name := name
 		root.AddCommand(&cobra.Command{Use: name, Short: "Stop scheduling, checkpoint workers, and release the lease", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -645,7 +680,7 @@ func showStatus(cmd *cobra.Command, p *engine.Project, blockers, asJSON bool) er
 		}
 		if t.State == model.Ready {
 			for _, d := range t.Dependencies {
-				if s.Tasks[d] != nil && s.Tasks[d].State != model.Done {
+				if !model.DependencyDone(s, d) {
 					status = "WAITING_DEPENDENCIES"
 				}
 			}

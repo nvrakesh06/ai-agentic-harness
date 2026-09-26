@@ -273,13 +273,7 @@ func (c *Controller) postVerify(id string) {
 	}
 	_ = c.P.Hub.UpdatePR(c.ctx, t.PR, c.prBody(t)+"\nIntegration commit: `"+t.MergeSHA+"`\n"+verification+": `"+target+"`\n")
 	s := c.Snapshot()
-	complete := true
-	for _, other := range s.Tasks {
-		if other.ObjectiveID == t.ObjectiveID && other.State != model.Done {
-			complete = false
-		}
-	}
-	if complete {
+	if model.ObjectiveComplete(s, t.ObjectiveID) {
 		if o := s.Objectives[t.ObjectiveID]; o != nil {
 			_ = c.P.Hub.UpdateIssue(c.ctx, o.Issue, githubObjectiveBody(o), true)
 		}
