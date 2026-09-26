@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/demo"
@@ -17,6 +18,90 @@ import (
 	"testing"
 	"time"
 )
+
+const fixtureSupervisorDrainTimeout = 2*time.Minute + 5*time.Second
+
+var errFixtureSupervisorUndrained = errors.New("fixture supervisor did not drain")
+
+// fixtureSupervisor owns the child context started by a real-Git fixture. A
+// fixture must drain it before deferred SQLite cleanup can run.
+type fixtureSupervisor struct {
+	cancel       context.CancelFunc
+	done         <-chan error
+	drainTimeout time.Duration
+	watchdog     func(string)
+}
+
+func newFixtureSupervisor(parent context.Context, project *engine.Project) *fixtureSupervisor {
+	child, cancel := context.WithCancel(parent)
+	done := make(chan error, 1)
+	go func() { done <- engine.New(project).Serve(child) }()
+	return &fixtureSupervisor{
+		cancel:       cancel,
+		done:         done,
+		drainTimeout: fixtureSupervisorDrainTimeout,
+		watchdog: func(diagnostic string) {
+			// Do not touch SQLite here: its owner did not drain. Let process exit
+			// release handles rather than returning into a deferred DB.Close race.
+			fmt.Fprintln(os.Stderr, "fixture supervisor drain watchdog:", diagnostic)
+			os.Exit(1)
+		},
+	}
+}
+
+func TestFixtureSupervisorDrainCancelsAndReturnsChildResult(t *testing.T) {
+	done := make(chan error, 1)
+	done <- errors.New("child stopped")
+	cancelled := false
+	supervisor := &fixtureSupervisor{
+		cancel:       func() { cancelled = true },
+		done:         done,
+		drainTimeout: time.Second,
+		watchdog:     func(string) { t.Fatal("watchdog ran after child exit") },
+	}
+	if err := supervisor.drain("status=fixture"); err == nil || err.Error() != "child stopped" {
+		t.Fatalf("drain error = %v", err)
+	}
+	if !cancelled {
+		t.Fatal("fixture drain did not cancel its child context")
+	}
+}
+
+func TestFixtureSupervisorDrainWatchdogIsInjectable(t *testing.T) {
+	done := make(chan error)
+	var diagnostic string
+	supervisor := &fixtureSupervisor{
+		cancel:       func() {},
+		done:         done,
+		drainTimeout: time.Millisecond,
+		watchdog:     func(value string) { diagnostic = value },
+	}
+	if err := supervisor.drain("status=bounded-safe-fields"); !errors.Is(err, errFixtureSupervisorUndrained) {
+		t.Fatalf("undrained fixture error = %v", err)
+	}
+	if diagnostic != "status=bounded-safe-fields" {
+		t.Fatalf("watchdog diagnostic = %q", diagnostic)
+	}
+}
+
+// drain cancels the child on every fixture exit, then waits through the
+// controller's bounded shutdown allowance. The watchdog is process-level by
+// design: returning would allow a caller's deferred DB.Close to race Serve.
+func (s *fixtureSupervisor) drain(diagnostic string) error {
+	if s == nil {
+		return nil
+	}
+	s.cancel()
+	timer := time.NewTimer(s.drainTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-s.done:
+		return err
+	case <-timer.C:
+		s.watchdog(diagnostic)
+		return errFixtureSupervisorUndrained
+	}
+}
 
 func init() {
 	if len(os.Args) > 1 && os.Args[1] == "_aih-native-source-failure" {
@@ -128,8 +213,15 @@ func seedReadyTask(t *testing.T, ctx context.Context, f *demo.Fixture, title str
 
 func runUntilTaskState(t *testing.T, ctx context.Context, f *demo.Fixture, id string, wanted ...model.State) *model.Task {
 	t.Helper()
-	done := make(chan error, 1)
-	go func() { done <- engine.New(f.P).Serve(ctx) }()
+	supervisor := newFixtureSupervisor(ctx, f.P)
+	drained := false
+	defer func() {
+		if !drained {
+			if err := supervisor.drain(retryFixtureStatus(f, id)); err != nil {
+				t.Errorf("fixture supervisor drain during cleanup: %v", err)
+			}
+		}
+	}()
 	wantedStates := map[model.State]bool{}
 	for _, state := range wanted {
 		wantedStates[state] = true
@@ -140,37 +232,27 @@ func runUntilTaskState(t *testing.T, ctx context.Context, f *demo.Fixture, id st
 			if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
 				t.Fatal(err)
 			}
-			if err = <-done; err != nil {
+			if err = supervisor.drain(retryFixtureStatus(f, id)); err != nil {
 				t.Fatal(err)
 			}
+			drained = true
 			return snapshot.Tasks[id]
 		}
 		select {
-		case err = <-done:
+		case err = <-supervisor.done:
+			drained = true
 			t.Fatal("supervisor stopped before target state", err)
 		case <-ctx.Done():
-			// Let the supervisor observe cancellation before reporting the durable
-			// state. This keeps a failed fixture from leaving an owned goroutine
-			// behind and makes a deadline distinguish a blocked transition from a
-			// check-permit stall.
-			var stopErr error
-			select {
-			case stopErr = <-done:
-			case <-time.After(5 * time.Second):
-				stopErr = fmt.Errorf("supervisor did not stop within diagnostic grace")
-			}
-			snapshot, _, loadErr := f.P.DB.Load()
-			var task *model.Task
-			if loadErr == nil {
-				task = snapshot.Tasks[id]
-			}
-			t.Fatalf("%v waiting for %s; supervisor=%v load=%v task=%+v", ctx.Err(), strings.Join(func() []string {
+			diagnostic := retryFixtureStatus(f, id)
+			stopErr := supervisor.drain(diagnostic)
+			drained = true
+			t.Fatalf("%v waiting for %s; supervisor=%v %s", ctx.Err(), strings.Join(func() []string {
 				states := make([]string, 0, len(wanted))
 				for _, state := range wanted {
 					states = append(states, string(state))
 				}
 				return states
-			}(), ","), stopErr, loadErr, task)
+			}(), ","), stopErr, diagnostic)
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
