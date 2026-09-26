@@ -26,10 +26,11 @@ type releaseTestGroup struct {
 }
 
 type releaseTestInventory struct {
-	Schema int                `json:"schema"`
-	Head   string             `json:"head"`
-	Tree   string             `json:"tree"`
-	Groups []releaseTestGroup `json:"planned_groups"`
+	Schema        int                `json:"schema"`
+	Head          string             `json:"reference_head"`
+	Tree          string             `json:"reference_tree"`
+	WorktreeDirty bool               `json:"working_tree_dirty"`
+	Groups        []releaseTestGroup `json:"planned_groups"`
 }
 
 func releaseTestGroups(packages []string, integration string, tests []string, size int) ([]releaseTestGroup, error) {
@@ -124,7 +125,11 @@ func runCompleteReleaseTests(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("record release inventory tree: %w", err)
 	}
-	manifest, err := json.MarshalIndent(releaseTestInventory{Schema: 1, Head: strings.TrimSpace(head), Tree: strings.TrimSpace(tree), Groups: groups}, "", "  ")
+	status, err := platform.Run(discovery, "", nil, "", "git", "status", "--porcelain")
+	if err != nil {
+		return fmt.Errorf("record release inventory worktree status: %w", err)
+	}
+	manifest, err := json.MarshalIndent(releaseTestInventory{Schema: 1, Head: strings.TrimSpace(head), Tree: strings.TrimSpace(tree), WorktreeDirty: strings.TrimSpace(status) != "", Groups: groups}, "", "  ")
 	if err != nil {
 		return err
 	}
