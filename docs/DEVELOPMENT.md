@@ -49,6 +49,12 @@ scheduling:
   underutilization_grace_seconds: 30
   backlog_source: queued_objectives
 worker_timeout_seconds: 900
+# Optional read-only stage budgets. Omit a field to retain worker_timeout_seconds
+# for that stage; each explicit value is 10 seconds through worker_timeout_seconds.
+role_timeouts_seconds:
+  planning: 120
+  preflight: 180
+  review: 240
 lease_seconds: 180
 models:
   orchestrator: strong

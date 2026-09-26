@@ -180,10 +180,25 @@ type Task struct {
 	Decisions         []string                    `json:"decisions,omitempty"`
 	Blocker           *Blocker                    `json:"blocker,omitempty"`
 	Verification      *Verification               `json:"verification_retry_guard,omitempty"`
+	ReadOnlyRetries   map[string]ReadOnlyRetry    `json:"read_only_retries,omitempty"`
 	Evidence          *Evidence                   `json:"evidence,omitempty"`
 	ReviewProvenance  map[string]ReviewProvenance `json:"review_provenance,omitempty"`
 	VisualRequired    *VisualRequirement          `json:"visual_required,omitempty"`
 	Updated           time.Time                   `json:"updated"`
+}
+
+// ReadOnlyRetry fences the one narrower retry available to a timed-out
+// preflight or review role. It binds the consumed budget to the
+// exact task and policy inputs so attach cannot restart a full reader budget.
+type ReadOnlyRetry struct {
+	Stage            string `json:"stage"`
+	Role             string `json:"role"`
+	BaseSHA          string `json:"base_sha"`
+	HeadSHA          string `json:"head_sha,omitempty"`
+	Config           string `json:"config"`
+	Rules            string `json:"rules"`
+	Attempts         int    `json:"attempts"`
+	RemainingSeconds int    `json:"remaining_seconds"`
 }
 
 // VisualRequirement is a durable exact-head gate created when a preflight
@@ -905,6 +920,20 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 				return nil, false, errors.New("invalid verification retry revision")
 			}
 		}
+		if len(t.ReadOnlyRetries) > 8 {
+			return nil, false, errors.New("too many read-only retry guards")
+		}
+		for key, retry := range t.ReadOnlyRetries {
+			if !regexp.MustCompile(`^(pre-implementation|review)/[a-z][a-z0-9_-]{0,63}$`).MatchString(key) ||
+				(retry.Stage != "pre-implementation" && retry.Stage != "review") ||
+				!regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(retry.Role) ||
+				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(retry.BaseSHA) ||
+				(retry.HeadSHA != "" && !regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(retry.HeadSHA)) ||
+				!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(retry.Config) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(retry.Rules) ||
+				retry.Attempts < 1 || retry.Attempts > 2 || retry.RemainingSeconds < 0 || retry.RemainingSeconds > 86400 || key != retry.Stage+"/"+retry.Role {
+				return nil, false, errors.New("invalid read-only retry guard")
+			}
+		}
 		if v := t.VisualRequired; v != nil {
 			if v.Role == "" || !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`).MatchString(v.Role) ||
 				!regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`).MatchString(v.Base) ||
@@ -1468,6 +1497,10 @@ func Answer(t *Task, answer string) error {
 		return err
 	}
 	t.Decisions = append(t.Decisions, answer)
+	// A human answer explicitly authorizes a new read-only attempt window after
+	// a persisted deadline blocker. The old guard remains authoritative until
+	// that acknowledgement; ordinary automatic retries never clear it.
+	t.ReadOnlyRetries = nil
 	if t.Rotations >= 24 {
 		t.Decisions = append(t.Decisions, "Human authorized another bounded checkpoint rotation window.")
 		t.Rotations = 0

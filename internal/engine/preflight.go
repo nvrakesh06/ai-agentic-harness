@@ -661,6 +661,13 @@ func (c *Controller) preflight(id string) {
 				c.providerAuthenticationBlock(id, r.Name+" preflight", current.State)
 				return
 			}
+			var deadline *readOnlyDeadlineError
+			if errors.As(roleErr, &deadline) {
+				if !deadline.Retry {
+					c.readOnlyDeadlineBlock(id, deadline, model.Ready)
+				}
+				return
+			}
 			c.retry(id, "implementation", roleErr.Error())
 			return
 		}

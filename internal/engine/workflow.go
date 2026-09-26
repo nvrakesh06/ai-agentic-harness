@@ -276,13 +276,22 @@ func assessReviews(required []roles.Role, outcomes []reviewOutcome, blockers ...
 }
 
 func reviewEvidencePayload(evidence *model.Evidence, attempt int) string {
+	return reviewEvidencePayloadWithPeers(evidence, attempt, false)
+}
+
+func reviewEvidencePayloadWithPeers(evidence *model.Evidence, attempt int, peers bool) string {
 	copy := *evidence
-	copy.Reviews = map[string]string{}
+	policy := "Peer reviews are concurrent and independent; the empty reviews map is intentional. Supervisor check evidence is exact-head metadata. It includes the AIH-observed native check stage, executable, opaque command ID, exit status, and parsed pass counts, but omits successful stdout content, command arguments, and environment values."
+	if !peers {
+		copy.Reviews = map[string]string{}
+	} else {
+		policy = "This QA wave follows concurrent independent reviewer, security, and designer waves. Reviews contains only completed exact-head peer summaries and durable dispositions; assess the supplied artifacts without treating them as a substitute for QA. Supervisor check evidence is exact-head metadata and omits successful stdout content, command arguments, and environment values."
+	}
 	payload := struct {
 		*model.Evidence
 		Attempt int    `json:"review_attempt"`
 		Policy  string `json:"review_policy"`
-	}{Evidence: &copy, Attempt: attempt, Policy: "Peer reviews are concurrent and independent; the empty reviews map is intentional. Supervisor check evidence is exact-head metadata. It includes the AIH-observed native check stage, executable, opaque command ID, exit status, and parsed pass counts, but omits successful stdout content, command arguments, and environment values."}
+	}{Evidence: &copy, Attempt: attempt, Policy: policy}
 	serialized, _ := json.Marshal(payload)
 	return string(serialized)
 }
@@ -363,6 +372,153 @@ func (c *Controller) roleWithCompletion(ctx context.Context, e config.Effective,
 // review, such as post-verify recovery after a repair on main.
 func (c *Controller) roleAtRef(ctx context.Context, e config.Effective, r roles.Role, t *model.Task, dir, objective, diff, evidence, readRef string) (provider.Result, error) {
 	return c.roleWithCompletionAtRef(ctx, e, r, t, dir, objective, diff, evidence, nil, readRef)
+}
+
+const readOnlyInitialBudgetNumerator = 4
+const readOnlyInitialBudgetDenominator = 5
+
+// readOnlyDeadlineError is intentionally separate from implementation and
+// native verification failures. Its caller either schedules the one remaining
+// exact-input reader pass or creates a verification-only human blocker without
+// spending a code FIX or Advisor budget.
+type readOnlyDeadlineError struct {
+	Stage string
+	Role  string
+	Retry bool
+	err   error
+}
+
+func (e *readOnlyDeadlineError) Error() string {
+	if e == nil || e.err == nil {
+		return "read-only role deadline exhausted"
+	}
+	return e.err.Error()
+}
+
+func (e *readOnlyDeadlineError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func readOnlyRetryKey(stage, role string) string { return stage + "/" + role }
+
+func readOnlyRetryMatches(retry model.ReadOnlyRetry, stage, role string, task *model.Task, effective config.Effective) bool {
+	return retry.Stage == stage && retry.Role == role && retry.BaseSHA == task.BaseSHA && retry.HeadSHA == task.HeadSHA && retry.Config == effective.Hash && retry.Rules == roles.Hash()
+}
+
+func readOnlyInitialAndRemaining(seconds int) (initial, remaining time.Duration) {
+	remainingSeconds := seconds / readOnlyInitialBudgetDenominator
+	if remainingSeconds < 1 {
+		remainingSeconds = 1
+	}
+	return time.Duration(seconds-remainingSeconds) * time.Second, time.Duration(remainingSeconds) * time.Second
+}
+
+// readOnlyRoleStage describes the invocation rather than the reusable role's
+// default. The built-in designer is a review role for final acceptance, but it
+// is also deliberately scheduled during UI preflight. Its deadline and retry
+// fence must therefore belong to pre-implementation for that invocation.
+func readOnlyRoleStage(r roles.Role, task *model.Task) string {
+	if task != nil && task.Preflight != nil && (task.State == model.Ready || task.State == model.Fix) &&
+		(task.Preflight.Phase == "waiting" || task.Preflight.Phase == "running") {
+		return "pre-implementation"
+	}
+	return r.Stage
+}
+
+// beginReadOnlyAttempt reserves the narrower retry before the provider starts.
+// Attempts=1 means the remainder is available; Attempts=2 means it has been
+// consumed. A restart can therefore never turn an interrupted second request
+// into a fresh full-budget request.
+func (c *Controller) beginReadOnlyAttempt(e config.Effective, stage string, r roles.Role, task *model.Task) (time.Duration, bool, *readOnlyDeadlineError, error) {
+	seconds := e.Project.RoleTimeout(stage)
+	if task == nil || (stage != "pre-implementation" && stage != "review") {
+		return time.Duration(seconds) * time.Second, false, nil, nil
+	}
+	current := c.Snapshot().Tasks[task.ID]
+	if current == nil {
+		return 0, false, nil, errors.New("task disappeared while admitting read-only role")
+	}
+	key := readOnlyRetryKey(stage, r.Name)
+	guard, guarded := current.ReadOnlyRetries[key]
+	if !guarded || !readOnlyRetryMatches(guard, stage, r.Name, current, e) {
+		initial, _ := readOnlyInitialAndRemaining(seconds)
+		return initial, false, nil, nil
+	}
+	if guard.Attempts != 1 || guard.RemainingSeconds <= 0 {
+		return 0, false, &readOnlyDeadlineError{Stage: stage, Role: r.Name, err: context.DeadlineExceeded}, nil
+	}
+	timeout := time.Duration(guard.RemainingSeconds) * time.Second
+	reserved := false
+	err := c.mutate(func(s *model.Snapshot) error {
+		current := s.Tasks[task.ID]
+		if current == nil {
+			return errors.New("task disappeared while reserving read-only retry")
+		}
+		guard, ok := current.ReadOnlyRetries[key]
+		if !ok || !readOnlyRetryMatches(guard, stage, r.Name, current, e) || guard.Attempts != 1 || guard.RemainingSeconds <= 0 {
+			return nil
+		}
+		guard.Attempts = 2
+		guard.RemainingSeconds = 0
+		current.ReadOnlyRetries[key] = guard
+		reserved = true
+		return nil
+	})
+	if err != nil {
+		return 0, false, nil, err
+	}
+	if !reserved {
+		return 0, false, &readOnlyDeadlineError{Stage: stage, Role: r.Name, err: context.DeadlineExceeded}, nil
+	}
+	return timeout, true, nil, nil
+}
+
+// recordReadOnlyDeadline records the only retry for a stage/role/input tuple.
+// The total configured reader budget is split before the first request, so
+// attach can consume only the durable remainder rather than restart it.
+func (c *Controller) recordReadOnlyDeadline(e config.Effective, stage string, r roles.Role, task *model.Task) (bool, error) {
+	if task == nil || (stage != "pre-implementation" && stage != "review") {
+		return false, nil
+	}
+	key := readOnlyRetryKey(stage, r.Name)
+	seconds := e.Project.RoleTimeout(stage)
+	_, remainder := readOnlyInitialAndRemaining(seconds)
+	retry := false
+	err := c.mutate(func(s *model.Snapshot) error {
+		current := s.Tasks[task.ID]
+		if current == nil {
+			return errors.New("task disappeared while recording read-only deadline")
+		}
+		if current.ReadOnlyRetries == nil {
+			current.ReadOnlyRetries = map[string]model.ReadOnlyRetry{}
+		}
+		guard, guarded := current.ReadOnlyRetries[key]
+		if !guarded || !readOnlyRetryMatches(guard, stage, r.Name, current, e) {
+			guard = model.ReadOnlyRetry{Stage: stage, Role: r.Name, BaseSHA: current.BaseSHA, HeadSHA: current.HeadSHA, Config: e.Hash, Rules: roles.Hash()}
+		}
+		if guard.Attempts == 0 {
+			guard.Attempts = 1
+			guard.RemainingSeconds = int(remainder / time.Second)
+			current.ReadOnlyRetries[key] = guard
+			if stage == "pre-implementation" && current.Preflight != nil {
+				current.Preflight.Phase = "queued"
+			}
+			retry = true
+			return nil
+		}
+		// The retry is marked consumed at admission. Preserve that fact for a
+		// crash/restart fence and fall through to a verification-only blocker.
+		if guard.Attempts < 2 {
+			guard.Attempts = 2
+			guard.RemainingSeconds = 0
+			current.ReadOnlyRetries[key] = guard
+		}
+		return nil
+	})
+	return retry, err
 }
 
 func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effective, r roles.Role, t *model.Task, dir, objective, diff, evidence string, complete func(*model.Snapshot, provider.Result, error) error, explicitReadRef string) (provider.Result, error) {
@@ -454,7 +610,22 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 		}
 		prompt += "\nWORKER SCRATCH\nUse the supplied external scratch directory for temporary tooling, package-manager caches, downloads, and generated diagnostics. Do not create worker caches or downloaded tools inside the source worktree. Scratch is local-only and is never checkpointed: " + scratch + "\n"
 	}
-	request := provider.Request{Directory: runDir, Runtime: runtimeDir, Scratch: scratch, Prompt: prompt, Role: r.Name, Model: resolved.RequestModel, Write: r.Name == "implementer", Timeout: time.Duration(e.Project.WorkerSeconds) * time.Second}
+	timeout := time.Duration(e.Project.WorkerSeconds) * time.Second
+	retryingReadOnly := false
+	readOnlyStage := r.Stage
+	var admissionErr *readOnlyDeadlineError
+	if r.Name != "implementer" {
+		readOnlyStage = readOnlyRoleStage(r, t)
+		var admission error
+		timeout, retryingReadOnly, admissionErr, admission = c.beginReadOnlyAttempt(e, readOnlyStage, r, t)
+		if admission != nil {
+			return provider.Result{}, admission
+		}
+	}
+	if retryingReadOnly {
+		prompt += "\nREAD-ONLY RETRY BUDGET\nThis is the one narrower exact-input retry after the prior reader deadline. Focus only on the unresolved assigned " + readOnlyStage + " question, use the supplied exact-head evidence, and return the structured result before the remaining " + timeout.Round(time.Second).String() + " budget expires. Do not broaden review scope or repeat completed peer work.\n"
+	}
+	request := provider.Request{Directory: runDir, Runtime: runtimeDir, Scratch: scratch, Prompt: prompt, Role: r.Name, Model: resolved.RequestModel, Write: r.Name == "implementer", Timeout: timeout}
 	readonlyStatus := ""
 	if !request.Write && dir != "" {
 		readonlyStatus, err = (gitx.Git{Dir: dir}).Run(ctx, "", "status", "--porcelain")
@@ -463,7 +634,9 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 		}
 	}
 	var result provider.Result
-	if r.Name == "implementer" {
+	if admissionErr != nil {
+		err = admissionErr
+	} else if r.Name == "implementer" {
 		checkpointPrompt := prompt + "\n\nSOFT DEADLINE CHECKPOINT\nStop expanding scope. Inspect and preserve the existing worktree edits, run only the smallest relevant verification that fits, and immediately return the required structured result. Use completed only if the assigned acceptance criteria are satisfied; otherwise use in_progress and report the exact handoff, tests, and remaining risks. Do not undo safe existing work or begin unrelated improvements."
 		result, err = runWithCheckpoint(ctx, p, request, checkpointPrompt, request.Timeout, deadlineHooks{
 			active: func(runErr error) bool { return c.workerActive(dir, runErr) },
@@ -483,6 +656,16 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 			} else if after != readonlyStatus {
 				err = fmt.Errorf("read-only %s run modified task worktree; preserve and repair these paths before review completion: %s", r.Name, short(after, 1000))
 			}
+		}
+	}
+	if !request.Write && err != nil && errors.Is(err, context.DeadlineExceeded) {
+		var deadline *readOnlyDeadlineError
+		if !errors.As(err, &deadline) {
+			retry, deadlineErr := c.recordReadOnlyDeadline(e, readOnlyStage, r, t)
+			if deadlineErr != nil {
+				return result, deadlineErr
+			}
+			err = &readOnlyDeadlineError{Stage: readOnlyStage, Role: r.Name, Retry: retry, err: err}
 		}
 	}
 	outcome := result.Status
@@ -1093,6 +1276,14 @@ func (c *Controller) handleVerificationError(id string, err error) {
 		c.providerAuthenticationBlock(id, "review", model.Review)
 		return
 	}
+	var readOnlyDeadline *readOnlyDeadlineError
+	if errors.As(err, &readOnlyDeadline) {
+		if readOnlyDeadline.Retry {
+			return
+		}
+		c.readOnlyDeadlineBlock(id, readOnlyDeadline, model.SyncRequired)
+		return
+	}
 	if scopeError(err) {
 		c.block(id, "Correct or replan the immutable task-area assignment; local work is preserved.", err.Error(), model.Ready)
 		return
@@ -1116,6 +1307,25 @@ func (c *Controller) handleVerificationError(id string, err error) {
 		return
 	}
 	c.retry(id, "verification", err.Error())
+}
+
+func (c *Controller) readOnlyDeadlineBlock(id string, deadline *readOnlyDeadlineError, resume model.State) {
+	t := c.Snapshot().Tasks[id]
+	if t == nil || deadline == nil {
+		return
+	}
+	reason := "The " + deadline.Stage + " " + deadline.Role + " role exhausted its configured exact-input reader budget, including one narrower retry. No implementation FIX or Advisor budget was spent."
+	question := "Restore or change the read-only review environment, then answer to retry this preserved exact-head gate."
+	if deadline.Stage == "pre-implementation" {
+		question = "Restore or change the pre-implementation reader environment, then answer to retry this preserved task gate."
+	}
+	if c.mutate(func(s *model.Snapshot) error {
+		model.BlockWithOrigin(s.Tasks[id], question, reason, resume, model.BlockerOriginVerificationOnly)
+		return nil
+	}) == nil {
+		_ = c.P.DB.Event(id, t.RunID, deadline.Role, c.P.Config.Project.Provider, "read_only_deadline_blocked", deadline.Stage+" role exhausted its bounded retry")
+		c.mirror(id)
+	}
 }
 
 func (c *Controller) providerAuthenticationBlock(id, stage string, resume model.State) {
@@ -1546,7 +1756,12 @@ func (c *Controller) syncTask(ctx context.Context, id string) (config.Effective,
 			task.VisualRequired.Rules = roles.Hash()
 		}
 		task.State = model.Verifying
-		task.Evidence = nil
+		// A retry of the same exact task head and canonical base may retain only
+		// already-published partial review artifacts. Any changed source, base,
+		// policy, or rules remains an invalidation boundary.
+		if head != t.HeadSHA || base != t.BaseSHA || t.Evidence == nil || t.Evidence.Base != base || t.Evidence.Head != head || t.Evidence.Config != effective.Hash || t.Evidence.Rules != roles.Hash() {
+			task.Evidence = nil
+		}
 		return nil
 	}, updates...)
 	return effective, e
@@ -1644,23 +1859,79 @@ func reviewPromptTask(task *model.Task, paths []string) *model.Task {
 	return &promptTask
 }
 
-func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Task, paths []string, dir, diff string, evidence *model.Evidence, attempt int, required []roles.Role) []reviewOutcome {
+func reviewWaves(required []roles.Role) [][]int {
+	independent := make([]int, 0, len(required))
+	qa := make([]int, 0, 1)
+	for index, role := range required {
+		if role.Name == "qa" {
+			qa = append(qa, index)
+			continue
+		}
+		independent = append(independent, index)
+	}
+	waves := make([][]int, 0, 2)
+	if len(independent) != 0 {
+		waves = append(waves, independent)
+	}
+	if len(qa) != 0 {
+		waves = append(waves, qa)
+	}
+	return waves
+}
+
+// runReviewAttempt keeps independent reviewers concurrent, then gives the
+// built-in QA role completed exact-head peer artifacts. Publishing after each
+// wave makes an interrupted QA retry resume only the missing role, not rerun
+// already-completed reviewers on unchanged source and policy inputs.
+func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Task, paths []string, dir, diff string, evidence *model.Evidence, attempt int, required []roles.Role) ([]reviewOutcome, error) {
 	outcomes := make([]reviewOutcome, len(required))
-	payload := reviewEvidencePayload(evidence, attempt)
 	promptTask := reviewPromptTask(task, paths)
-	if evidence.Visual != nil {
-		payload += "\nVISUAL ARTIFACT ROOT (local, read-only): " + filepath.Join(c.P.Dir, filepath.FromSlash(filepath.Dir(evidence.Visual.Manifest))) + "\nInspect the screenshot and diagnostics listed in visual.artifacts. A capture artifact is evidence, not a visual pass.\n"
+	for _, indexes := range reviewWaves(required) {
+		qaWave := false
+		for _, index := range indexes {
+			qaWave = qaWave || required[index].Name == "qa"
+		}
+		payload := reviewEvidencePayloadWithPeers(evidence, attempt, qaWave)
+		if evidence.Visual != nil {
+			payload += "\nVISUAL ARTIFACT ROOT (local, read-only): " + filepath.Join(c.P.Dir, filepath.FromSlash(filepath.Dir(evidence.Visual.Manifest))) + "\nInspect the screenshot and diagnostics listed in visual.artifacts. A capture artifact is evidence, not a visual pass.\n"
+		}
+		var reviews sync.WaitGroup
+		for _, index := range indexes {
+			index, role := index, required[index]
+			reviews.Add(1)
+			go func() {
+				defer reviews.Done()
+				outcomes[index].result, outcomes[index].err = c.role(c.ctx, effective, role, promptTask, dir, task.Objective, diff, payload)
+			}()
+		}
+		reviews.Wait()
+		for _, index := range indexes {
+			role, outcome := required[index], outcomes[index]
+			if outcome.err == nil && outcome.result.Status == "completed" {
+				evidence.Reviews[role.Name] = outcome.result.Summary
+				// Findings must be routed before a role can count as clean durable
+				// acceptance. Its summary still goes to QA in this attempt, but an
+				// interrupted later wave cannot silently reuse it as a clean pass.
+				if len(outcome.result.Findings) == 0 {
+					evidence.ReviewDispositions[role.Name] = completedDisposition(task, role, roleRuntime(effective, role))
+				}
+			}
+		}
+		if err := c.publishReviewProgress(task.ID, evidence); err != nil {
+			return outcomes, err
+		}
+		// QA may only consume completed peer artifacts. A provider failure in an
+		// earlier wave is already durable progress for the completed peers; defer
+		// QA until the bounded retry or recovery restores the missing artifact.
+		failed := false
+		for _, index := range indexes {
+			failed = failed || outcomes[index].err != nil
+		}
+		if failed {
+			break
+		}
 	}
-	var reviews sync.WaitGroup
-	for i, role := range required {
-		reviews.Add(1)
-		go func() {
-			defer reviews.Done()
-			outcomes[i].result, outcomes[i].err = c.role(c.ctx, effective, role, promptTask, dir, task.Objective, diff, payload)
-		}()
-	}
-	reviews.Wait()
-	return outcomes
+	return outcomes, nil
 }
 
 func visualRequirementMatches(task *model.Task, effective config.Effective) bool {
@@ -1679,6 +1950,47 @@ func (c *Controller) preserveReviewFindings(id string, findings []model.Finding)
 		s.Tasks[id].Findings = appendUniqueFindings(s.Tasks[id].Findings, findings)
 		return nil
 	})
+}
+
+// inProgressReviewEvidence resumes only exact-head review roles whose completed
+// artifacts were published before a later wave stopped. This is narrower than
+// review reuse: it never crosses a changed source, base, configuration, rules,
+// roster, or review scope.
+func inProgressReviewEvidence(task *model.Task, effective config.Effective, roster []string, scope string) (map[string]model.ReviewDisposition, map[string]string) {
+	dispositions := map[string]model.ReviewDisposition{}
+	reviews := map[string]string{}
+	if task == nil || task.Evidence == nil {
+		return dispositions, reviews
+	}
+	evidence := task.Evidence
+	if evidence.Base != task.BaseSHA || evidence.Head != task.HeadSHA || evidence.Config != effective.Hash || evidence.Rules != roles.Hash() || evidence.ReviewScope != scope || !sameRoster(evidence.ReviewRoster, roster) {
+		return dispositions, reviews
+	}
+	for _, name := range roster {
+		disposition, ok := evidence.ReviewDispositions[name]
+		if !ok || disposition.Disposition != "completed" || disposition.SourceHead != task.HeadSHA || disposition.Runtime == "" {
+			continue
+		}
+		dispositions[name] = disposition
+		if summary := evidence.Reviews[name]; summary != "" {
+			reviews[name] = summary
+		}
+	}
+	return dispositions, reviews
+}
+
+// acceptReviewDispositions records a completed role only after the caller has
+// accepted its full assessment and routing result. Earlier wave publication is
+// intentionally stricter: it records dispositions only for zero-finding roles
+// so an interrupted attempt cannot reuse a completed role with an unprocessed
+// finding as clean acceptance.
+func acceptReviewDispositions(evidence *model.Evidence, task *model.Task, effective config.Effective, required []roles.Role, outcomes []reviewOutcome) {
+	for i, role := range required {
+		if outcomes[i].err == nil && outcomes[i].result.Status == "completed" {
+			evidence.Reviews[role.Name] = outcomes[i].result.Summary
+			evidence.ReviewDispositions[role.Name] = completedDisposition(task, role, roleRuntime(effective, role))
+		}
+	}
 }
 
 func (c *Controller) verifyReview(id string) error {
@@ -1757,9 +2069,13 @@ func (c *Controller) verifyReview(id string) error {
 	}
 	roster, rosterReason := roles.ReviewRoster(required)
 	scope := reviewScope(t, paths, roster)
-	dispositions := c.reusableReviewDispositions(c.ctx, effective, t, roster, scope)
-	if dispositions == nil {
-		dispositions = map[string]model.ReviewDisposition{}
+	dispositions, priorReviews := inProgressReviewEvidence(t, effective, roster, scope)
+	if reused := c.reusableReviewDispositions(c.ctx, effective, t, roster, scope); reused != nil {
+		for name, disposition := range reused {
+			if _, alreadyCompleted := dispositions[name]; !alreadyCompleted {
+				dispositions[name] = disposition
+			}
+		}
 	}
 	activeRequired := make([]roles.Role, 0, len(required))
 	for _, role := range required {
@@ -1767,7 +2083,7 @@ func (c *Controller) verifyReview(id string) error {
 			activeRequired = append(activeRequired, role)
 		}
 	}
-	evidence := &model.Evidence{Base: t.BaseSHA, Head: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: checks, ValidationGate: plan.Gate, ValidationReason: plan.Reason, ValidationInput: plan.Input, Toolchain: plan.Toolchain, TestInputs: plan.TestInputs, Reviews: map[string]string{}, ReviewRoster: roster, ReviewRosterReason: rosterReason, ReviewScope: scope, ReviewDispositions: dispositions, At: time.Now().UTC()}
+	evidence := &model.Evidence{Base: t.BaseSHA, Head: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: checks, ValidationGate: plan.Gate, ValidationReason: plan.Reason, ValidationInput: plan.Input, Toolchain: plan.Toolchain, TestInputs: plan.TestInputs, Reviews: priorReviews, ReviewRoster: roster, ReviewRosterReason: rosterReason, ReviewScope: scope, ReviewDispositions: dispositions, At: time.Now().UTC()}
 	if e = c.mutate(func(s *model.Snapshot) error {
 		task := s.Tasks[id]
 		task.State = model.Review
@@ -1794,7 +2110,10 @@ func (c *Controller) verifyReview(id string) error {
 		return e
 	}
 	c.mirror(id)
-	outcomes := c.runReviewAttempt(effective, t, paths, dir, diff, evidence, 1, activeRequired)
+	outcomes, reviewErr := c.runReviewAttempt(effective, t, paths, dir, diff, evidence, 1, activeRequired)
+	if reviewErr != nil {
+		return reviewErr
+	}
 	assessment := assessReviews(activeRequired, outcomes, reviewFindingBlocksOrigin(t, paths, activeRequired))
 	if e = c.preserveReviewFindings(id, assessment.findings); e != nil {
 		return e
@@ -1806,7 +2125,9 @@ func (c *Controller) verifyReview(id string) error {
 	for i, role := range activeRequired {
 		if outcomes[i].result.Status == "completed" {
 			evidence.Reviews[role.Name] = outcomes[i].result.Summary
-			evidence.ReviewDispositions[role.Name] = completedDisposition(t, role, roleRuntime(effective, role))
+			if len(outcomes[i].result.Findings) == 0 {
+				evidence.ReviewDispositions[role.Name] = completedDisposition(t, role, roleRuntime(effective, role))
+			}
 		}
 	}
 	if e = c.persistReviewProvenance(id, effective, t, roster, scope, activeRequired, outcomes); e != nil {
@@ -1842,6 +2163,9 @@ func (c *Controller) verifyReview(id string) error {
 	}
 	if assessment.failure != nil {
 		return assessment.failure
+	}
+	if len(assessment.evidence) == 0 {
+		acceptReviewDispositions(evidence, t, effective, activeRequired, outcomes)
 	}
 	if len(assessment.evidence) > 0 {
 		refreshRoles := make([]roles.Role, 0, len(assessment.evidence))
@@ -1894,7 +2218,10 @@ func (c *Controller) verifyReview(id string) error {
 		if e = c.publishReviewProgress(id, evidence); e != nil {
 			return e
 		}
-		refreshed := c.runReviewAttempt(effective, t, paths, dir, diff, evidence, 2, refreshRoles)
+		refreshed, refreshErr := c.runReviewAttempt(effective, t, paths, dir, diff, evidence, 2, refreshRoles)
+		if refreshErr != nil {
+			return refreshErr
+		}
 		refreshAssessment := assessReviews(refreshRoles, refreshed, reviewFindingBlocksOrigin(t, paths, refreshRoles))
 		if e = c.preserveReviewFindings(id, refreshAssessment.findings); e != nil {
 			return e
@@ -1906,7 +2233,9 @@ func (c *Controller) verifyReview(id string) error {
 		for i, role := range refreshRoles {
 			if refreshed[i].result.Status == "completed" {
 				evidence.Reviews[role.Name] = refreshed[i].result.Summary
-				evidence.ReviewDispositions[role.Name] = completedDisposition(t, role, roleRuntime(effective, role))
+				if len(refreshed[i].result.Findings) == 0 {
+					evidence.ReviewDispositions[role.Name] = completedDisposition(t, role, roleRuntime(effective, role))
+				}
 			}
 		}
 		if e = c.persistReviewProvenance(id, effective, t, roster, scope, refreshRoles, refreshed); e != nil {
@@ -1949,6 +2278,8 @@ func (c *Controller) verifyReview(id string) error {
 			c.retry(id, "verification", reason)
 			return c.refreshDraftPR(id)
 		}
+		acceptReviewDispositions(evidence, t, effective, activeRequired, outcomes)
+		acceptReviewDispositions(evidence, t, effective, refreshRoles, refreshed)
 		_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_completed", "roles="+strings.Join(names, ",")+" head="+t.HeadSHA)
 	}
 	if !validReviewDispositions(required, evidence) {

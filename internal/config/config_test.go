@@ -122,6 +122,33 @@ func TestSchedulingPolicyDefaultsAndValidation(t *testing.T) {
 	}
 }
 
+func TestRoleTimeoutsFallBackAndRemainBoundedByWorkerBudget(t *testing.T) {
+	p := Defaults()
+	encoded, err := yaml.Marshal(p)
+	if err != nil || strings.Contains(string(encoded), "role_timeouts_seconds") {
+		t.Fatalf("legacy timeout policy did not omit optional budgets: %q %v", encoded, err)
+	}
+	for _, stage := range []string{"planning", "pre-implementation", "review", "implementation"} {
+		if got := p.RoleTimeout(stage); got != p.WorkerSeconds {
+			t.Fatalf("legacy %s timeout = %d, want worker timeout %d", stage, got, p.WorkerSeconds)
+		}
+	}
+	p.RoleTimeouts = &RoleTimeouts{Planning: 60, Preflight: 120, Review: 180}
+	if p.RoleTimeout("planning") != 60 || p.RoleTimeout("pre-implementation") != 120 || p.RoleTimeout("review") != 180 {
+		t.Fatalf("explicit role timeouts were not selected: %#v", p.RoleTimeouts)
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("bounded role timeouts rejected: %v", err)
+	}
+	for _, timeouts := range []RoleTimeouts{{Planning: 9}, {Preflight: p.WorkerSeconds + 1}, {Review: -1}} {
+		invalid := Defaults()
+		invalid.RoleTimeouts = &timeouts
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("invalid role timeouts accepted: %#v", timeouts)
+		}
+	}
+}
+
 func TestLegacyProjectWithoutSchedulingUsesSafeDefaults(t *testing.T) {
 	files := canonicalFiles()
 	legacy := files[".aih/project.yaml"]

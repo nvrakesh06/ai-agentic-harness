@@ -120,7 +120,9 @@ their launching terminal.
 3. Checkpoint; run native checks and independent required roles. Record exact base,
    head, configuration hash, rule hash and evidence.
    Successful native evidence includes bounded/redacted stdout, check/executable
-   identity and exit status. Concurrent reviewers never depend on peer approvals.
+   identity and exit status. Reviewer, security, and designer roles run concurrently;
+   built-in QA then receives their completed exact-head artifacts and remains an
+   independent acceptance gate.
    A supervisor-evidence request triggers one native refresh and role-only retry;
    concrete blocking findings still enter FIX and true decisions still block human.
 4. Reserve the merge train. If main, policy, rules or head changed, repeat checks
