@@ -99,3 +99,9 @@ func RestorePublishForTest(c *Controller) { c.publish = nil }
 func SetBeforeReaderReservationForTest(c *Controller, hook func(context.Context, string, string)) {
 	c.beforeReaderReservation = hook
 }
+
+// SetAfterReaderReservationForTest installs a test-only post-reservation
+// observation hook. Call it before Serve; production leaves it nil.
+func SetAfterReaderReservationForTest(c *Controller, hook func(context.Context, string, string, bool)) {
+	c.afterReaderReservation = hook
+}

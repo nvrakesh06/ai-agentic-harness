@@ -615,11 +615,11 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 		return provider.Result{}, err
 	}
 	if r.Name != "implementer" {
+		taskID := ""
+		if t != nil {
+			taskID = t.ID
+		}
 		if c.beforeReaderReservation != nil {
-			taskID := ""
-			if t != nil {
-				taskID = t.ID
-			}
 			c.beforeReaderReservation(ctx, r.Name, taskID)
 		}
 		select {
@@ -632,7 +632,11 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 		// waits for a reader reservation. Recheck after acquiring the slot and
 		// before creating a run or dispatching the provider: otherwise every
 		// queued peer that passed the first check would still invoke it.
-		if err := c.providerAdmissionGate(e, t); err != nil {
+		err := c.providerAdmissionGate(e, t)
+		if c.afterReaderReservation != nil {
+			c.afterReaderReservation(ctx, r.Name, taskID, err != nil)
+		}
+		if err != nil {
 			return provider.Result{}, err
 		}
 		if t != nil && t.Preflight != nil && t.Preflight.Phase == "waiting" {

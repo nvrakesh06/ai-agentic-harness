@@ -65,6 +65,10 @@ type Controller struct {
 	// the first provider admission check and before a read-only role reserves a
 	// reader slot; production never configures it.
 	beforeReaderReservation func(context.Context, string, string)
+	// afterReaderReservation is a nil-by-default test seam. It observes whether
+	// the required second admission check blocked a role after it reserved a
+	// reader slot; production never configures it.
+	afterReaderReservation func(context.Context, string, string, bool)
 }
 
 // Preserve observed invocation exits until orderly shutdown can publish them

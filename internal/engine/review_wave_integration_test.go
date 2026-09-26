@@ -50,6 +50,8 @@ type providerHoldPeerWaveProvider struct {
 	secondPassedInitialGate chan struct{}
 	releaseFirstReader      chan struct{}
 	releaseSecondReader     chan struct{}
+	secondAfterReservation  chan bool
+	unexpectedReaderCall    chan struct{}
 	callbackMu              sync.Mutex
 	firstReaderRole         string
 	secondOnce              sync.Once
@@ -110,6 +112,22 @@ func (p *providerHoldPeerWaveProvider) beforeReaderReservation(ctx context.Conte
 	}
 }
 
+func (p *providerHoldPeerWaveProvider) afterReaderReservation(ctx context.Context, role, taskID string, blocked bool) {
+	if taskID != "held-peer-wave" || (role != "reviewer" && role != "security") {
+		return
+	}
+	p.callbackMu.Lock()
+	first := p.firstReaderRole
+	p.callbackMu.Unlock()
+	if role == first {
+		return
+	}
+	select {
+	case p.secondAfterReservation <- blocked:
+	case <-ctx.Done():
+	}
+}
+
 func (p *providerHoldPeerWaveProvider) Run(ctx context.Context, request provider.Request) (provider.Result, error) {
 	task, err := demo.Task(request.Prompt)
 	if err != nil {
@@ -127,6 +145,10 @@ func (p *providerHoldPeerWaveProvider) Run(ctx context.Context, request provider
 	switch request.Role {
 	case "reviewer", "security":
 		if p.readerCalls.Add(1) != 1 {
+			select {
+			case p.unexpectedReaderCall <- struct{}{}:
+			default:
+			}
 			return provider.Result{}, errors.New("queued reader reached provider after a durable admission hold")
 		}
 		close(p.firstReader)
@@ -338,10 +360,13 @@ func TestProviderAdmissionHoldRechecksQueuedReviewPeerAfterReaderReservation(t *
 		secondPassedInitialGate: make(chan struct{}),
 		releaseFirstReader:      make(chan struct{}),
 		releaseSecondReader:     make(chan struct{}),
+		secondAfterReservation:  make(chan bool, 1),
+		unexpectedReaderCall:    make(chan struct{}, 1),
 	}
 	f.P.Provider = workers
 	controller := engine.New(f.P)
 	engine.SetBeforeReaderReservationForTest(controller, workers.beforeReaderReservation)
+	engine.SetAfterReaderReservationForTest(controller, workers.afterReaderReservation)
 	supervisor := newFixtureSupervisorForController(workflowCtx, controller)
 	drained := false
 	defer func() {
@@ -374,8 +399,23 @@ func TestProviderAdmissionHoldRechecksQueuedReviewPeerAfterReaderReservation(t *
 	close(workers.releaseFirstReader)
 	_ = waitProviderAdmissionHold(t, workflowCtx, f)
 	// The paused peer now proceeds to the reservation. Its required second gate
-	// sees the already-durable hold, so it must return without Provider.Run.
+	// sees the already-durable hold, so it must report that result and return
+	// without Provider.Run. An implementation missing that recheck instead
+	// reaches the provider and fails immediately through unexpectedReaderCall.
 	close(workers.releaseSecondReader)
+	select {
+	case blocked := <-workers.secondAfterReservation:
+		if !blocked {
+			t.Fatal("queued peer reserved a reader without the durable admission hold blocking its second gate")
+		}
+	case <-workers.unexpectedReaderCall:
+		t.Fatal("queued peer reached provider after the durable admission hold")
+	case <-supervisor.completion():
+		drained = true
+		t.Fatalf("supervisor stopped before the queued peer completed its post-reservation admission check: %v", supervisor.completedResult())
+	case <-workflowCtx.Done():
+		t.Fatalf("queued peer did not complete its post-reservation admission check: %v", workflowCtx.Err())
+	}
 	if got := workers.readerCalls.Load(); got != 1 {
 		t.Fatalf("queued independent reader calls = %d, want exactly the initial rejected provider call", got)
 	}
