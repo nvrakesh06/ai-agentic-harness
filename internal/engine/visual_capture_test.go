@@ -477,6 +477,18 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	run("add", "source.txt")
 	run("commit", "-m", "base")
 	head := run("rev-parse", "HEAD")
+	// Live captures create their detached checkout from the fetched control
+	// repository, not the writer/source directory. Keep this native fixture on
+	// that same provenance path so the pinned commit is resolvable where the
+	// production checkout is created.
+	control := filepath.Join(t.TempDir(), "control.git")
+	cmd := exec.Command("git", "clone", "--bare", worktree, control)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone control: %v %s", err, out)
+	}
+	if got, err := (gitx.Git{Dir: control}).SHA(context.Background(), head); err != nil || got != head {
+		t.Fatalf("control repository does not contain pinned head %q: got %q, err %v", head, got, err)
+	}
 	var forbiddenRequests atomic.Int32
 	forbidden := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		forbiddenRequests.Add(1)
@@ -486,7 +498,7 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	t.Setenv("AIH_VISUAL_SERVER_HELPER", "1")
 	t.Setenv("AIH_VISUAL_TEST_FORBIDDEN", forbidden.URL)
 	adapter := []string{os.Args[0], "-test.run=^TestNativeVisualAdapter$"}
-	c := &Controller{P: &Project{Home: home, Dir: state}}
+	c := &Controller{P: &Project{Home: home, Dir: state, Git: gitx.Git{Dir: control}}}
 	targets := []config.VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 1280, Height: 720}, {ID: "detail", Path: "/detail", Width: 640, Height: 480}}
 	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: adapter, Timeout: 10, Targets: targets}}}
 	task := &model.Task{ID: "task-visual", HeadSHA: head}
