@@ -33,7 +33,7 @@ const releaseTestTimeout = "15m"
 const releasePermitWait = 2 * time.Minute
 
 var releaseTestCommand = func() (string, []string) {
-	return "go", []string{"test", "-json", "-p=1", "./...", "-count=1", "-timeout", releaseTestTimeout}
+	return "go", []string{"test", "-json", "-p=1", "./...", "-count=1", "-failfast", "-timeout", releaseTestTimeout}
 }
 
 func main() {
