@@ -207,6 +207,16 @@ func providerAdmissionMessage(hold model.ProviderAdmissionHold) string {
 
 var errProviderAdmissionProbeWaiting = errors.New("provider admission probe waits for active provider runs")
 
+const providerAdmissionProbeCleanupTimeout = 10 * time.Second
+
+// providerAdmissionProbeCleanupContext deliberately does not inherit the
+// probe's deadline: cleanup must still remove an owned checkout after a timed
+// out provider. It is nevertheless bounded so a stalled Git cleanup cannot
+// extend the supervisor operation indefinitely.
+func providerAdmissionProbeCleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), providerAdmissionProbeCleanupTimeout)
+}
+
 // providerAdmissionRetryTarget confirms that the operator selected the exact
 // currently active hold. A historical schema hold whose canonical schema has
 // changed is intentionally not releasable: it is already inactive without any
@@ -257,8 +267,10 @@ func (c *Controller) retryProviderAdmission(cmd store.Command) error {
 		return fmt.Errorf("create read-only provider retry checkout: %w", err)
 	}
 	defer func() {
+		cleanupCtx, cleanupCancel := providerAdmissionProbeCleanupContext()
+		defer cleanupCancel()
 		c.gitMu.Lock()
-		if cleanupErr := c.P.RemoveDisposableAnalysisWorktree(context.Background(), runID); cleanupErr != nil {
+		if cleanupErr := c.P.RemoveDisposableAnalysisWorktree(cleanupCtx, runID); cleanupErr != nil {
 			_ = c.P.DB.Event("", "", "provider-retry", hold.Provider, "provider_admission_probe_cleanup_failed", safety.Redact(cleanupErr.Error()))
 		}
 		c.gitMu.Unlock()

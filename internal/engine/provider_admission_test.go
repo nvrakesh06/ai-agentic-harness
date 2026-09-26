@@ -1,9 +1,11 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
@@ -91,5 +93,24 @@ func TestProviderAdmissionRetryRequiresExactCurrentScope(t *testing.T) {
 	}
 	if _, held := providerAdmissionHoldForSchema(s, effective, fmt.Sprintf("%064x", 52)); held {
 		t.Fatal("material schema repair did not reopen admission")
+	}
+}
+
+func TestProviderAdmissionProbeCleanupContextIsFreshAndBounded(t *testing.T) {
+	ctx, cancel := providerAdmissionProbeCleanupContext()
+	defer cancel()
+	if ctx.Err() != nil {
+		t.Fatal("fresh provider probe cleanup context is already canceled")
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > providerAdmissionProbeCleanupTimeout {
+		t.Fatalf("provider probe cleanup deadline = %v, bounded=%t", deadline, ok)
+	}
+	// The cleanup context is rooted independently, so it remains usable after
+	// the probe context expires and can remove the owned disposable checkout.
+	probe, probeCancel := context.WithCancel(context.Background())
+	probeCancel()
+	if probe.Err() == nil || ctx.Err() != nil {
+		t.Fatalf("cleanup inherited canceled probe context: probe=%v cleanup=%v", probe.Err(), ctx.Err())
 	}
 }
