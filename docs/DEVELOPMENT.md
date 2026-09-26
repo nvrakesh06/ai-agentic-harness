@@ -33,7 +33,9 @@ groups of at most sixteen top-level tests. Subtests and fuzz seed cases remain
 included. Each group keeps the fifteen-minute deadline, uncached execution and
 fail-fast behavior. A missing terminal pass/skip event fails the gate, even if
 the process exits successfully. `dist/test-inventory.json` records planned
-coverage; it does not mean unexecuted groups passed. Grouping avoids losing the
+coverage and reference Git identities, with an explicit dirty-worktree flag;
+it does not mean unexecuted groups passed or that uncommitted edits match the
+reference tree. Grouping avoids losing the
 tail of a growing Windows integration suite to a package-wide aggregate timeout.
 
 ## Application configuration
