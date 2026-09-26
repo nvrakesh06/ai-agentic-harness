@@ -215,18 +215,18 @@ func containsDecision(decisions []string, want string) bool {
 }
 
 func TestRecoveredCompletedDesignerIsNotRunAgain(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	setupCtx, setupCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer setupCancel()
+	f, err := demo.New(setupCtx, t.TempDir(), []string{"git", "diff", "--exit-code"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.P.DB.Close()
-	s, old, err := f.P.Git.Load(ctx)
+	s, old, err := f.P.Git.Load(setupCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	effective, err := engine.Canonical(ctx, f.P.Git)
+	effective, err := engine.Canonical(setupCtx, f.P.Git)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,37 +236,55 @@ func TestRecoveredCompletedDesignerIsNotRunAgain(t *testing.T) {
 		State: model.Ready, Branch: "aih/ui", BaseSHA: base, HeadSHA: base,
 		Preflight: &model.Preflight{Phase: "waiting", BaseSHA: base, HeadSHA: base,
 			Config: effective.Hash, Rules: roles.Hash(), Completed: []string{"designer"}}}
-	if err = f.P.Git.Worktree(ctx, f.P.TaskPath(s.Tasks["ui"]), s.Tasks["ui"].Branch, base); err != nil {
+	if err = f.P.Git.Worktree(setupCtx, f.P.TaskPath(s.Tasks["ui"]), s.Tasks["ui"].Branch, base); err != nil {
 		t.Fatal(err)
 	}
-	next, err := f.P.Git.StateCommit(ctx, old, s)
+	next, err := f.P.Git.StateCommit(setupCtx, old, s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: old, New: next}}); err != nil {
+	if err = f.P.Git.Publish(setupCtx, []gitx.Update{{Branch: "aih-state", Old: old, New: next}}); err != nil {
 		t.Fatal(err)
 	}
 	workers := &heldPreflightProvider{}
 	f.P.Provider = workers
-	c := engine.New(f.P)
-	done := make(chan error, 1)
-	go func() { done <- c.Serve(ctx) }()
-	deadline := time.NewTimer(30 * time.Second)
+	workflowCtx, workflowCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer workflowCancel()
+	supervisor := newFixtureSupervisor(workflowCtx, f.P)
+	drained := false
+	defer func() {
+		if !drained {
+			if err := supervisor.drain("preflight recovered designer cleanup"); err != nil {
+				t.Errorf("preflight fixture supervisor drain: %v", err)
+			}
+			drained = true
+		}
+	}()
+	deadline := time.NewTimer(90 * time.Second)
 	defer deadline.Stop()
 	for workers.writers.Load() == 0 {
 		select {
-		case err := <-done:
-			t.Fatalf("supervisor exited before resumed writer: %v", err)
+		case <-supervisor.completion():
+			drained = true
+			t.Fatalf("supervisor exited before resumed writer: %v %s", supervisor.completedResult(), retryFixtureStatus(f, "ui"))
 		case <-deadline.C:
-			t.Fatal("prepared UI task did not resume after restart")
+			err := supervisor.drain("preflight recovered designer admission deadline")
+			drained = true
+			t.Fatalf("prepared UI task did not resume after restart: supervisor=%v %s", err, retryFixtureStatus(f, "ui"))
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
 	if workers.designers.Load() != 0 {
 		t.Fatal("completed designer guidance was duplicated")
 	}
-	cancel()
-	<-done
+	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
+		t.Fatal(err)
+	}
+	err = supervisor.waitHandoff("preflight recovered designer cooperative handoff")
+	drained = true
+	if err != nil {
+		t.Fatal(err, retryFixtureStatus(f, "ui"))
+	}
 }
 
 func TestHumanExactHeadCheckpointContinuationReusesPreflightOnlyForStructuredAcknowledgement(t *testing.T) {
