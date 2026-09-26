@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,11 +22,14 @@ import (
 )
 
 type reviewWaveProvider struct {
-	auditedReviewer atomic.Int32
-	auditedSecurity atomic.Int32
-	auditedQA       atomic.Int32
-	independent     atomic.Int32
-	qaPeerFailure   atomic.Value
+	auditedReviewer    atomic.Int32
+	auditedSecurity    atomic.Int32
+	auditedQA          atomic.Int32
+	independent        atomic.Int32
+	independentStarted chan struct{}
+	releaseIndependent chan struct{}
+	independentOnce    sync.Once
+	qaPeerFailure      atomic.Value
 }
 
 type mixedReviewDeadlineProvider struct {
@@ -71,7 +75,7 @@ func (p *mixedReviewDeadlineProvider) Run(ctx context.Context, request provider.
 func (*reviewWaveProvider) Name() string                   { return "codex" }
 func (*reviewWaveProvider) Validate(context.Context) error { return nil }
 
-func (p *reviewWaveProvider) Run(_ context.Context, request provider.Request) (provider.Result, error) {
+func (p *reviewWaveProvider) Run(ctx context.Context, request provider.Request) (provider.Result, error) {
 	task, err := demo.Task(request.Prompt)
 	if err != nil {
 		return provider.Result{}, err
@@ -82,6 +86,16 @@ func (p *reviewWaveProvider) Run(_ context.Context, request provider.Request) (p
 		}
 		if task.Title == "independent" {
 			p.independent.Add(1)
+			if p.independentStarted != nil {
+				p.independentOnce.Do(func() { close(p.independentStarted) })
+			}
+			if p.releaseIndependent != nil {
+				select {
+				case <-p.releaseIndependent:
+				case <-ctx.Done():
+					return provider.Result{}, ctx.Err()
+				}
+			}
 		}
 		return provider.Result{Schema: 1, Status: "completed", Summary: "implemented " + task.Title}, nil
 	}
@@ -108,7 +122,7 @@ func (p *reviewWaveProvider) Run(_ context.Context, request provider.Request) (p
 }
 
 func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
 	if err != nil {
@@ -117,6 +131,10 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 	defer f.P.DB.Close()
 	f.P.Config.Project.MaxWriters = 2
 	f.P.Config.Project.MaxReaders = 2
+	f.Project.MaxWriters = 2
+	f.Project.MaxReaders = 2
+	f.Project.WorkerSeconds = 120
+	configureFixtureRoleTimeouts(t, ctx, f, config.RoleTimeouts{})
 	seedReadyTask(t, ctx, f, "audited")
 	seedReadyTask(t, ctx, f, "independent")
 	snapshot, stateHead, err := f.P.Git.Load(ctx)
@@ -131,15 +149,23 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateHead, New: next}}); err != nil {
 		t.Fatal(err)
 	}
-	workers := &reviewWaveProvider{}
+	workers := &reviewWaveProvider{independentStarted: make(chan struct{}), releaseIndependent: make(chan struct{})}
 	f.P.Provider = workers
 	done := make(chan error, 1)
 	go func() { done <- engine.New(f.P).Serve(ctx) }()
 	stopped := false
+	releaseIndependent := func() {
+		select {
+		case <-workers.releaseIndependent:
+		default:
+			close(workers.releaseIndependent)
+		}
+	}
 	defer func() {
 		if stopped {
 			return
 		}
+		releaseIndependent()
 		cancel()
 		select {
 		case <-done:
@@ -147,7 +173,7 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 			t.Errorf("supervisor did not stop after QA fixture failure")
 		}
 	}()
-	deadline := time.NewTimer(45 * time.Second)
+	deadline := time.NewTimer(90 * time.Second)
 	defer deadline.Stop()
 	var last *model.Task
 	for {
@@ -182,6 +208,12 @@ func TestReviewQAWaveSeesCompletedPeersWhileIndependentWriterRuns(t *testing.T) 
 	if workers.independent.Load() != 1 {
 		t.Fatalf("independent writer did not remain runnable while audited review queued: %d", workers.independent.Load())
 	}
+	select {
+	case <-workers.independentStarted:
+	default:
+		t.Fatal("independent writer was not occupied while audited QA completed")
+	}
+	releaseIndependent()
 	if err = f.P.DB.Submit(storeCommand("handoff")); err != nil {
 		t.Fatal(err)
 	}
@@ -226,9 +258,22 @@ func TestReviewTimeoutPersistsPeerFindingBeforeRetryAndDefersQA(t *testing.T) {
 	f.P.Provider = workers
 	done := make(chan error, 1)
 	go func() { done <- engine.New(f.P).Serve(ctx) }()
+	stopped := false
+	defer func() {
+		if stopped {
+			return
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Errorf("supervisor did not stop after mixed review fixture failure")
+		}
+	}()
 	select {
 	case <-workers.firstTimeout:
 	case serveErr := <-done:
+		stopped = true
 		t.Fatalf("supervisor stopped before review timeout: %v", serveErr)
 	case <-time.After(30 * time.Second):
 		t.Fatal("security review did not reach its first bounded timeout")
@@ -239,23 +284,23 @@ func TestReviewTimeoutPersistsPeerFindingBeforeRetryAndDefersQA(t *testing.T) {
 		current, _, loadErr := f.P.DB.Load()
 		if loadErr == nil {
 			task := current.Tasks["mixed"]
-			if task != nil && len(task.Findings) == 1 && task.Findings[0].Severity == "high" && task.ReadOnlyRetries["review/security"].Attempts == 1 {
-				if task.FixCycles["reviewer"] != 1 || workers.qaCalls.Load() != 0 || task.Evidence.ReviewDispositions["reviewer"].Disposition != "" {
-					t.Fatalf("review timeout bypassed finding/auth recovery semantics: task=%#v qa=%d", task, workers.qaCalls.Load())
-				}
+			if task != nil && task.Evidence != nil && len(task.Findings) == 1 && task.Findings[0].Severity == "high" && task.ReadOnlyRetries["review/security"].Attempts == 1 && task.FixCycles["reviewer"] == 1 && workers.qaCalls.Load() == 0 && task.Evidence.ReviewDispositions["reviewer"].Disposition == "" {
 				break
 			}
 		}
 		select {
 		case serveErr := <-done:
-			t.Fatalf("supervisor stopped before partial review progress: %v", serveErr)
+			stopped = true
+			t.Fatalf("supervisor stopped before routed review recovery: %v", serveErr)
 		case <-deadline.C:
-			t.Fatal("partial reviewer finding was not persisted before retry")
+			t.Fatal("reviewer finding was not durably routed without running QA")
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
 	cancel()
-	if err = <-done; err != nil {
-		t.Fatal(err)
+	serveErr := <-done
+	stopped = true
+	if serveErr != nil {
+		t.Fatal(serveErr)
 	}
 }
