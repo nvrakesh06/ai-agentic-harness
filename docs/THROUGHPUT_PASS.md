@@ -256,3 +256,22 @@ coalescing, broader activation automation and further review reuse are follow-up
 AIH work, driven by deployed measurements. They do not block this return unless a
 specific observed defect prevents safe delivery. Keep safeguards intact and fix
 new failures at their demonstrated boundary instead of expanding this cohort.
+
+## Restoration validation status on September 26
+
+The complete gate on `0ad290c` failed in group 10/16 on recovered-designer
+admission. The unchanged focused test passed (30.04s); static review found no
+preflight identity or completed-role regression. A serial diagnostic pass over
+the remaining groups found one mixed review-timeout fixture failure in group 12;
+groups 11, 13, 14, 15 and 16 passed, including provisioned-browser capture and
+writer-checkpoint recovery. These partial receipts do not establish a release.
+
+Reviewed fixture-only repairs separate finite setup/workflow phases and drain the
+supervisor before SQLite cleanup. They preserve legacy empty-scope compatibility,
+writer entry, no repeated designer work, the synthetic security timeout, exact
+reviewer finding, retry/FIX budgets and QA deferral. Both repaired tests passed
+together on `e681ed9` (74.772s package). No runtime routing change was needed.
+
+The integrated restoration still requires its complete uncached release gate,
+verified publication/activation and useful independent StatMotion delivery.
+Source improvements and passing diagnostics remain distinct from active fixes.
