@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -82,15 +83,85 @@ func TestReleaseInvocationCursorAvoidsRepeatedDiscoveryAndCompletedPrefixChecks(
 }
 
 func TestReleaseInvocationCursorRejectsChangedIdentityBeforePendingGroup(t *testing.T) {
+	for _, change := range []struct {
+		name  string
+		apply func(*releaseReceiptIdentity)
+	}{
+		{"head", func(v *releaseReceiptIdentity) { v.Head = "changed-head" }},
+		{"tree", func(v *releaseReceiptIdentity) { v.Tree = "changed-tree" }},
+		{"toolchain", func(v *releaseReceiptIdentity) { v.Toolchain = "changed-toolchain" }},
+		{"environment", func(v *releaseReceiptIdentity) { v.Environment = "changed-environment" }},
+		{"resources", func(v *releaseReceiptIdentity) { v.Resources = "changed-resources" }},
+		{"inventory", func(v *releaseReceiptIdentity) { v.Inventory = "changed-inventory" }},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			originalDiscover := discoverReleaseTestPlanFn
+			originalIdentity := releaseReceiptIdentityForFn
+			originalGroup := runReleaseTestGroupCommandFn
+			originalDemand := releasePriorityDemandFn
+			originalDir, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chdir(t.TempDir()); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				discoverReleaseTestPlanFn = originalDiscover
+				releaseReceiptIdentityForFn = originalIdentity
+				runReleaseTestGroupCommandFn = originalGroup
+				releasePriorityDemandFn = originalDemand
+				_ = os.Chdir(originalDir)
+			}()
+
+			identity, _ := receiptFixture()
+			groups := []releaseTestGroup{
+				{Packages: []string{"example.com/one"}, Tests: []string{"TestOne"}},
+				{Packages: []string{"example.com/two"}, Tests: []string{"TestTwo"}},
+			}
+			var identities, commands int
+			discoverReleaseTestPlanFn = func(context.Context) (releaseTestPlan, error) {
+				return releaseTestPlan{groups: groups, identity: identity, packages: 2, namedTests: 2}, nil
+			}
+			releaseReceiptIdentityForFn = func(context.Context, []releaseTestGroup) (releaseReceiptIdentity, error) {
+				identities++
+				if identities >= 3 {
+					changed := identity
+					change.apply(&changed)
+					return changed, nil
+				}
+				return identity, nil
+			}
+			runReleaseTestGroupCommandFn = func(context.Context, string, []string, []string, []string) error {
+				commands++
+				return nil
+			}
+			releasePriorityDemandFn = func(string, config.Machine) (bool, error) { return true, nil }
+
+			progress := newReleaseInvocationProgress()
+			ctx := withReleaseBoundary(context.Background(), "unused", config.Machine{MaxHeavyChecks: 1}, progress)
+			if err := runCompleteReleaseTests(ctx); !errors.Is(err, errReleaseYielded) {
+				t.Fatalf("first group = %v, want cooperative yield", err)
+			}
+			ctx = withReleaseBoundary(context.Background(), "unused", config.Machine{MaxHeavyChecks: 1}, progress)
+			err = runCompleteReleaseTests(ctx)
+			if err == nil || !strings.Contains(err.Error(), "identity") {
+				t.Fatalf("changed reacquisition identity = %v", err)
+			}
+			if commands != 1 || progress.nextGroup != 1 {
+				t.Fatalf("changed identity ran pending work: commands/cursor = %d/%d, want 1/1", commands, progress.nextGroup)
+			}
+		})
+	}
+}
+
+func TestReleaseInvocationCursorDoesNotAdvanceInterruptedOrFailedGroup(t *testing.T) {
 	originalDiscover := discoverReleaseTestPlanFn
 	originalIdentity := releaseReceiptIdentityForFn
 	originalGroup := runReleaseTestGroupCommandFn
 	originalDemand := releasePriorityDemandFn
 	originalDir, err := os.Getwd()
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
@@ -101,42 +172,56 @@ func TestReleaseInvocationCursorRejectsChangedIdentityBeforePendingGroup(t *test
 		_ = os.Chdir(originalDir)
 	}()
 
-	identity, _ := receiptFixture()
-	groups := []releaseTestGroup{
-		{Packages: []string{"example.com/one"}, Tests: []string{"TestOne"}},
-		{Packages: []string{"example.com/two"}, Tests: []string{"TestTwo"}},
-	}
-	var identities, commands int
-	discoverReleaseTestPlanFn = func(context.Context) (releaseTestPlan, error) {
-		return releaseTestPlan{groups: groups, identity: identity, packages: 2, namedTests: 2}, nil
-	}
-	releaseReceiptIdentityForFn = func(context.Context, []releaseTestGroup) (releaseReceiptIdentity, error) {
-		identities++
-		if identities >= 3 {
-			changed := identity
-			changed.Tree = "changed-tree"
-			return changed, nil
-		}
-		return identity, nil
-	}
-	runReleaseTestGroupCommandFn = func(context.Context, string, []string, []string, []string) error {
-		commands++
-		return nil
-	}
-	releasePriorityDemandFn = func(string, config.Machine) (bool, error) { return true, nil }
+	for _, failure := range []error{context.Canceled, errors.New("synthetic group failure")} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			currentDir, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chdir(t.TempDir()); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = os.Chdir(currentDir) }()
+			identity, _ := receiptFixture()
+			group := releaseTestGroup{Packages: []string{"example.com/pending"}, Tests: []string{"TestPending"}}
+			groups := []releaseTestGroup{group}
+			discoverReleaseTestPlanFn = func(context.Context) (releaseTestPlan, error) {
+				return releaseTestPlan{groups: groups, identity: identity, packages: 1, namedTests: 1}, nil
+			}
+			releaseReceiptIdentityForFn = func(context.Context, []releaseTestGroup) (releaseReceiptIdentity, error) { return identity, nil }
+			releasePriorityDemandFn = func(string, config.Machine) (bool, error) { return false, nil }
+			attempts := 0
+			runReleaseTestGroupCommandFn = func(context.Context, string, []string, []string, []string) error {
+				attempts++
+				if attempts == 1 {
+					return failure
+				}
+				return nil
+			}
 
-	progress := newReleaseInvocationProgress()
-	ctx := withReleaseBoundary(context.Background(), "unused", config.Machine{MaxHeavyChecks: 1}, progress)
-	if err := runCompleteReleaseTests(ctx); !errors.Is(err, errReleaseYielded) {
-		t.Fatalf("first group = %v, want cooperative yield", err)
-	}
-	ctx = withReleaseBoundary(context.Background(), "unused", config.Machine{MaxHeavyChecks: 1}, progress)
-	err = runCompleteReleaseTests(ctx)
-	if err == nil || !strings.Contains(err.Error(), "identity") {
-		t.Fatalf("changed reacquisition identity = %v", err)
-	}
-	if commands != 1 || progress.nextGroup != 1 {
-		t.Fatalf("changed identity ran pending work: commands/cursor = %d/%d, want 1/1", commands, progress.nextGroup)
+			progress := newReleaseInvocationProgress()
+			ctx := withReleaseBoundary(context.Background(), "unused", config.Machine{MaxHeavyChecks: 1}, progress)
+			if err := runCompleteReleaseTests(ctx); !errors.Is(err, failure) {
+				t.Fatalf("first group = %v, want %v", err, failure)
+			}
+			if progress.nextGroup != 0 || progress.completed[releaseGroupID(group)] {
+				t.Fatalf("failed group advanced cursor/completion: next=%d completed=%t", progress.nextGroup, progress.completed[releaseGroupID(group)])
+			}
+			if loadReleaseGroupReceipt(filepath.Join("dist", "release-test-receipts"), identity, group) {
+				t.Fatal("failed group produced a completion receipt")
+			}
+
+			ctx = withReleaseBoundary(context.Background(), "unused", config.Machine{MaxHeavyChecks: 1}, progress)
+			if err := runCompleteReleaseTests(ctx); err != nil {
+				t.Fatalf("retry pending group = %v", err)
+			}
+			if attempts != 2 || progress.nextGroup != 1 || !progress.completed[releaseGroupID(group)] {
+				t.Fatalf("pending group did not rerun and complete: attempts=%d next=%d completed=%t", attempts, progress.nextGroup, progress.completed[releaseGroupID(group)])
+			}
+			if !loadReleaseGroupReceipt(filepath.Join("dist", "release-test-receipts"), identity, group) {
+				t.Fatal("successful retry did not produce a completion receipt")
+			}
+		})
 	}
 }
 
