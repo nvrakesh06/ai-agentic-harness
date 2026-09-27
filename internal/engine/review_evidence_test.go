@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
@@ -35,6 +36,53 @@ func TestBoundedFailureDiagnosticPreservesTailAfterLongSuccessfulOutput(t *testi
 	}
 	if len(reason) > maxFailureDiagnosticBytes {
 		t.Fatalf("bounded native failure reason is %d bytes, want at most %d", len(reason), maxFailureDiagnosticBytes)
+	}
+}
+
+func TestBoundedFailureDiagnosticRetainsMiddleCompilerAndRunnerFailures(t *testing.T) {
+	secret := "ghp_" + strings.Repeat("a", 30)
+	middle := strings.Join([]string{
+		"src/demo-capture/storage.ts(291,69): error TS2740: cannot use Duplex as Socket",
+		"  1) capture storage persists a recovered draft",
+		"     Error: expect(received).toBe(expected)",
+		"     Expected: \"Saved\"",
+		"     Received: \"Direction error\"",
+		"--- FAIL: TestCapturePersistence (0.04s)",
+		"    storage_test.go:73: expected retained recovery evidence",
+	}, "\n")
+	output := strings.Repeat("install and build succeeded \U0001F680 token="+secret+"\n", 180) + middle + "\n" + strings.Repeat("VITE deny-list negative test unrelated output\n", 280)
+	got := boundedFailureDiagnostic(safety.Redact(output))
+	for _, want := range []string{"TS2740", "expect(received).toBe", "--- FAIL: TestCapturePersistence", "VITE deny-list negative test", "retained recognized compiler/test failure context"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("middle failure diagnostic omitted %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, secret) {
+		t.Fatalf("middle failure diagnostic leaked redacted secret: %q", got)
+	}
+	if len(got) > maxFailureDiagnosticBytes || !utf8.ValidString(got) {
+		t.Fatalf("middle failure diagnostic is not bounded UTF-8: bytes=%d valid=%t", len(got), utf8.ValidString(got))
+	}
+}
+
+func TestBoundedFailureDiagnosticKeepsLegacyHeadTailWithoutMarker(t *testing.T) {
+	output := "head-only-context\n" + strings.Repeat("ordinary successful output without failure markers\n", 300) + "tail-only-context\n"
+	got := boundedFailureDiagnostic(output)
+	for _, want := range []string{"head-only-context", "tail-only-context", "showing first and last diagnostic output"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("legacy fallback omitted %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "retained recognized compiler/test failure context") {
+		t.Fatalf("legacy fallback selected failure context without a marker: %q", got)
+	}
+}
+
+func TestBoundedFailureDiagnosticDoesNotSplitUTF8AtBudget(t *testing.T) {
+	output := strings.Repeat("prefix \U0001F680\n", 900) + "Error: expect(received).toBe(expected)\n" + strings.Repeat("tail \U0001F9EA\n", 900)
+	got := boundedFailureDiagnostic(output)
+	if !utf8.ValidString(got) || len(got) > maxFailureDiagnosticBytes || !strings.Contains(got, "expect(received).toBe") {
+		t.Fatalf("UTF-8 bounded diagnostic = bytes=%d valid=%t %q", len(got), utf8.ValidString(got), got)
 	}
 }
 
