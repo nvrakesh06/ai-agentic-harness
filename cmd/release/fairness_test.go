@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestReleaseInvocationProgressAllowsProductiveHandoffsBeyondLegacyBudget(t *testing.T) {
 	p := newReleaseInvocationProgress()
@@ -43,5 +46,34 @@ func TestReleaseInvocationProgressResetsOnlyUniqueValidatedCompletion(t *testing
 	}
 	if p.noProgress != 0 {
 		t.Fatalf("unique completion did not reset guard: %d", p.noProgress)
+	}
+}
+
+func TestReleaseInvocationProgressRejectsChangedImmutableIdentity(t *testing.T) {
+	identity, group := receiptFixture()
+	p := newReleaseInvocationProgress()
+	if err := p.bindIdentity(identity, []releaseTestGroup{group}); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func(*releaseReceiptIdentity){
+		func(v *releaseReceiptIdentity) { v.Head = "other-head" },
+		func(v *releaseReceiptIdentity) { v.Environment = "other-environment" },
+		func(v *releaseReceiptIdentity) { v.Inventory = "other-inventory" },
+		func(v *releaseReceiptIdentity) { v.Resources = "other-resource-policy" },
+	} {
+		changed := identity
+		change(&changed)
+		if err := p.bindIdentity(changed, []releaseTestGroup{group}); err == nil {
+			t.Fatal("changed identity was accepted after a cooperative handoff")
+		}
+	}
+}
+
+func TestReleaseResourcePolicyBindsUnitBoundaryRules(t *testing.T) {
+	policy := releaseResourcePolicy()
+	for _, want := range []string{"timeout=15m", "unit_watchdog=17m0s", "boundary_policy=completed-unit-v1", "no_progress_limit=3"} {
+		if !strings.Contains(policy, want) {
+			t.Fatalf("resource policy omitted %q: %s", want, policy)
+		}
 	}
 }

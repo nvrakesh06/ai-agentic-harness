@@ -150,6 +150,11 @@ func runCompleteReleaseTests(ctx context.Context) error {
 		}
 		return err
 	}
+	if boundary, ok := ctx.Value(releaseBoundaryKey{}).(releaseBoundary); ok && boundary.progress != nil {
+		if err := boundary.progress.bindIdentity(identity, groups); err != nil {
+			return err
+		}
+	}
 	manifest, err := json.MarshalIndent(releaseTestInventory{Schema: 1, Head: identity.Head, Tree: identity.Tree, WorktreeDirty: false, Groups: groups}, "", "  ")
 	if err != nil {
 		return err
@@ -168,7 +173,8 @@ func runCompleteReleaseTests(ctx context.Context) error {
 	receipts := filepath.Join("dist", "release-test-receipts")
 	for index, group := range groups {
 		fmt.Printf("release test group %d/%d\n", index+1, len(groups))
-		current, identityErr := releaseReceiptIdentityFor(ctx, groups)
+		unit, cancelUnit := context.WithTimeout(ctx, releaseUnitWatchdog)
+		current, identityErr := releaseReceiptIdentityFor(unit, groups)
 		if identityErr != nil || current != identity {
 			if identityErr != nil {
 				if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {
@@ -183,29 +189,31 @@ func runCompleteReleaseTests(ctx context.Context) error {
 		// release invocation creates a new cursor and reruns it as before.
 		if boundary, ok := ctx.Value(releaseBoundaryKey{}).(releaseBoundary); ok && boundary.progress != nil && boundary.progress.completed[releaseGroupID(group)] {
 			fmt.Printf("release test group %d/%d: completed before cooperative handoff\n", index+1, len(groups))
+			cancelUnit()
 			continue
 		}
 		if releaseBrowserSensitive(group) {
 			fmt.Println("release test group browser/visual: rerunning; receipt reuse disabled")
 		} else if loadReleaseGroupReceipt(receipts, identity, group) {
 			fmt.Printf("release test group %d/%d: cached exact-identity receipt\n", index+1, len(groups))
-			if handoff, handoffErr := releaseBoundaryHandoff(ctx, releaseGroupID(group)); handoffErr != nil {
+			if handoff, handoffErr := releaseBoundaryHandoff(unit, releaseGroupID(group)); handoffErr != nil {
 				return fmt.Errorf("release test group %d/%d boundary: %w", index+1, len(groups), handoffErr)
 			} else if handoff {
+				cancelUnit()
 				return errReleaseYielded
 			}
+			cancelUnit()
 			continue
 		}
-		unit, cancelUnit := context.WithTimeout(ctx, releaseUnitWatchdog)
 		err := runReleaseTestGroupCommand(unit, "go", releaseGroupArgs(group), group.Tests, group.Packages)
-		cancelUnit()
 		if err != nil {
+			cancelUnit()
 			return fmt.Errorf("release test group %d/%d: %w", index+1, len(groups), err)
 		}
 		// An interrupted group reaches neither this line nor receipt handling.
 		// Browser groups do not persist receipts, but still prove exact identity
 		// before a cooperative handoff can expose the slot to product work.
-		current, identityErr = releaseReceiptIdentityFor(ctx, groups)
+		current, identityErr = releaseReceiptIdentityFor(unit, groups)
 		if identityErr != nil || current != identity {
 			if identityErr != nil {
 				if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {
@@ -216,18 +224,20 @@ func runCompleteReleaseTests(ctx context.Context) error {
 			return fmt.Errorf("release test group %d/%d changed source or runtime; refusing receipt", index+1, len(groups))
 		}
 		if !releaseBrowserSensitive(group) {
-			if err := saveReleaseGroupReceipt(ctx, receipts, identity, group); err != nil {
+			if err := saveReleaseGroupReceipt(unit, receipts, identity, group); err != nil {
 				if yielded := releaseYieldCancellation(ctx, err); yielded != nil {
 					return yielded
 				}
 				return fmt.Errorf("record release test group %d/%d: %w", index+1, len(groups), err)
 			}
 		}
-		if handoff, handoffErr := releaseBoundaryHandoff(ctx, releaseGroupID(group)); handoffErr != nil {
+		if handoff, handoffErr := releaseBoundaryHandoff(unit, releaseGroupID(group)); handoffErr != nil {
 			return fmt.Errorf("release test group %d/%d boundary: %w", index+1, len(groups), handoffErr)
 		} else if handoff {
+			cancelUnit()
 			return errReleaseYielded
 		}
+		cancelUnit()
 	}
 	current, identityErr := releaseReceiptIdentityFor(ctx, groups)
 	if identityErr != nil || current != identity {

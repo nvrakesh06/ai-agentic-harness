@@ -76,7 +76,14 @@ func release() error {
 	if e != nil {
 		return e
 	}
-	defer func() { cancel(); releasePermit() }()
+	defer func() {
+		if cancel != nil {
+			cancel()
+		}
+		if releasePermit != nil {
+			releasePermit()
+		}
+	}()
 	if e := runReleaseBoundedUnit(ctx, nil, "go", "vet", "./..."); e != nil {
 		return e
 	}
@@ -138,9 +145,16 @@ func release() error {
 }
 
 func runReleaseBoundedUnit(ctx context.Context, env []string, name string, args ...string) error {
+	if _, err := releaseInvocationIdentity(ctx); err != nil {
+		return err
+	}
 	unit, cancel := context.WithTimeout(ctx, releaseUnitWatchdog)
 	defer cancel()
-	return run(unit, env, name, args...)
+	if err := run(unit, env, name, args...); err != nil {
+		return err
+	}
+	_, err := releaseInvocationIdentity(unit)
+	return err
 }
 
 // releaseTailHandoff advances a finite vet/build cursor only after the

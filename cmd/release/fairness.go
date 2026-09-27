@@ -24,6 +24,8 @@ type releaseInvocationProgress struct {
 	completed  map[string]bool
 	noProgress int
 	handoffs   int
+	identity   *releaseReceiptIdentity
+	groups     []releaseTestGroup
 }
 
 type releaseBoundaryKey struct{}
@@ -82,6 +84,37 @@ func (p *releaseInvocationProgress) completedFirst(id string) bool {
 	}
 	p.completed[id] = true
 	return true
+}
+
+// bindIdentity establishes the one immutable release identity for this
+// invocation. A cooperative capacity wait is never permission to adopt a new
+// source, environment, toolchain, resource policy, or inventory baseline.
+func (p *releaseInvocationProgress) bindIdentity(identity releaseReceiptIdentity, groups []releaseTestGroup) error {
+	if p.identity == nil {
+		copyIdentity := identity
+		p.identity = &copyIdentity
+		p.groups = append([]releaseTestGroup(nil), groups...)
+		return nil
+	}
+	if *p.identity != identity {
+		return fmt.Errorf("release invocation identity changed during cooperative handoff")
+	}
+	return nil
+}
+
+func releaseInvocationIdentity(ctx context.Context) (*releaseInvocationProgress, error) {
+	b, ok := ctx.Value(releaseBoundaryKey{}).(releaseBoundary)
+	if !ok || b.progress == nil || b.progress.identity == nil {
+		return nil, nil
+	}
+	current, err := releaseReceiptIdentityFor(ctx, b.progress.groups)
+	if err != nil {
+		return nil, err
+	}
+	if *b.progress.identity != current {
+		return nil, fmt.Errorf("release invocation identity changed during cooperative handoff")
+	}
+	return b.progress, nil
 }
 
 // handoff records only validated, previously uncounted completion as progress.
