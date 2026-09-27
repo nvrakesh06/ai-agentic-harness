@@ -315,11 +315,11 @@ func (p validationPlan) ValidationInputMissing() bool {
 
 func TestApplyValidationEvidenceRefreshesRecoveryGateWithoutReplacingIntegration(t *testing.T) {
 	evidence := &model.Evidence{IntegrationSHA: strings.Repeat("a", 40), IntegrationOwner: "controller", ValidationGate: "focused", ValidationReason: "old focused reason", ValidationInput: "old", Toolchain: "old-tool", TestInputs: "old-tree"}
-	plan := validationPlan{Gate: "full", Reason: "exact integrated merge-train head", Input: "new", Toolchain: "tool", TestInputs: "tree", ExpectedHead: strings.Repeat("b", 40), ExpectedConfig: strings.Repeat("c", 64)}
+	plan := validationPlan{Gate: "full", Reason: "exact integrated merge-train head", Input: "new", Toolchain: "tool", TestInputs: "tree"}
 	if err := applyValidationEvidence(evidence, plan, []string{"check=tests exit=0"}); err != nil {
 		t.Fatal(err)
 	}
-	if evidence.IntegrationSHA != strings.Repeat("a", 40) || evidence.Head != strings.Repeat("b", 40) || evidence.Config != strings.Repeat("c", 64) || evidence.ValidationGate != "full" || evidence.ValidationReason != "exact integrated merge-train head" || evidence.ValidationInput != "new" || evidence.Toolchain != "tool" || evidence.TestInputs != "tree" || len(evidence.Checks) != 1 {
+	if evidence.IntegrationSHA != strings.Repeat("a", 40) || evidence.ValidationGate != "full" || evidence.ValidationReason != "exact integrated merge-train head" || evidence.ValidationInput != "new" || evidence.Toolchain != "tool" || evidence.TestInputs != "tree" || len(evidence.Checks) != 1 {
 		t.Fatalf("recovery evidence = %#v", evidence)
 	}
 }

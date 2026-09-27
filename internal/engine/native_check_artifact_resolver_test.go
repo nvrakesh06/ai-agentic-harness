@@ -81,6 +81,25 @@ func TestResolveNativeArtifactInventoryBindsReceiptToItsConfiguredCheckAndEviden
 	if _, err := ResolveNativeArtifactInventory(fixture.project, fixture.plan, fixture.task, fixture.evidence, fixture.sealRoot, fixture.receipt); err == nil {
 		t.Fatal("stale evidence head accepted")
 	}
+
+	fixture = newNativeArtifactResolverFixture(t)
+	fixture.plan.Checks[0].Command = nil
+	if _, err := ResolveNativeArtifactInventory(fixture.project, fixture.plan, fixture.task, fixture.evidence, fixture.sealRoot, fixture.receipt); err == nil {
+		t.Fatal("empty configured command accepted")
+	}
+}
+
+func TestResolveNativeArtifactInventoryAllowsIntegrationEvidenceToRetainReviewedHead(t *testing.T) {
+	fixture := newNativeArtifactResolverFixture(t)
+	reviewed := strings.Repeat("b", 40)
+	fixture.evidence.Head = reviewed
+	fixture.evidence.IntegrationSHA = fixture.plan.ExpectedHead
+	fixture.evidence.Visual = &model.VisualEvidence{Head: reviewed, Config: fixture.evidence.Config}
+	fixture.task.HeadSHA = fixture.plan.ExpectedHead
+	inventory, err := ResolveNativeArtifactInventory(fixture.project, fixture.plan, fixture.task, fixture.evidence, fixture.sealRoot, fixture.receipt)
+	if err != nil || inventory == nil || fixture.evidence.Head != reviewed || fixture.evidence.Visual.Head != reviewed {
+		t.Fatalf("integration evidence was not resolved without changing visual provenance: %#v, %v", inventory, err)
+	}
 }
 
 func TestResolveNativeArtifactInventoryRejectsCorruptManifestAndImage(t *testing.T) {
@@ -194,9 +213,9 @@ func newNativeArtifactResolverFixture(t *testing.T) *nativeArtifactResolverFixtu
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan := validationPlan{ExpectedHead: bind.ExpectedHead, ExpectedConfig: bind.Config, Input: bind.PlanInput, Toolchain: bind.Toolchain, Checks: []config.Check{check}}
-	evidence := &model.Evidence{Head: bind.ExpectedHead, Config: bind.Config, Rules: bind.Rules, ValidationInput: bind.PlanInput, Toolchain: bind.Toolchain, Checks: []string{passedCheckEvidence(check, "") + " artifact=" + receipt}}
-	return &nativeArtifactResolverFixture{project: bind.Project, sealRoot: bind.SealRoot, receipt: receipt, receiptDir: dir, plan: plan, task: &model.Task{ID: bind.Task}, evidence: evidence}
+	plan := validationPlan{ExpectedHead: bind.ExpectedHead, ExpectedConfig: bind.Config, Input: bind.PlanInput, Toolchain: bind.Toolchain, TestInputs: pending.beforeTree, Checks: []config.Check{check}}
+	evidence := &model.Evidence{Head: bind.ExpectedHead, Config: bind.Config, Rules: bind.Rules, ValidationInput: bind.PlanInput, Toolchain: bind.Toolchain, TestInputs: pending.beforeTree, Checks: []string{passedCheckEvidence(check, "") + " artifact=" + receipt}}
+	return &nativeArtifactResolverFixture{project: bind.Project, sealRoot: bind.SealRoot, receipt: receipt, receiptDir: dir, plan: plan, task: &model.Task{ID: bind.Task, HeadSHA: bind.ExpectedHead}, evidence: evidence}
 }
 
 func rewriteNativeArtifactManifest(t *testing.T, dir string, mutate func(*nativeArtifactManifest, *nativeArtifactResolverFixture), fixture *nativeArtifactResolverFixture) string {

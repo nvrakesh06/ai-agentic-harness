@@ -82,8 +82,19 @@ func ResolveNativeArtifactInventory(project string, plan validationPlan, task *m
 }
 
 func nativeArtifactEvidenceBinding(plan validationPlan, task *model.Task, evidence *model.Evidence, receipt string) (string, error) {
-	if task == nil || task.ID == "" || evidence == nil || plan.ExpectedHead == "" || plan.ExpectedConfig == "" || plan.Input == "" || plan.Toolchain == "" || evidence.Head != plan.ExpectedHead || evidence.Config != plan.ExpectedConfig || evidence.Rules == "" || evidence.ValidationInput != plan.Input || evidence.Toolchain != plan.Toolchain {
+	if task == nil || task.ID == "" || evidence == nil || plan.ExpectedHead == "" || plan.ExpectedConfig == "" || plan.Input == "" || plan.Toolchain == "" || plan.TestInputs == "" || evidence.Config != plan.ExpectedConfig || evidence.Rules == "" || evidence.ValidationInput != plan.Input || evidence.Toolchain != plan.Toolchain || evidence.TestInputs != plan.TestInputs {
 		return "", errors.New("native artifact receipt does not match current validation evidence")
+	}
+	if evidence.IntegrationSHA == "" {
+		// Ordinary verification is exact task-head evidence. Integration and
+		// post-verify retain the reviewed source head in Evidence.Head so Visual
+		// evidence remains valid; those paths are instead bound by the exact plan
+		// input, test-input identity, and sealed actual checkout provenance.
+		if task.HeadSHA != plan.ExpectedHead || evidence.Head != plan.ExpectedHead {
+			return "", errors.New("native artifact ordinary evidence head is stale")
+		}
+	} else if !nativeArtifactRevision.MatchString(evidence.IntegrationSHA) {
+		return "", errors.New("native artifact integration provenance is malformed")
 	}
 	for _, record := range evidence.Checks {
 		if strings.HasSuffix(record, " artifact="+receipt) {
@@ -97,6 +108,9 @@ func nativeArtifactEvidenceBinding(plan validationPlan, task *model.Task, eviden
 }
 
 func nativeArtifactRecordMatchesCheck(record string, check config.Check) bool {
+	if len(check.Command) == 0 {
+		return false
+	}
 	prefix := fmt.Sprintf("stage=native check=%q command=%q command_id=%s exit=0 ", check.Name, filepath.Base(check.Command[0]), nativeCheckCommandID(check))
 	return strings.HasPrefix(record, prefix)
 }
@@ -175,10 +189,10 @@ func nativeArtifactManifestBinding(manifest nativeArtifactManifest, project stri
 		return errors.New("native artifact manifest identity is invalid")
 	}
 	check := plan.Checks[manifest.Check]
-	if !check.Artifacts || manifest.Digest != nativeArtifactCheckDigest(check) {
+	if !check.Artifacts || len(check.Command) == 0 || manifest.Digest != nativeArtifactCheckDigest(check) {
 		return errors.New("native artifact manifest check is not currently opted in")
 	}
-	if !nativeArtifactRevision.MatchString(plan.ExpectedHead) || !nativeArtifactHash.MatchString(plan.ExpectedConfig) || !nativeArtifactHash.MatchString(plan.Input) || strings.TrimSpace(plan.Toolchain) == "" || !nativeArtifactHash.MatchString(evidence.Rules) {
+	if !nativeArtifactRevision.MatchString(plan.ExpectedHead) || !nativeArtifactHash.MatchString(plan.ExpectedConfig) || !nativeArtifactHash.MatchString(plan.Input) || !nativeArtifactRevision.MatchString(plan.TestInputs) || strings.TrimSpace(plan.Toolchain) == "" || !nativeArtifactHash.MatchString(evidence.Rules) {
 		return errors.New("native artifact validation plan is malformed")
 	}
 	if manifest.Expected.Head != plan.ExpectedHead || manifest.Expected.Config != plan.ExpectedConfig || manifest.Expected.Rules != evidence.Rules || manifest.Expected.PlanInput != plan.Input || manifest.Expected.Toolchain != plan.Toolchain {
