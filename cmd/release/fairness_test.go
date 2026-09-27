@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -99,5 +102,46 @@ func TestReleaseTailReacquireFailureReleasesOldPermitWithoutPanic(t *testing.T) 
 	}
 	if releases.Load() != 1 {
 		t.Fatalf("old permit release count = %d, want 1", releases.Load())
+	}
+}
+
+func TestReleaseTailReacquireFailureReturnsFromReleaseWithoutDeferredPanic(t *testing.T) {
+	originalDemand, originalAcquire := releasePriorityDemandFn, acquireReleaseMachinePermitFn
+	originalComplete, originalUnit := runCompleteReleaseTestsFn, runReleaseBoundedUnitFn
+	originalFlags, originalArgs := flag.CommandLine, append([]string(nil), os.Args...)
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.Abs(filepath.Join(originalDir, "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		releasePriorityDemandFn, acquireReleaseMachinePermitFn = originalDemand, originalAcquire
+		runCompleteReleaseTestsFn, runReleaseBoundedUnitFn = originalComplete, originalUnit
+		flag.CommandLine, os.Args = originalFlags, originalArgs
+		_ = os.Chdir(originalDir)
+	}()
+	flag.CommandLine = flag.NewFlagSet("release-test", flag.ContinueOnError)
+	os.Args = []string{"release-test"}
+	releasePriorityDemandFn = func(string, config.Machine) (bool, error) { return true, nil }
+	var attempts, releases atomic.Int32
+	acquireReleaseMachinePermitFn = func(time.Duration) (func(), config.Machine, string, error) {
+		if attempts.Add(1) == 1 {
+			return func() { releases.Add(1) }, config.Machine{MaxHeavyChecks: 1}, "unused", nil
+		}
+		return nil, config.Machine{}, "", errors.New("synthetic tail reacquire failure")
+	}
+	runCompleteReleaseTestsFn = func(context.Context) error { return nil }
+	runReleaseBoundedUnitFn = func(context.Context, []string, func() error, string, ...string) error { return nil }
+	if err := release(); err == nil || !strings.Contains(err.Error(), "synthetic tail reacquire failure") {
+		t.Fatalf("release tail error = %v", err)
+	}
+	if attempts.Load() != 2 || releases.Load() != 1 {
+		t.Fatalf("tail ownership attempts=%d releases=%d, want 2/1", attempts.Load(), releases.Load())
 	}
 }

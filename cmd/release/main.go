@@ -37,6 +37,7 @@ var releaseTestCommand = func() (string, []string) {
 
 var acquireReleaseMachinePermitFn = acquireReleaseMachinePermit
 var runCompleteReleaseTestsFn = runCompleteReleaseTests
+var runReleaseBoundedUnitFn = runReleaseBoundedUnit
 
 func main() {
 	if e := release(); e != nil {
@@ -84,7 +85,7 @@ func release() error {
 			releasePermit()
 		}
 	}()
-	if e := runReleaseBoundedUnit(ctx, nil, nil, "go", "vet", "./..."); e != nil {
+	if e := runReleaseBoundedUnitFn(ctx, nil, nil, "go", "vet", "./..."); e != nil {
 		return e
 	}
 	if ctx, cancel, releasePermit, e = releaseTailHandoff(ctx, cancel, releasePermit, wait); e != nil {
@@ -111,7 +112,7 @@ func release() error {
 		}
 		env = append(env, "GOOS="+target[0], "GOARCH="+target[1], "CGO_ENABLED=0")
 		var digest [sha256.Size]byte
-		if e := runReleaseBoundedUnit(ctx, env, func() error {
+		if e := runReleaseBoundedUnitFn(ctx, env, func() error {
 			data, readErr := os.ReadFile(p)
 			if readErr != nil {
 				return readErr
