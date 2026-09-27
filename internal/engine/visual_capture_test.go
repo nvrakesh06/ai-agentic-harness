@@ -135,6 +135,47 @@ func TestVisualCaptureSelectsDurableUIProfileAndSeparatesProvenance(t *testing.T
 	}
 }
 
+func TestVisualUIAdapterToolIdentityInvalidatesClosureAndFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	prepare, server := filepath.Join(dir, "prepare-tool"), filepath.Join(dir, "server-tool")
+	if err := os.WriteFile(prepare, []byte("prepare-v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(server, []byte("server-v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	capture := &config.VisualCapture{Prepare: []string{prepare}, Server: []string{server}}
+	first, err := visualAdapterToolIdentity(dir, capture)
+	if err != nil || !strings.Contains(first, "prepare=") || !strings.Contains(first, "server=") {
+		t.Fatalf("first UI adapter identity = %q, error %v", first, err)
+	}
+	firstClosure := &visualClosureReceipt{Version: 0, Runtime: visualUIRuntimeIdentity("browser", first), Tree: "tree", Targets: []config.VisualCaptureTarget{{ID: "ui"}}}
+	if err = os.WriteFile(server, []byte("server-v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := visualAdapterToolIdentity(dir, capture)
+	secondClosure := &visualClosureReceipt{Version: 0, Runtime: visualUIRuntimeIdentity("browser", second), Tree: "tree", Targets: firstClosure.Targets}
+	if err != nil || first == second || sameVisualClosure(firstClosure, secondClosure, firstClosure.Targets) {
+		t.Fatalf("changed selected UI server reused closure: first=%q second=%q error=%v", first, second, err)
+	}
+	if err = os.WriteFile(prepare, []byte("prepare-v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	third, err := visualAdapterToolIdentity(dir, capture)
+	if err != nil || third == second {
+		t.Fatalf("changed selected UI prepare reused identity: second=%q third=%q error=%v", second, third, err)
+	}
+	capture.Prepare = []string{filepath.Join(dir, "missing-tool")}
+	if _, err = visualAdapterToolIdentity(dir, capture); err == nil {
+		t.Fatal("missing selected UI prepare tool was accepted")
+	}
+	capture.Prepare = nil
+	capture.Server = []string{dir}
+	if _, err = visualAdapterToolIdentity(dir, capture); err == nil {
+		t.Fatal("unreadable selected UI server tool was accepted")
+	}
+}
+
 func visualCheckoutFixture(t *testing.T) (*Controller, *model.Task, string, string, func(string, ...string) string) {
 	t.Helper()
 	state, source, control := t.TempDir(), t.TempDir(), filepath.Join(t.TempDir(), "control.git")

@@ -680,6 +680,77 @@ func visualInputClosure(ctx context.Context, dir string, e config.Effective, act
 	return &visualClosureReceipt{Version: closure.Version, Hash: hex.EncodeToString(h[:]), Runtime: actualRuntime, SourceHead: "", Tree: strings.TrimSpace(tree), Targets: capture.CaptureTargets()}, nil
 }
 
+// visualAdapterToolIdentity follows the verification tool-identity rule: it
+// resolves and hashes the exact selected argv[0] file, never a version string.
+func visualAdapterToolIdentity(dir string, capture *config.VisualCapture) (string, error) {
+	if capture == nil {
+		return "", errors.New("visual capture adapter is missing")
+	}
+	commands := []struct {
+		name string
+		argv []string
+	}{{"prepare", capture.Prepare}, {"server", capture.Server}}
+	identities := make([]string, 0, 2)
+	for _, command := range commands {
+		if len(command.argv) == 0 {
+			continue
+		}
+		path := command.argv[0]
+		if filepath.IsAbs(path) || strings.ContainsAny(path, `/\\`) {
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(dir, path)
+			}
+		} else {
+			resolved, err := exec.LookPath(path)
+			if err != nil {
+				return "", &visualCaptureUnavailableError{fmt.Errorf("resolve visual %s tool %q: %w", command.name, command.argv[0], err)}
+			}
+			path = resolved
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return "", &visualCaptureUnavailableError{fmt.Errorf("read visual %s tool %q: %w", command.name, command.argv[0], err)}
+		}
+		hash := sha256.New()
+		_, copyErr := io.Copy(hash, file)
+		closeErr := file.Close()
+		if copyErr != nil || closeErr != nil {
+			return "", &visualCaptureUnavailableError{fmt.Errorf("hash visual %s tool %q: %w", command.name, command.argv[0], errors.Join(copyErr, closeErr))}
+		}
+		identities = append(identities, command.name+"="+command.argv[0]+"="+hex.EncodeToString(hash.Sum(nil)))
+	}
+	if len(identities) == 0 {
+		return "", &visualCaptureUnavailableError{errors.New("visual UI adapter has no registered tools")}
+	}
+	return strings.Join(identities, ","), nil
+}
+
+func visualUIRuntimeIdentity(browser, adapter string) string { return browser + "\nadapter=" + adapter }
+
+func visualUIInputClosure(ctx context.Context, dir string, e config.Effective, runtime, head string) (*visualClosureReceipt, error) {
+	capture := e.Project.VisualCapture
+	if capture == nil || !visualRevision.MatchString(head) {
+		return nil, errors.New("visual UI closure needs an exact committed head")
+	}
+	tree, err := (gitx.Git{Dir: dir}).Run(ctx, "", "rev-parse", head+"^{tree}")
+	if err != nil || !visualRevision.MatchString(strings.TrimSpace(tree)) {
+		return nil, errors.New("visual UI closure needs a committed full tracked tree")
+	}
+	declared := ""
+	if capture.InputClosure != nil {
+		declared = capture.InputClosure.Runtime
+	}
+	body, err := json.Marshal(struct {
+		Config, Runtime, Declared, Tree string
+		Targets                         []config.VisualCaptureTarget
+	}{e.Hash, runtime, declared, strings.TrimSpace(tree), capture.CaptureTargets()})
+	if err != nil {
+		return nil, err
+	}
+	hash := sha256.Sum256(body)
+	return &visualClosureReceipt{Version: 0, Hash: hex.EncodeToString(hash[:]), Runtime: runtime, Tree: strings.TrimSpace(tree), Targets: capture.CaptureTargets()}, nil
+}
+
 const visualRuntimeProbe = `(async()=>{const p=require('node:path'),m=process.argv[1],{chromium}=require(m),b=await chromium.launch({channel:'chrome',headless:true});try{console.log(JSON.stringify({node:process.version,playwright:require(p.join(m,'package.json')).version,browser:b.version()}));}finally{await b.close();}})().catch(e=>{console.error(e);process.exit(1)})`
 
 func visualRuntimeIdentity(ctx context.Context, module string) (string, error) {
@@ -831,7 +902,7 @@ func visualCaptureWorkload(e config.Effective, task *model.Task) string {
 // and loopback policy; AIH bounds its process lifetime and accepts only
 // validated local artifacts.
 func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task *model.Task, dir string) (visual *model.VisualEvidence, retErr error) {
-	selected, _, selectionErr := visualCaptureEffective(e, task)
+	selected, workload, selectionErr := visualCaptureEffective(e, task)
 	if selectionErr != nil {
 		return nil, selectionErr
 	}
@@ -847,7 +918,7 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 	}
 	var closure *visualClosureReceipt
 	var playwright string
-	if capture.InputClosure != nil {
+	if capture.InputClosure != nil || workload == "ui" {
 		playwright, err = playwrightModule(c.P.Home)
 		if err != nil {
 			return nil, err
@@ -862,7 +933,15 @@ func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task
 		if runtimeErr != nil {
 			return nil, runtimeErr
 		}
-		closure, err = visualInputClosure(ctx, dir, e, runtimeIdentity, task.HeadSHA)
+		if workload == "ui" {
+			adapterIdentity, adapterErr := visualAdapterToolIdentity(dir, capture)
+			if adapterErr != nil {
+				return nil, adapterErr
+			}
+			closure, err = visualUIInputClosure(ctx, dir, e, visualUIRuntimeIdentity(runtimeIdentity, adapterIdentity), task.HeadSHA)
+		} else {
+			closure, err = visualInputClosure(ctx, dir, e, runtimeIdentity, task.HeadSHA)
+		}
 		if err != nil {
 			return nil, &checkFailure{name: "visual capture", command: "git", err: err}
 		}
