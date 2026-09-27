@@ -203,6 +203,10 @@ func TestReplanUnstartedAreaReauthorizationRequestFailsClosed(t *testing.T) {
 		func(r *ReplanRequest) { r.Replacement.ReplaceContract = false },
 		func(r *ReplanRequest) { r.Originals[0].ExpectedBaseSHA = "" },
 		func(r *ReplanRequest) { r.Originals[0].ReauthorizeUnstartedDroppedAreas = nil },
+		func(r *ReplanRequest) { r.Originals[0].ReauthorizeUnstartedDroppedAreas = []string{""} },
+		func(r *ReplanRequest) {
+			r.Originals[0].ReauthorizeUnstartedDroppedAreas = []string{"legacy annotation", "legacy annotation"}
+		},
 		func(r *ReplanRequest) { r.Originals[0].ReauthorizeUnstartedAreas = []string{"tests/other.test.ts"} },
 		func(r *ReplanRequest) {
 			r.Originals[0].ReauthorizeUnstartedAreas = []string{"tests/engine.test.ts", "tests/engine.test.ts"}
@@ -298,6 +302,18 @@ func TestReplanReceiptBindsExactManifest(t *testing.T) {
 	request.Reason = "different"
 	if _, err := replanReceipt(s, request); err == nil {
 		t.Fatal("altered request reused receipt")
+	}
+	request = validReplanRequest()
+	request.Replacement.ReplaceContract = true
+	request.Replacement.Areas = []string{"tests/engine.test.ts"}
+	request.Originals = []ReplanOriginal{
+		{TaskID: "queued", State: model.Ready, ExpectedBaseSHA: strings.Repeat("c", 40), ReauthorizeUnstartedAreas: []string{"tests/engine.test.ts"}, ReauthorizeUnstartedDroppedAreas: []string{"legacy annotation"}},
+		{TaskID: "old", State: model.Blocked, HeadSHA: strings.Repeat("a", 40)},
+	}
+	s.Replans[request.CommandID] = model.ReplanReceipt{Digest: replanDigest(request), ReplacementID: request.Replacement.ID}
+	request.Originals[0].ReauthorizeUnstartedDroppedAreas = []string{"different legacy annotation"}
+	if _, err := replanReceipt(s, request); err == nil {
+		t.Fatal("changed exact reauthorization drop list reused receipt")
 	}
 }
 
