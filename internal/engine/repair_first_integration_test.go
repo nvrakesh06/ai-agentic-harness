@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -31,7 +32,11 @@ func TestRepairFirstNativeHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if _, err = file.WriteString("native\n"); err != nil {
+	head, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = file.WriteString("native " + strings.TrimSpace(string(head)) + "\n"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -164,10 +169,17 @@ func TestRepairFirstAnswerSynchronizesBeforeWriterAndRechecksChangedHead(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if workers.implementations.Load() != 2 || !workers.implementedBeforeNative.Load() || strings.Count(string(count), "native\n") != 1 {
-		t.Fatalf("repair-first ordering or native count wrong: implementer=%d before_native=%t native=%q", workers.implementations.Load(), workers.implementedBeforeNative.Load(), count)
+	if completed.Evidence == nil {
+		t.Fatalf("changed-head repair did not retain validation evidence: task=%#v", completed)
 	}
-	if completed.HeadSHA == initial.HeadSHA || completed.Evidence == nil || completed.Evidence.Head != completed.HeadSHA || completed.RepairFirst != nil || workers.reviewers.Load() < 2 || workers.security.Load() < 2 || workers.qa.Load() == 0 {
+	// The changed task head is verified before review. Integration then verifies
+	// the merge-train head and intentionally keeps Evidence.Head at the reviewed
+	// source so visual provenance remains bound to that source revision.
+	wantNative := "native " + completed.Evidence.Head + "\n" + "native " + completed.Evidence.IntegrationSHA + "\n"
+	if workers.implementations.Load() != 2 || !workers.implementedBeforeNative.Load() || string(count) != wantNative {
+		t.Fatalf("repair-first ordering or native stages wrong: implementer=%d before_native=%t native=%q want=%q", workers.implementations.Load(), workers.implementedBeforeNative.Load(), count, wantNative)
+	}
+	if completed.HeadSHA == initial.HeadSHA || completed.Evidence.Head == initial.HeadSHA || completed.Evidence.Head == completed.HeadSHA || completed.MergeSHA != completed.HeadSHA || completed.Evidence.IntegrationSHA != completed.MergeSHA || completed.RepairFirst != nil || workers.reviewers.Load() < 2 || workers.security.Load() < 2 || workers.qa.Load() == 0 {
 		t.Fatalf("changed-head repair did not pass the normal final gates: task=%#v reviewer=%d security=%d qa=%d", completed, workers.reviewers.Load(), workers.security.Load(), workers.qa.Load())
 	}
 }
