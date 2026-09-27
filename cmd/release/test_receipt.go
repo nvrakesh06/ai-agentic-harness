@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,6 +17,8 @@ import (
 )
 
 const releaseReceiptSchema = 1
+
+var releaseGoEnvFields = []string{"GOVERSION", "GOOS", "GOARCH", "CGO_ENABLED", "GOFLAGS", "GOTOOLCHAIN", "GOWORK"}
 
 var releaseTestEnvironmentKeys = []string{
 	"AIH_HOME", "AIH_PLAYWRIGHT_MODULE", "AIH_REAL_PLAYWRIGHT", "CGO_ENABLED",
@@ -39,6 +42,18 @@ type releaseGroupReceipt struct {
 	Group     string                 `json:"group"`
 	Completed int                    `json:"completed"`
 }
+
+type releaseGoEnvironment struct {
+	GoVersion   string
+	GoOS        string
+	GoArch      string
+	CGOEnabled  string
+	GoFlags     string
+	GoToolchain string
+	GoWork      string
+}
+
+type releaseIdentityRun func(context.Context, string, []string, string, string, ...string) (string, error)
 
 func releaseHash(value string) string {
 	sum := sha256.Sum256([]byte(value))
@@ -157,8 +172,12 @@ func releaseRealBrowserFixture(test string) bool {
 }
 
 func releaseReceiptIdentityFor(ctx context.Context, groups []releaseTestGroup) (releaseReceiptIdentity, error) {
+	return releaseReceiptIdentityWithRun(ctx, groups, platform.Run)
+}
+
+func releaseReceiptIdentityWithRun(ctx context.Context, groups []releaseTestGroup, runner releaseIdentityRun) (releaseReceiptIdentity, error) {
 	run := func(name string, args ...string) (string, error) {
-		output, err := platform.Run(ctx, "", nil, "", name, args...)
+		output, err := runner(ctx, "", nil, "", name, args...)
 		if err != nil {
 			if yielded := releaseYieldCancellation(ctx, err); yielded != nil {
 				return "", yielded
@@ -186,11 +205,11 @@ func releaseReceiptIdentityFor(ctx context.Context, groups []releaseTestGroup) (
 	if err != nil {
 		return releaseReceiptIdentity{}, err
 	}
-	goEnv, err := run("go", "env", "GOVERSION", "GOOS", "GOARCH", "CGO_ENABLED", "GOFLAGS", "GOTOOLCHAIN")
+	goEnvJSON, err := run("go", append([]string{"env", "-json"}, releaseGoEnvFields...)...)
 	if err != nil {
 		return releaseReceiptIdentity{}, err
 	}
-	effectiveGoFlags, err := run("go", "env", "GOFLAGS")
+	goEnv, err := releaseGoEnvironmentFromJSON(goEnvJSON)
 	if err != nil {
 		return releaseReceiptIdentity{}, err
 	}
@@ -198,14 +217,10 @@ func releaseReceiptIdentityFor(ctx context.Context, groups []releaseTestGroup) (
 	if err != nil {
 		return releaseReceiptIdentity{}, err
 	}
-	goWork, err := run("go", "env", "GOWORK")
-	if err != nil {
+	if err = releaseWorkspaceAllowed(goEnv.GoWork); err != nil {
 		return releaseReceiptIdentity{}, err
 	}
-	if err = releaseWorkspaceAllowed(goWork); err != nil {
-		return releaseReceiptIdentity{}, err
-	}
-	if err = releaseGoFlagsAllowed(effectiveGoFlags); err != nil {
+	if err = releaseGoFlagsAllowed(goEnv.GoFlags); err != nil {
 		return releaseReceiptIdentity{}, err
 	}
 	keys := append([]string(nil), releaseTestEnvironmentKeys...)
@@ -214,7 +229,7 @@ func releaseReceiptIdentityFor(ctx context.Context, groups []releaseTestGroup) (
 	for _, key := range keys {
 		value := os.Getenv(key)
 		if key == "GOFLAGS" {
-			value = effectiveGoFlags
+			value = goEnv.GoFlags
 		}
 		environment = append(environment, key+"="+value)
 	}
@@ -225,10 +240,80 @@ func releaseReceiptIdentityFor(ctx context.Context, groups []releaseTestGroup) (
 	return releaseReceiptIdentity{
 		Schema: releaseReceiptSchema, Head: head, Tree: tree,
 		Inventory:   releaseHash(string(plan)),
-		Toolchain:   releaseHash(goVersion + "\n" + goEnv + "\n" + gitVersion),
+		Toolchain:   releaseHash(goVersion + "\n" + goEnv.identity() + "\n" + gitVersion),
 		Environment: releaseHash(strings.Join(environment, "\n")),
 		Resources:   releaseHash(fmt.Sprintf("timeout=%s\nengine_group_size=%d\npackage_parallelism=1\nfailfast=true", releaseTestTimeout, releaseIntegrationGroupSize)),
 	}, nil
+}
+
+func releaseGoEnvironmentFromJSON(value string) (releaseGoEnvironment, error) {
+	decoder := json.NewDecoder(strings.NewReader(value))
+	first, err := decoder.Token()
+	if err != nil {
+		return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON: %w", err)
+	}
+	if delimiter, ok := first.(json.Delim); !ok || delimiter != '{' {
+		return releaseGoEnvironment{}, errors.New("release receipt identity go env JSON object is required")
+	}
+	values := make(map[string]string, len(releaseGoEnvFields))
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON key: %w", err)
+		}
+		field, ok := token.(string)
+		if !ok || !releaseGoEnvFieldAllowed(field) {
+			return releaseGoEnvironment{}, errors.New("release receipt identity go env JSON has missing or unexpected fields")
+		}
+		if _, duplicate := values[field]; duplicate {
+			return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON duplicate %s", field)
+		}
+		var decoded any
+		if err := decoder.Decode(&decoded); err != nil {
+			return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON invalid %s: %w", field, err)
+		}
+		text, ok := decoded.(string)
+		if !ok {
+			return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON invalid %s: string required", field)
+		}
+		values[field] = text
+	}
+	last, err := decoder.Token()
+	if err != nil {
+		return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON: %w", err)
+	}
+	if delimiter, ok := last.(json.Delim); !ok || delimiter != '}' {
+		return releaseGoEnvironment{}, errors.New("release receipt identity go env JSON object is required")
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		if err == nil {
+			return releaseGoEnvironment{}, errors.New("release receipt identity go env JSON has trailing data")
+		}
+		return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON trailing data: %w", err)
+	}
+	if len(values) != len(releaseGoEnvFields) {
+		return releaseGoEnvironment{}, errors.New("release receipt identity go env JSON has missing or unexpected fields")
+	}
+	return releaseGoEnvironment{
+		GoVersion: values["GOVERSION"], GoOS: values["GOOS"], GoArch: values["GOARCH"], CGOEnabled: values["CGO_ENABLED"],
+		GoFlags: values["GOFLAGS"], GoToolchain: values["GOTOOLCHAIN"], GoWork: values["GOWORK"],
+	}, nil
+}
+
+func releaseGoEnvFieldAllowed(value string) bool {
+	for _, field := range releaseGoEnvFields {
+		if value == field {
+			return true
+		}
+	}
+	return false
+}
+
+func (e releaseGoEnvironment) identity() string {
+	return strings.Join([]string{
+		"GOVERSION=" + e.GoVersion, "GOOS=" + e.GoOS, "GOARCH=" + e.GoArch, "CGO_ENABLED=" + e.CGOEnabled,
+		"GOFLAGS=" + e.GoFlags, "GOTOOLCHAIN=" + e.GoToolchain, "GOWORK=" + e.GoWork,
+	}, "\n")
 }
 
 func releaseWorkspaceAllowed(value string) error {

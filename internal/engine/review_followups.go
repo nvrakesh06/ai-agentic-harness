@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -295,9 +296,53 @@ func followupOwnerScope(source string) string {
 }
 
 func followupSourceFile(location string) string {
+	// This legacy grouping key remains case-folded and sanitized. Immutable task
+	// ownership uses followupSourcePaths below instead.
 	location = strings.TrimSpace(strings.ToLower(location))
 	if location == "" {
 		return ""
+	}
+	var sources []string
+	for _, candidate := range strings.FieldsFunc(location, func(r rune) bool { return r == ';' || r == ',' || r == '\n' }) {
+		candidate = strings.Trim(strings.TrimSpace(candidate), "`\"' ")
+		if followupBareLine.MatchString(candidate) {
+			continue
+		}
+		candidate = strings.ReplaceAll(candidate, "\\", "/")
+		candidate = followupParenLine.ReplaceAllString(candidate, "")
+		candidate = followupHashLine.ReplaceAllString(candidate, "")
+		candidate = followupColonLine.ReplaceAllString(candidate, "")
+		candidate = strings.Trim(strings.TrimSpace(candidate), "`\"' ")
+		for strings.HasPrefix(candidate, "./") {
+			candidate = strings.TrimPrefix(candidate, "./")
+		}
+		if strings.ContainsAny(candidate, " \t") || (!strings.Contains(candidate, ".") && !followupSourcePrefix(candidate)) {
+			continue
+		}
+		candidate = strings.Map(func(r rune) rune {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '/' || r == '.' || r == '_' || r == '-' {
+				return r
+			}
+			return -1
+		}, candidate)
+		if candidate != "" {
+			sources = append(sources, candidate)
+		}
+	}
+	if len(sources) == 0 {
+		return ""
+	}
+	sort.Strings(sources)
+	return sources[0]
+}
+
+// followupSourcePaths extracts every recognized source path without changing
+// case. Ownership validates this set against case-sensitive immutable Git
+// areas, so one contained location cannot hide another unowned location.
+func followupSourcePaths(location string) []string {
+	location = strings.TrimSpace(location)
+	if location == "" {
+		return nil
 	}
 	// The source scope must not change when reviewers switch between line,
 	// range, column, or prose notation. Sort multi-location candidates so their
@@ -316,26 +361,52 @@ func followupSourceFile(location string) string {
 		for strings.HasPrefix(candidate, "./") {
 			candidate = strings.TrimPrefix(candidate, "./")
 		}
-		// Reviewers sometimes put prose such as "current-head browser captures"
-		// in Location. Do not turn that phrase into a fake source-file issue.
-		if strings.ContainsAny(candidate, " \t") || (!strings.Contains(candidate, ".") && !strings.HasPrefix(candidate, "src/") && !strings.HasPrefix(candidate, "internal/") && !strings.HasPrefix(candidate, "pkg/") && !strings.HasPrefix(candidate, "lib/") && !strings.HasPrefix(candidate, "app/") && !strings.HasPrefix(candidate, "tests/") && !strings.HasPrefix(candidate, "docs/") && !strings.HasPrefix(candidate, "projects/")) {
+		lower := strings.ToLower(candidate)
+		recognized := strings.Contains(candidate, ".") || followupSourcePrefix(lower)
+		sourceLike := recognized || strings.Contains(candidate, "/")
+		if strings.ContainsAny(candidate, " \t") {
+			// Reviewers sometimes put prose such as "current-head browser
+			// captures" in Location. Leave that non-source prose ungrouped, but
+			// fail ownership closed when a source-like path has unsupported
+			// whitespace instead of silently accepting a neighboring path.
+			if sourceLike {
+				return nil
+			}
 			continue
 		}
-		candidate = strings.Map(func(r rune) rune {
+		if !sourceLike {
+			continue
+		}
+		sanitized := strings.Map(func(r rune) rune {
 			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '/' || r == '.' || r == '_' || r == '-' {
 				return r
 			}
 			return -1
 		}, candidate)
+		if sanitized != candidate {
+			// Do not turn an unsupported filename character into a different
+			// owned path. Reject the whole location set so a contained neighbor
+			// cannot hide the unsupported path.
+			return nil
+		}
 		if candidate != "" {
 			sources = append(sources, candidate)
 		}
 	}
 	if len(sources) == 0 {
-		return ""
+		return nil
 	}
 	sort.Strings(sources)
-	return sources[0]
+	return slices.Compact(sources)
+}
+
+func followupSourcePrefix(candidate string) bool {
+	for _, prefix := range []string{"src/", "internal/", "pkg/", "lib/", "app/", "tests/", "docs/", "projects/"} {
+		if strings.HasPrefix(candidate, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 var followupParenLine = regexp.MustCompile(`(?i)\s*\(lines?\s+\d+(?:\s*[-–]\s*\d+)?\)$`)

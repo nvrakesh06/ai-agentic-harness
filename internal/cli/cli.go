@@ -339,7 +339,7 @@ func New() *cobra.Command {
 						if msg := p.DB.Get("last_error"); msg != "" {
 							return errors.New(msg)
 						}
-						fmt.Fprintln(cmd.OutOrStdout(), "Supervisor stopped; checkpoints persisted and controller lease released.")
+						fmt.Fprintln(cmd.OutOrStdout(), "Supervisor stopped and controller lease released; inspect aih logs for retained local work before resuming.")
 						return nil
 					}
 					if snapshot, _, loadErr := p.DB.Load(); loadErr == nil {

@@ -211,6 +211,16 @@ func TestRenderedImplementerPromptExplainsFindingBaselineFields(t *testing.T) {
 	}
 }
 
+func TestRenderedImplementerPromptBoundsPendingMergeContentRepair(t *testing.T) {
+	task := &model.Task{ID: "sync", Areas: []string{"src/assigned"}, AssignedAreas: []string{"src/assigned"}, SyncBase: strings.Repeat("a", 40)}
+	prompt := Compile(config.Effective{Files: map[string]string{}}, Builtins()["implementer"], "linux", task, "resolve the assigned merge content", "", "")
+	for _, value := range []string{"conflict_base", "matches MERGE_HEAD", "file-content conflict markers only in assigned areas", "preserve main imports", "source repair, not Git publication", "refs, staging, checkpoints, commits, pushes, rebases, aborts, and resets remain supervisor-owned", "conflicted file is outside assigned areas", "never broaden the write scope", "Do not return native-only while conflict markers remain"} {
+		if !strings.Contains(prompt, value) {
+			t.Fatalf("pending merge prompt missing %q: %s", value, prompt)
+		}
+	}
+}
+
 func TestReviewPromptsRequirePeerIndependenceAndSupervisorEvidenceRouting(t *testing.T) {
 	prompt := Compile(config.Effective{Files: map[string]string{}}, Builtins()["qa"], "windows", &model.Task{ID: "task", Areas: []string{"src"}}, "review", "diff", `{"reviews":{}}`)
 	for _, value := range []string{"Peer reviews run concurrently and independently", "no peer approvals", "Do not wait for, require", "exact-head native evidence", "without asking a human to run tools", "missing Node, npm, Bun", "not a finding", "consequential human decision", "do not hunt unrelated code", "causal surface", "relevance: changed, causal, baseline, or unknown", "incidental issue is proven to reproduce at the exact base revision", "do not expand the origin review", "Uncertain relevance, any security concern"} {

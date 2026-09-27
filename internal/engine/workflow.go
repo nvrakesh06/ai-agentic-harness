@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 type checkFailure struct {
@@ -44,10 +45,26 @@ const (
 	maxFailureDiagnosticBytes     = 8 << 10
 	failureDiagnosticHeadBytes    = 2 << 10
 	failureDiagnosticTailBytes    = 5 << 10
+	failureDiagnosticScanBytes    = 128 << 10
+	failureDiagnosticContextCount = 3
+	failureDiagnosticContextBytes = 768
+	failureDiagnosticContextHead  = 1 << 10
+	failureDiagnosticContextTail  = 3 << 10
 )
 
 var verificationPassCount = regexp.MustCompile(`(?i)\b(test files|tests|test suites|suites|specs?)\s*:?\s*(\d{1,9})\s+(?:passed|passing)\b`)
 var verificationBarePassCount = regexp.MustCompile(`(?i)\b(\d{1,9})\s+passed\b`)
+
+// Failure markers select diagnostic context only. A failed command remains a
+// failed command regardless of whether its output contains one of these forms.
+var failureDiagnosticMarkers = []struct {
+	priority int
+	pattern  *regexp.Regexp
+}{
+	{priority: 0, pattern: regexp.MustCompile(`(?i)\b(?:error\s+)?TS\d{3,5}\b`)},
+	{priority: 1, pattern: regexp.MustCompile(`(?i)^\s*(?:--- FAIL:|FAIL\b|panic:|.*\.go:\d+(?::\d+)?:)`)},
+	{priority: 2, pattern: regexp.MustCompile(`(?i)^\s*(?:Error:|TimeoutError:|expect\(.+\)\.(?:to|not)|Expected:|Received:|Call log:|\[[^\]]+\]\s+›)`)},
+}
 
 // verificationPassCounts extracts only fixed labels and decimal counts from
 // successful command output. Review evidence must be useful without copying
@@ -104,16 +121,136 @@ func boundedVerificationOutput(output string) string {
 	return output[len(output)-maxVerificationEvidenceScan:]
 }
 
-// boundedFailureDiagnostic preserves the beginning and, especially, the end of
-// a failed check's output. Test runners commonly print many successful results
-// before writing the actionable failure at the end. The caller redacts before
-// invoking this helper, so both retained slices are safe to persist.
+// boundedFailureDiagnostic preserves a bounded view of failed output. It keeps
+// legacy head/tail output when no recognizable failure marker is present, and
+// otherwise also retains a few compiler or test-runner context blocks that
+// would otherwise be lost in the middle of long output. The caller redacts
+// before invoking this helper; marker selection never classifies a result.
 func boundedFailureDiagnostic(output string) string {
+	output = strings.ToValidUTF8(output, "\uFFFD")
 	if len(output) <= maxFailureDiagnosticBytes {
 		return output
 	}
+	contexts := failureDiagnosticContexts(failureDiagnosticScan(output))
+	if len(contexts) == 0 {
+		return legacyBoundedFailureDiagnostic(output)
+	}
+	parts := []string{
+		failureDiagnosticPrefix(output, failureDiagnosticContextHead),
+		fmt.Sprintf("\n[... input had %d total bytes; middle diagnostic bytes omitted; retained recognized compiler/test failure context ...]\n", len(output)),
+		strings.Join(contexts, "\n[... next failure context ...]\n"),
+		"\n[... trailing diagnostic output retained ...]\n",
+		failureDiagnosticSuffix(output, failureDiagnosticContextTail),
+	}
+	return failureDiagnosticJoin(parts, maxFailureDiagnosticBytes)
+}
+
+func legacyBoundedFailureDiagnostic(output string) string {
 	omitted := len(output) - failureDiagnosticHeadBytes - failureDiagnosticTailBytes
-	return output[:failureDiagnosticHeadBytes] + fmt.Sprintf("\n[... %d bytes omitted; showing first and last diagnostic output ...]\n", omitted) + output[len(output)-failureDiagnosticTailBytes:]
+	return failureDiagnosticJoin([]string{
+		failureDiagnosticPrefix(output, failureDiagnosticHeadBytes),
+		fmt.Sprintf("\n[... %d bytes omitted; showing first and last diagnostic output ...]\n", omitted),
+		failureDiagnosticSuffix(output, failureDiagnosticTailBytes),
+	}, maxFailureDiagnosticBytes)
+}
+
+// failureDiagnosticScan bounds the amount of output searched for markers while
+// sampling the beginning, middle, and end of a large captured stream.
+func failureDiagnosticScan(output string) string {
+	if len(output) <= failureDiagnosticScanBytes {
+		return output
+	}
+	window := failureDiagnosticScanBytes / 4
+	middle := len(output) / 2
+	return strings.Join([]string{
+		failureDiagnosticPrefix(output, window),
+		"\n[... diagnostic marker scan skipped output ...]\n",
+		failureDiagnosticSlice(output, middle-window, middle+window),
+		"\n[... diagnostic marker scan skipped output ...]\n",
+		failureDiagnosticSuffix(output, window),
+	}, "")
+}
+
+func failureDiagnosticContexts(output string) []string {
+	lines := strings.Split(output, "\n")
+	type candidate struct{ priority, line int }
+	candidates := make([]candidate, 0, failureDiagnosticContextCount)
+	for line, text := range lines {
+		for _, marker := range failureDiagnosticMarkers {
+			if marker.pattern.MatchString(text) {
+				candidates = append(candidates, candidate{priority: marker.priority, line: line})
+				break
+			}
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].priority != candidates[j].priority {
+			return candidates[i].priority < candidates[j].priority
+		}
+		return candidates[i].line < candidates[j].line
+	})
+	blocks := make([]string, 0, failureDiagnosticContextCount)
+	for _, candidate := range candidates {
+		duplicate := false
+		for _, block := range blocks {
+			if strings.Contains(block, lines[candidate.line]) {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		blocks = append(blocks, failureDiagnosticContextBlock(lines, candidate.line))
+		if len(blocks) == failureDiagnosticContextCount {
+			break
+		}
+	}
+	return blocks
+}
+
+func failureDiagnosticContextBlock(lines []string, marker int) string {
+	start, end := max(marker-2, 0), min(marker+3, len(lines))
+	parts := make([]string, 0, end-start)
+	for line := start; line < end; line++ {
+		limit := 96
+		if line == marker {
+			limit = 384
+		}
+		parts = append(parts, failureDiagnosticPrefix(lines[line], limit))
+	}
+	return failureDiagnosticPrefix(strings.Join(parts, "\n"), failureDiagnosticContextBytes)
+}
+
+func failureDiagnosticJoin(parts []string, limit int) string {
+	var b strings.Builder
+	for _, part := range parts {
+		if b.Len() == limit {
+			break
+		}
+		b.WriteString(failureDiagnosticPrefix(part, limit-b.Len()))
+	}
+	return b.String()
+}
+
+func failureDiagnosticSlice(text string, start, end int) string {
+	start = max(start, 0)
+	end = min(end, len(text))
+	for start < end && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	for end > start && end < len(text) && !utf8.RuneStart(text[end]) {
+		end--
+	}
+	return text[start:end]
+}
+
+func failureDiagnosticPrefix(text string, limit int) string {
+	return failureDiagnosticSlice(text, 0, min(limit, len(text)))
+}
+
+func failureDiagnosticSuffix(text string, limit int) string {
+	return failureDiagnosticSlice(text, max(len(text)-limit, 0), len(text))
 }
 
 func passedCheckEvidence(check config.Check, output string) string {
@@ -2394,7 +2531,7 @@ func (c *Controller) verifyReview(id string) error {
 		}
 		_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_requested", "roles="+strings.Join(names, ",")+" head="+t.HeadSHA)
 		if visualRequested {
-			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_queued", "head="+t.HeadSHA)
+			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_queued", "head="+t.HeadSHA+" workload="+visualCaptureWorkload(effective, t))
 		}
 		if !visualRequested || sourceRequested {
 			plan, planErr := fullValidationPlan(c.ctx, effective, dir, t.HeadSHA, "reviewer requested source evidence refresh")
@@ -2411,18 +2548,18 @@ func (c *Controller) verifyReview(id string) error {
 			}
 		}
 		if visualRequested {
-			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_running", "head="+t.HeadSHA)
+			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_running", "head="+t.HeadSHA+" workload="+visualCaptureWorkload(effective, t))
 			visual, visualErr := c.captureVisual(c.ctx, effective, t, dir)
 			if visualErr != nil {
 				kind := "visual_capture_failed"
-				if effective.Project.VisualCapture == nil {
+				if !visualCaptureConfigured(effective, t) {
 					kind = "visual_capture_unavailable"
 				}
 				_ = c.P.DB.Event(id, t.RunID, "verification", "native", kind, short(safety.Redact(visualErr.Error()), 500))
 				return visualErr
 			}
 			evidence.Visual = visual
-			message := "head=" + t.HeadSHA + " manifest=" + visual.Manifest
+			message := "head=" + t.HeadSHA + " workload=" + visualCaptureWorkload(effective, t) + " manifest=" + visual.Manifest
 			if visual.ReuseReason != "" {
 				message += " provenance=reattested source_head=" + visual.SourceHead + " closure=" + visual.Closure[:16]
 			}

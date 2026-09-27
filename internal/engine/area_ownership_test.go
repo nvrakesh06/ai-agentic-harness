@@ -21,6 +21,70 @@ func TestImmutableScopeHonorsDirectoryIntent(t *testing.T) {
 	}
 }
 
+func TestExactCaseAppFindingRoutesToItsImmutableOwner(t *testing.T) {
+	origin := ownedTask("renderer", model.Review, "src/remotion", model.AreaDirectory)
+	owner := ownedTask("studio", model.Fix, "src/studio/App.tsx", model.AreaFile)
+	originalAreas := append([]string(nil), owner.AssignedAreas...)
+	originalKind := owner.AssignedAreaKinds["src/studio/App.tsx"]
+	s := model.NewSnapshot("ownership-test")
+	s.Tasks = map[string]*model.Task{"renderer": origin, "studio": owner}
+	finding := model.Finding{Severity: "high", Role: "visual-quality", Location: "src/studio/App.tsx:450, src/studio/App.tsx:492, src/studio/App.tsx:646", Reason: "Draft content is lost when the modal takes focus."}
+	route, owners := applyCrossTaskFindings(s, "renderer", []model.Finding{finding}, func(model.Finding) bool { return true })
+	if !route.gated || route.unresolved || len(route.local) != 0 || len(owners["studio"]) != 1 || origin.State != model.SyncRequired || origin.Blocker != nil {
+		t.Fatalf("exact-case App.tsx finding did not route to repair owner: route=%#v owners=%#v origin=%#v", route, owners, origin)
+	}
+	if len(owner.AssignedAreas) != 1 || owner.AssignedAreas[0] != originalAreas[0] || owner.AssignedAreaKinds["src/studio/App.tsx"] != originalKind || owner.State != model.Fix {
+		t.Fatalf("routing changed the assigned immutable area or repair state: %#v", owner)
+	}
+}
+
+func TestFindingScopeRequiresExactCaseAndEveryRecognizedPath(t *testing.T) {
+	for name, location := range map[string]string{
+		"lowercase distinct path":         "src/studio/app.tsx:450",
+		"punctuation distinct path":       "src/studio/App!.tsx:450",
+		"mixed contained and outside":     "src/studio/App.tsx:450, src/studio/Other.tsx:492",
+		"mixed contained and punctuation": "src/studio/App.tsx:450, src/studio/App!.tsx:492",
+		"mixed contained and whitespace":  "src/studio/App.tsx:450, src/studio/Other File.tsx:492",
+		"mixed contained and slash path":  "src/studio/App.tsx:450, assets/icons",
+		"no recognizable source":          "current-head visual evidence",
+	} {
+		t.Run(name, func(t *testing.T) {
+			origin := ownedTask("renderer", model.Review, "src/remotion", model.AreaDirectory)
+			owner := ownedTask("studio", model.Ready, "src/studio/App.tsx", model.AreaFile)
+			s := model.NewSnapshot("ownership-test")
+			s.Tasks = map[string]*model.Task{"renderer": origin, "studio": owner}
+			finding := model.Finding{Severity: "high", Location: location}
+			if findingInTaskScope(owner, finding) {
+				t.Fatalf("finding %q was accepted by exact immutable App.tsx scope", location)
+			}
+			route, owners := applyCrossTaskFindings(s, "renderer", []model.Finding{finding}, func(model.Finding) bool { return true })
+			if !route.gated || !route.unresolved || len(route.local) != 1 || len(owners) != 0 || origin.State != model.Blocked {
+				t.Fatalf("unowned finding %q did not fail closed: route=%#v owners=%#v origin=%#v", location, route, owners, origin)
+			}
+		})
+	}
+}
+
+func TestFindingScopeDeduplicatesRepeatedExactPath(t *testing.T) {
+	task := ownedTask("studio", model.Ready, "src/studio/App.tsx", model.AreaFile)
+	if !findingInTaskScope(task, model.Finding{Location: "src/studio/App.tsx:450, src/studio/App.tsx:492, src/studio/App.tsx:646"}) {
+		t.Fatal("repeated exact App.tsx locations did not remain in immutable scope")
+	}
+}
+
+func TestFindingScopeDoesNotSplitLocationsBetweenOwners(t *testing.T) {
+	origin := ownedTask("renderer", model.Review, "src/remotion", model.AreaDirectory)
+	app := ownedTask("app", model.Ready, "src/studio/App.tsx", model.AreaFile)
+	other := ownedTask("other", model.Ready, "src/studio/Other.tsx", model.AreaFile)
+	s := model.NewSnapshot("ownership-test")
+	s.Tasks = map[string]*model.Task{"renderer": origin, "app": app, "other": other}
+	finding := model.Finding{Severity: "high", Location: "src/studio/App.tsx:450, src/studio/Other.tsx:492"}
+	route, owners := applyCrossTaskFindings(s, "renderer", []model.Finding{finding}, func(model.Finding) bool { return true })
+	if !route.gated || !route.unresolved || len(route.local) != 1 || len(owners) != 0 || origin.State != model.Blocked {
+		t.Fatalf("finding spanning separate owners was split or routed: route=%#v owners=%#v origin=%#v", route, owners, origin)
+	}
+}
+
 func TestCrossTaskRoutingDoesNotHumanBlockForNonblockingOrphan(t *testing.T) {
 	origin := ownedTask("renderer", model.Review, "src/remotion", model.AreaDirectory)
 	owner := ownedTask("studio", model.Ready, "src/studio", model.AreaDirectory)

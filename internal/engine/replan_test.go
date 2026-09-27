@@ -141,12 +141,12 @@ func TestReplanContractPreservesRiskRolesAndDependencies(t *testing.T) {
 	request.Replacement.Roles = []string{"reviewer"}
 	request.Replacement.Dependencies = []string{"external"}
 	old := &model.Task{ID: "old", Objective: "repair", Acceptance: []string{"legacy acceptance"}, Roles: []string{"security"}, Dependencies: []string{"external", "gate"}, Risk: "high", Security: true}
-	next, err := mergeReplanContract(request, []*model.Task{old})
+	next, err := mergeReplanContract(request, []*model.Task{old}, nil)
 	if err != nil || next.Risk != "high" || !next.Security || strings.Join(next.Roles, ",") != "reviewer,security" || strings.Join(next.Dependencies, ",") != "external,gate" || strings.Join(next.Acceptance, ",") != "legacy acceptance,works" {
 		t.Fatalf("contract preservation failed: %#v err=%v", next, err)
 	}
 	old.Objective = "different"
-	if _, err = mergeReplanContract(request, []*model.Task{old}); err == nil {
+	if _, err = mergeReplanContract(request, []*model.Task{old}, nil); err == nil {
 		t.Fatal("contract replacement was inferred")
 	}
 }
@@ -157,13 +157,67 @@ func TestReplanContractCollapsesInternalDependenciesAndPreservesKnownScope(t *te
 	request.Replacement.Dependencies = []string{"external"}
 	started := &model.Task{ID: "old", Objective: "repair", Dependencies: []string{"queued", "external"}, Areas: []string{"legacy/known.go"}, AssignedAreas: []string{"legacy/known.go"}, AssignedAreaKinds: map[string]string{"legacy/known.go": model.AreaFile}, Risk: "medium"}
 	queued := &model.Task{ID: "queued", Objective: "repair", Dependencies: []string{"old", "external"}, Areas: []string{"known/queued.go", "(new)"}, AssignedAreas: []string{"known/queued.go", "(new)"}, AssignedAreaKinds: map[string]string{"known/queued.go": model.AreaFile, "(new)": model.AreaUnknown}, Risk: "low"}
-	next, err := mergeReplanContract(request, []*model.Task{started, queued})
-	if err != nil || strings.Join(next.Dependencies, ",") != "external" || !containsReplanArea(next.Areas, "legacy/known.go") || !containsReplanArea(next.Areas, "known/queued.go") || containsReplanArea(next.Areas, "(new)") {
-		t.Fatalf("replacement did not retain external prerequisites and known scope only: %#v err=%v", next, err)
+	next, err := mergeReplanContract(request, []*model.Task{started, queued}, nil)
+	if err != nil || strings.Join(next.Dependencies, ",") != "external" || !containsReplanArea(next.Areas, "legacy/known.go") || !containsReplanArea(next.Areas, "known/queued.go") || !containsReplanArea(next.Areas, "(new)") {
+		t.Fatalf("replacement did not retain external prerequisites and historical scope: %#v err=%v", next, err)
 	}
 	request.Replacement.Dependencies = []string{"old"}
-	if _, err = mergeReplanContract(request, []*model.Task{started, queued}); err == nil {
+	if _, err = mergeReplanContract(request, []*model.Task{started, queued}, nil); err == nil {
 		t.Fatal("explicit dependency on superseded original accepted")
+	}
+}
+
+func TestReplanUnstartedAreaReauthorizationDropsOnlyExplicitlyProvenMalformedArea(t *testing.T) {
+	request := validReplanRequest()
+	base := strings.Repeat("c", 40)
+	request.Replacement.ReplaceContract = true
+	request.Replacement.Areas = []string{"tests/engine.test.ts"}
+	request.Originals = []ReplanOriginal{{TaskID: "queued", State: model.Ready, ExpectedBaseSHA: base, ReauthorizeUnstartedAreas: []string{"tests/engine.test.ts"}, ReauthorizeUnstartedDroppedAreas: []string{"legacy annotation"}}}
+	request.Sources = []ReplanSource{{TaskID: "old", BaseSHA: base, HeadSHA: strings.Repeat("a", 40), Order: 1}}
+	// Keep the started source in the manifest so ordinary source inheritance is
+	// still represented while only the base-only original may drop an entry.
+	request.Originals = append(request.Originals, ReplanOriginal{TaskID: "old", State: model.Blocked, HeadSHA: strings.Repeat("a", 40)})
+	if err := validateReplanRequest(request); err != nil {
+		t.Fatalf("bounded reauthorization request rejected: %v", err)
+	}
+	started := &model.Task{ID: "old", Objective: "repair", AssignedAreas: []string{"src/started.go"}, AssignedAreaKinds: map[string]string{"src/started.go": model.AreaFile}}
+	queued := &model.Task{ID: "queued", Objective: "repair", AssignedAreas: []string{"tests/engine.test.ts", "legacy annotation"}, AssignedAreaKinds: map[string]string{"tests/engine.test.ts": model.AreaFile, "legacy annotation": model.AreaUnknown}}
+	next, err := mergeReplanContract(request, []*model.Task{started, queued}, map[string]map[string]bool{"queued": {"legacy annotation": true}})
+	if err != nil || !containsReplanArea(next.Areas, "src/started.go") || !containsReplanArea(next.Areas, "tests/engine.test.ts") || containsReplanArea(next.Areas, "legacy annotation") {
+		t.Fatalf("reauthorization did not preserve valid/startable scope: %#v err=%v", next, err)
+	}
+	if next.Acceptance == nil || next.Risk != "medium" {
+		t.Fatalf("reauthorization bypassed inherited contract: %#v", next)
+	}
+}
+
+func TestReplanUnstartedAreaReauthorizationRequestFailsClosed(t *testing.T) {
+	request := validReplanRequest()
+	base := strings.Repeat("c", 40)
+	request.Replacement.ReplaceContract = true
+	request.Replacement.Areas = []string{"tests/engine.test.ts"}
+	request.Originals = []ReplanOriginal{{TaskID: "queued", State: model.Ready, ExpectedBaseSHA: base, ReauthorizeUnstartedAreas: []string{"tests/engine.test.ts"}, ReauthorizeUnstartedDroppedAreas: []string{"legacy annotation"}}}
+	request.Sources = []ReplanSource{{TaskID: "old", BaseSHA: base, HeadSHA: strings.Repeat("a", 40), Order: 1}}
+	request.Originals = append(request.Originals, ReplanOriginal{TaskID: "old", State: model.Blocked, HeadSHA: strings.Repeat("a", 40)})
+	for _, mutate := range []func(*ReplanRequest){
+		func(r *ReplanRequest) { r.Replacement.ReplaceContract = false },
+		func(r *ReplanRequest) { r.Originals[0].ExpectedBaseSHA = "" },
+		func(r *ReplanRequest) { r.Originals[0].ReauthorizeUnstartedDroppedAreas = nil },
+		func(r *ReplanRequest) { r.Originals[0].ReauthorizeUnstartedDroppedAreas = []string{""} },
+		func(r *ReplanRequest) {
+			r.Originals[0].ReauthorizeUnstartedDroppedAreas = []string{"legacy annotation", "legacy annotation"}
+		},
+		func(r *ReplanRequest) { r.Originals[0].ReauthorizeUnstartedAreas = []string{"tests/other.test.ts"} },
+		func(r *ReplanRequest) {
+			r.Originals[0].ReauthorizeUnstartedAreas = []string{"tests/engine.test.ts", "tests/engine.test.ts"}
+		},
+	} {
+		candidate := request
+		candidate.Originals = append([]ReplanOriginal(nil), request.Originals...)
+		mutate(&candidate)
+		if err := validateReplanRequest(candidate); err == nil {
+			t.Fatal("malformed reauthorization request accepted")
+		}
 	}
 }
 
@@ -248,6 +302,18 @@ func TestReplanReceiptBindsExactManifest(t *testing.T) {
 	request.Reason = "different"
 	if _, err := replanReceipt(s, request); err == nil {
 		t.Fatal("altered request reused receipt")
+	}
+	request = validReplanRequest()
+	request.Replacement.ReplaceContract = true
+	request.Replacement.Areas = []string{"tests/engine.test.ts"}
+	request.Originals = []ReplanOriginal{
+		{TaskID: "queued", State: model.Ready, ExpectedBaseSHA: strings.Repeat("c", 40), ReauthorizeUnstartedAreas: []string{"tests/engine.test.ts"}, ReauthorizeUnstartedDroppedAreas: []string{"legacy annotation"}},
+		{TaskID: "old", State: model.Blocked, HeadSHA: strings.Repeat("a", 40)},
+	}
+	s.Replans[request.CommandID] = model.ReplanReceipt{Digest: replanDigest(request), ReplacementID: request.Replacement.ID}
+	request.Originals[0].ReauthorizeUnstartedDroppedAreas = []string{"different legacy annotation"}
+	if _, err := replanReceipt(s, request); err == nil {
+		t.Fatal("changed exact reauthorization drop list reused receipt")
 	}
 }
 

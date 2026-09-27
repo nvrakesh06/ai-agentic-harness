@@ -11,6 +11,11 @@ import (
 	"strings"
 )
 
+// ErrPendingMergeUnresolved identifies a readable conflict marker in a pending
+// merge. It permits shutdown to preserve that local-only work without treating
+// it as a portable checkpoint. I/O and scope failures remain ordinary errors.
+var ErrPendingMergeUnresolved = errors.New("pending merge still has unresolved paths")
+
 // AreaKind is the immutable interpretation of one task area at its planning
 // base. It deliberately describes intent, rather than the current filesystem:
 // a tracked file remains exact even if a worker replaces it with a directory.
@@ -35,6 +40,10 @@ type AreaError struct {
 	Area   string
 	Reason string
 }
+
+// LiteralAreaError is a deterministic lexical rejection from the same grammar
+// used for new plan admission. It never represents a Git read or ref failure.
+type LiteralAreaError struct{ *AreaError }
 
 func (e *AreaError) Error() string {
 	if e.Area == "" {
@@ -136,6 +145,65 @@ func (g Git) ValidateNewPlanAreasAtRef(ctx context.Context, ref string, areas []
 		if planAreaConjunction(raw) {
 			return &AreaError{Area: raw, Reason: "multiple paths or prose are not one literal path"}
 		}
+	}
+	return nil
+}
+
+// ReauthorizationDropEligibleAtRefs proves that a named legacy area may be
+// dropped by the exceptional unstarted-task recovery path. A tracked name is
+// always retained, including names containing spaces or parentheses. An absent
+// name is droppable only when the plan-area grammar rejects it or it is absent
+// from both the pinned saved base and current canonical base. Any Git failure is
+// uncertainty and is returned unchanged.
+func (g Git) ReauthorizationDropEligibleAtRefs(ctx context.Context, savedBase, currentBase, raw string) (bool, error) {
+	pattern, _, err := canonicalArea(raw)
+	if err != nil {
+		var areaErr *AreaError
+		if errors.As(err, &areaErr) {
+			return true, nil
+		}
+		return false, err
+	}
+	saved, err := g.SHA(ctx, savedBase)
+	if err != nil {
+		return false, fmt.Errorf("resolve saved reauthorization base %q: %w", savedBase, err)
+	}
+	current, err := g.SHA(ctx, currentBase)
+	if err != nil {
+		return false, fmt.Errorf("resolve current reauthorization base %q: %w", currentBase, err)
+	}
+	for _, base := range []string{saved, current} {
+		_, exists, readErr := g.baseTreeObjectType(ctx, base, pattern)
+		if readErr != nil {
+			return false, fmt.Errorf("read reauthorization base tree: %w", readErr)
+		}
+		if exists {
+			return false, nil
+		}
+	}
+	if err := validateLiteralPlanArea(raw); err != nil {
+		var lexical *LiteralAreaError
+		if errors.As(err, &lexical) {
+			return true, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func validateLiteralPlanArea(raw string) error {
+	if _, _, err := canonicalArea(raw); err != nil {
+		var areaErr *AreaError
+		if errors.As(err, &areaErr) {
+			return &LiteralAreaError{AreaError: areaErr}
+		}
+		return err
+	}
+	if planAreaAnnotation(raw) {
+		return &LiteralAreaError{AreaError: &AreaError{Area: raw, Reason: "planner annotations are not path syntax; use the literal path"}}
+	}
+	if planAreaConjunction(raw) {
+		return &LiteralAreaError{AreaError: &AreaError{Area: raw, Reason: "multiple paths or prose are not one literal path"}}
 	}
 	return nil
 }
@@ -269,11 +337,12 @@ func (g Git) ValidatePendingMergeScope(ctx context.Context, worktree, base strin
 		if err != nil {
 			return err
 		}
-		for _, path := range strings.Fields(unresolved) {
-			content, readErr := os.ReadFile(filepath.Join(worktree, path))
-			if readErr != nil || strings.Contains(string(content), "<<<<<<<") || strings.Contains(string(content), ">>>>>>>") {
-				return errors.New("pending merge still has unresolved paths")
-			}
+		marker, readErr := pendingMergePathsHaveMarker(worktree, strings.Fields(unresolved))
+		if readErr != nil {
+			return readErr
+		}
+		if marker {
+			return ErrPendingMergeUnresolved
 		}
 	}
 	if _, err = w.Run(ctx, "", "add", "--all"); err != nil {
@@ -288,6 +357,29 @@ func (g Git) ValidatePendingMergeScope(ctx context.Context, worktree, base strin
 		return err
 	}
 	return ValidateScopePaths(areas, splitGitPaths(paths))
+}
+
+func pendingMergePathHasMarker(worktree, path string) (bool, error) {
+	content, err := os.ReadFile(filepath.Join(worktree, path))
+	if err != nil {
+		return false, err
+	}
+	return strings.Contains(string(content), "<<<<<<<") || strings.Contains(string(content), ">>>>>>>"), nil
+}
+
+// pendingMergePathsHaveMarker reads every unmerged path before classifying the
+// merge as locally preservable. A later unreadable path is a fail-closed I/O
+// error even when an earlier path contains a readable conflict marker.
+func pendingMergePathsHaveMarker(worktree string, paths []string) (bool, error) {
+	marker := false
+	for _, path := range paths {
+		hasMarker, err := pendingMergePathHasMarker(worktree, path)
+		if err != nil {
+			return false, err
+		}
+		marker = marker || hasMarker
+	}
+	return marker, nil
 }
 
 // ValidateCommitScope verifies an imported checkpoint against the immutable

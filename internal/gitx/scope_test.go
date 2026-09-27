@@ -144,6 +144,54 @@ func TestValidateNewPlanAreasAtRefRejectsPlannerProseButPreservesLiteralNames(t 
 	}
 }
 
+func TestReauthorizationDropEligibleAtRefsRequiresNamedAbsentLegacyArea(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	g := gitx.Git{Dir: f.Source}
+	saved, err := g.SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, area := range []string{"tests/kafka-elastic-timing.test.ts (new)", "Kafka render verification artifacts"} {
+		eligible, proofErr := g.ReauthorizationDropEligibleAtRefs(ctx, saved, saved, area)
+		if proofErr != nil || !eligible {
+			t.Fatalf("actual legacy area %q was not proven absent: eligible=%t error=%v", area, eligible, proofErr)
+		}
+	}
+	if err = os.WriteFile(filepath.Join(f.Source, "literal (new)"), []byte("tracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(filepath.Join(f.Source, "tracked-dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(f.Source, "tracked-dir", "entry"), []byte("tracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = g.Run(ctx, "", "add", "--all"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = g.Run(ctx, "", "commit", "-m", "track literal names"); err != nil {
+		t.Fatal(err)
+	}
+	current, err := g.SHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, area := range []string{"literal (new)", "tracked-dir"} {
+		eligible, proofErr := g.ReauthorizationDropEligibleAtRefs(ctx, saved, current, area)
+		if proofErr != nil || eligible {
+			t.Fatalf("tracked literal %q was droppable: eligible=%t error=%v", area, eligible, proofErr)
+		}
+	}
+	if _, proofErr := (gitx.Git{Dir: filepath.Join(t.TempDir(), "missing")}).ReauthorizationDropEligibleAtRefs(ctx, saved, current, "Kafka render verification artifacts"); proofErr == nil {
+		t.Fatal("Git read failure was treated as a malformed legacy area")
+	}
+}
+
 func TestValidateCheckpointScopeIncludesUntrackedAndRenameSides(t *testing.T) {
 	ctx := context.Background()
 	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})

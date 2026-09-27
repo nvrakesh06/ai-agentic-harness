@@ -118,6 +118,105 @@ func TestVisualEnvironmentBindsPrivatePlaywrightBrowserCache(t *testing.T) {
 	}
 }
 
+func TestVisualCaptureSelectsDurableUIProfileAndSeparatesProvenance(t *testing.T) {
+	effective := config.Effective{
+		Hash:  strings.Repeat("a", 64),
+		Files: map[string]string{".aih/roles/visual.yaml": "name: visual-quality\nextends: designer\n", ".aih/roles/animation.yaml": "name: animation-architecture\nextends: reviewer\n"},
+		Project: config.Project{
+			VisualCapture:           &config.VisualCapture{Server: []string{"default-server"}, Timeout: 10, Targets: []config.VisualCaptureTarget{{ID: "default", Path: "/", Width: 2, Height: 2}}},
+			VisualCaptureUI:         &config.VisualCapture{Server: []string{"ui-server"}, Timeout: 10, Targets: []config.VisualCaptureTarget{{ID: "ui", Path: "/planner", Width: 2, Height: 2}}},
+			VisualCaptureUISelector: &config.VisualCaptureUISelector{AllRequiredRoles: []string{"visual-quality"}, NoneOfRoles: []string{"animation-architecture"}},
+		},
+	}
+	defaultProfile, workload, err := visualCaptureEffective(effective, &model.Task{ID: "task", Roles: []string{"visual-quality"}})
+	if err != nil || workload != "default" || defaultProfile.Hash != effective.Hash || defaultProfile.Project.VisualCapture.Server[0] != "default-server" {
+		t.Fatalf("default profile = %#v workload=%q error=%v", defaultProfile.Project.VisualCapture, workload, err)
+	}
+	legacy := config.Effective{Hash: effective.Hash, Project: config.Project{VisualCapture: effective.Project.VisualCapture}}
+	legacyProfile, legacyWorkload, legacyErr := visualCaptureEffective(legacy, &model.Task{ID: "task", UI: true})
+	if legacyErr != nil || legacyWorkload != "default" || legacyProfile.Project.VisualCapture != legacy.Project.VisualCapture {
+		t.Fatalf("legacy UI task did not retain default capture: %#v workload=%q error=%v", legacyProfile.Project.VisualCapture, legacyWorkload, legacyErr)
+	}
+	uiProfile, workload, err := visualCaptureEffective(effective, &model.Task{ID: "task", UI: true, Roles: []string{"visual-quality"}})
+	if err != nil || workload != "ui" || uiProfile.Hash == effective.Hash || uiProfile.Project.VisualCapture.Server[0] != "ui-server" || uiProfile.Project.VisualCapture.CaptureTargets()[0].ID != "ui" {
+		t.Fatalf("UI profile = %#v workload=%q hash=%q error=%v", uiProfile.Project.VisualCapture, workload, uiProfile.Hash, err)
+	}
+	if "task-"+uiProfile.Hash[:16] == "task-"+defaultProfile.Hash[:16] {
+		t.Fatal("UI and default profiles share a cache/seal path")
+	}
+	for _, task := range []*model.Task{
+		{ID: "task", UI: true, Roles: []string{"animation-architecture", "visual-quality"}},
+		{ID: "task", UI: true, Roles: []string{"designer"}},
+	} {
+		profile, gotWorkload, selectErr := visualCaptureEffective(effective, task)
+		if selectErr != nil || gotWorkload != "default" || profile.Hash != effective.Hash || profile.Project.VisualCapture.Server[0] != "default-server" {
+			t.Fatalf("nonmatching UI roles selected UI profile: %#v workload=%q error=%v", profile.Project.VisualCapture, gotWorkload, selectErr)
+		}
+	}
+	changedPolicy := effective
+	changedPolicy.Project.VisualCaptureUISelector = &config.VisualCaptureUISelector{AllRequiredRoles: []string{"visual-quality"}}
+	changedUI, changedWorkload, changedErr := visualCaptureEffective(changedPolicy, &model.Task{ID: "task", UI: true, Roles: []string{"visual-quality"}})
+	if changedErr != nil || changedWorkload != "ui" || changedUI.Hash == uiProfile.Hash {
+		t.Fatalf("changed UI selector policy reused capture provenance: hash=%q workload=%q error=%v", changedUI.Hash, changedWorkload, changedErr)
+	}
+	missing := effective
+	missing.Project.VisualCaptureUI = nil
+	if _, _, err = visualCaptureEffective(missing, &model.Task{ID: "task", UI: true, Roles: []string{"visual-quality"}}); err == nil || visualCaptureConfigured(missing, &model.Task{ID: "task", UI: true, Roles: []string{"visual-quality"}}) {
+		t.Fatal("UI task fell back to the default capture profile")
+	}
+	missingSelector := effective
+	missingSelector.Project.VisualCaptureUISelector = nil
+	if _, _, err = visualCaptureEffective(missingSelector, &model.Task{ID: "task", UI: true, Roles: []string{"visual-quality"}}); err == nil {
+		t.Fatal("UI profile without selector was accepted")
+	}
+	unknown := effective
+	unknown.Project.VisualCaptureUISelector = &config.VisualCaptureUISelector{AllRequiredRoles: []string{"unregistered-role"}}
+	if _, _, err = visualCaptureEffective(unknown, &model.Task{ID: "task", UI: true, Roles: []string{"unregistered-role"}}); err == nil {
+		t.Fatal("unregistered selector role was accepted")
+	}
+}
+
+func TestVisualUIAdapterToolIdentityInvalidatesClosureAndFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	prepare, server := filepath.Join(dir, "prepare-tool"), filepath.Join(dir, "server-tool")
+	if err := os.WriteFile(prepare, []byte("prepare-v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(server, []byte("server-v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	capture := &config.VisualCapture{Prepare: []string{prepare}, Server: []string{server}}
+	first, err := visualAdapterToolIdentity(dir, capture)
+	if err != nil || !strings.Contains(first, "prepare=") || !strings.Contains(first, "server=") {
+		t.Fatalf("first UI adapter identity = %q, error %v", first, err)
+	}
+	firstClosure := &visualClosureReceipt{Version: 0, Runtime: visualUIRuntimeIdentity("browser", first), Tree: "tree", Targets: []config.VisualCaptureTarget{{ID: "ui"}}}
+	if err = os.WriteFile(server, []byte("server-v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := visualAdapterToolIdentity(dir, capture)
+	secondClosure := &visualClosureReceipt{Version: 0, Runtime: visualUIRuntimeIdentity("browser", second), Tree: "tree", Targets: firstClosure.Targets}
+	if err != nil || first == second || sameVisualClosure(firstClosure, secondClosure, firstClosure.Targets) {
+		t.Fatalf("changed selected UI server reused closure: first=%q second=%q error=%v", first, second, err)
+	}
+	if err = os.WriteFile(prepare, []byte("prepare-v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	third, err := visualAdapterToolIdentity(dir, capture)
+	if err != nil || third == second {
+		t.Fatalf("changed selected UI prepare reused identity: second=%q third=%q error=%v", second, third, err)
+	}
+	capture.Prepare = []string{filepath.Join(dir, "missing-tool")}
+	if _, err = visualAdapterToolIdentity(dir, capture); err == nil {
+		t.Fatal("missing selected UI prepare tool was accepted")
+	}
+	capture.Prepare = nil
+	capture.Server = []string{dir}
+	if _, err = visualAdapterToolIdentity(dir, capture); err == nil {
+		t.Fatal("unreadable selected UI server tool was accepted")
+	}
+}
+
 func visualCheckoutFixture(t *testing.T) (*Controller, *model.Task, string, string, func(string, ...string) string) {
 	t.Helper()
 	state, source, control := t.TempDir(), t.TempDir(), filepath.Join(t.TempDir(), "control.git")
@@ -500,14 +599,38 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	adapter := []string{os.Args[0], "-test.run=^TestNativeVisualAdapter$"}
 	c := &Controller{P: &Project{Home: home, Dir: state, Git: gitx.Git{Dir: control}}}
 	targets := []config.VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 1280, Height: 720}, {ID: "detail", Path: "/detail", Width: 640, Height: 480}}
-	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: adapter, Timeout: 10, Targets: targets}}}
-	task := &model.Task{ID: "task-visual", HeadSHA: head}
+	canonicalHash := strings.Repeat("b", 64)
+	// The default profile is deliberately unusable and has a different target.
+	// A successful capture below therefore proves that durable UI plus the exact
+	// persisted matching role chose visual_capture_ui instead of the default.
+	effective := config.Effective{Hash: canonicalHash, Files: map[string]string{".aih/roles/visual.yaml": "name: visual-quality\nextends: designer\n"}, Project: config.Project{
+		VisualCapture:           &config.VisualCapture{Server: []string{"missing-default-adapter"}, Timeout: 10, Targets: []config.VisualCaptureTarget{{ID: "default-sentinel", Path: "/default", Width: 2, Height: 2}}},
+		VisualCaptureUI:         &config.VisualCapture{Server: adapter, Timeout: 10, Targets: targets},
+		VisualCaptureUISelector: &config.VisualCaptureUISelector{AllRequiredRoles: []string{"visual-quality"}},
+	}}
+	task := &model.Task{ID: "task-visual", HeadSHA: head, UI: true, Roles: []string{"visual-quality"}}
+	selected, workload, err := visualCaptureEffective(effective, task)
+	if err != nil || workload != "ui" || selected.Hash == canonicalHash || selected.Project.VisualCapture != effective.Project.VisualCaptureUI {
+		t.Fatalf("UI capture selection = %#v workload=%q error=%v", selected.Project.VisualCapture, workload, err)
+	}
 	if _, err := c.captureVisual(context.Background(), effective, &model.Task{ID: "../outside", HeadSHA: head}, worktree); err == nil {
 		t.Fatal("unsafe task ID escaped evidence root")
 	}
 	visual, err := c.captureVisual(context.Background(), effective, task, worktree)
 	if err != nil || visual.Head != head || len(visual.Artifacts) != 3 {
 		t.Fatalf("capture failed: %#v %v", visual, err)
+	}
+	visualDir := filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)))
+	if _, _, err := loadVisualSeal(visualDir, task.ID, task.HeadSHA, selected.Hash, targets); err != nil {
+		t.Fatalf("UI capture was not sealed with selected capture hash: %v", err)
+	}
+	if _, _, err := loadVisualSeal(visualDir, task.ID, task.HeadSHA, canonicalHash, targets); err == nil {
+		t.Fatal("UI capture seal accepted the canonical default config hash")
+	}
+	missingUI := effective
+	missingUI.Project.VisualCaptureUI = nil
+	if _, err := c.captureVisual(context.Background(), missingUI, task, worktree); err == nil {
+		t.Fatal("UI task reused valid default-profile cache after visual_capture_ui was removed")
 	}
 	manifest, err := os.ReadFile(filepath.Join(state, filepath.FromSlash(visual.Manifest)))
 	if err != nil || !strings.Contains(string(manifest), `"id":"detail"`) || !strings.Contains(string(manifest), `"screenshot":"detail.png"`) {

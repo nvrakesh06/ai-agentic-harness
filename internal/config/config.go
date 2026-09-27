@@ -20,22 +20,24 @@ import (
 )
 
 type Project struct {
-	ID             string            `yaml:"project_id" json:"project_id"`
-	Provider       string            `yaml:"provider" json:"provider"`
-	Base           string            `yaml:"base_branch" json:"base_branch"`
-	MaxWriters     int               `yaml:"max_parallel_writers" json:"max_parallel_writers"`
-	MaxReaders     int               `yaml:"max_parallel_readers" json:"max_parallel_readers"`
-	Resources      Resources         `yaml:"resources" json:"resources"`
-	Models         map[string]string `yaml:"models" json:"models"`
-	ProviderModels map[string]string `yaml:"provider_models" json:"provider_models"`
-	Checks         []Check           `yaml:"checks" json:"checks"`
-	VisualCapture  *VisualCapture    `yaml:"visual_capture,omitempty" json:"visual_capture,omitempty"`
-	ReviewReuse    ReviewReuse       `yaml:"review_reuse,omitempty" json:"review_reuse,omitempty"`
-	WorkerSeconds  int               `yaml:"worker_timeout_seconds" json:"worker_timeout_seconds"`
-	RoleTimeouts   *RoleTimeouts     `yaml:"role_timeouts_seconds,omitempty" json:"role_timeouts_seconds,omitempty"`
-	LeaseSeconds   int               `yaml:"lease_seconds" json:"lease_seconds"`
-	ReleaseRepo    string            `yaml:"release_repo" json:"release_repo"`
-	Scheduling     Scheduling        `yaml:"scheduling" json:"scheduling"`
+	ID                      string                   `yaml:"project_id" json:"project_id"`
+	Provider                string                   `yaml:"provider" json:"provider"`
+	Base                    string                   `yaml:"base_branch" json:"base_branch"`
+	MaxWriters              int                      `yaml:"max_parallel_writers" json:"max_parallel_writers"`
+	MaxReaders              int                      `yaml:"max_parallel_readers" json:"max_parallel_readers"`
+	Resources               Resources                `yaml:"resources" json:"resources"`
+	Models                  map[string]string        `yaml:"models" json:"models"`
+	ProviderModels          map[string]string        `yaml:"provider_models" json:"provider_models"`
+	Checks                  []Check                  `yaml:"checks" json:"checks"`
+	VisualCapture           *VisualCapture           `yaml:"visual_capture,omitempty" json:"visual_capture,omitempty"`
+	VisualCaptureUI         *VisualCapture           `yaml:"visual_capture_ui,omitempty" json:"visual_capture_ui,omitempty"`
+	VisualCaptureUISelector *VisualCaptureUISelector `yaml:"visual_capture_ui_selector,omitempty" json:"visual_capture_ui_selector,omitempty"`
+	ReviewReuse             ReviewReuse              `yaml:"review_reuse,omitempty" json:"review_reuse,omitempty"`
+	WorkerSeconds           int                      `yaml:"worker_timeout_seconds" json:"worker_timeout_seconds"`
+	RoleTimeouts            *RoleTimeouts            `yaml:"role_timeouts_seconds,omitempty" json:"role_timeouts_seconds,omitempty"`
+	LeaseSeconds            int                      `yaml:"lease_seconds" json:"lease_seconds"`
+	ReleaseRepo             string                   `yaml:"release_repo" json:"release_repo"`
+	Scheduling              Scheduling               `yaml:"scheduling" json:"scheduling"`
 }
 type Scheduling struct {
 	TargetWriters                int    `yaml:"target_active_writers" json:"target_active_writers"`
@@ -84,6 +86,14 @@ type VisualCapture struct {
 	// needed to render each target. Omitting it keeps the conservative exact-head
 	// cache behavior; it never guesses dependencies from an adapter command.
 	InputClosure *VisualInputClosure `yaml:"input_closure,omitempty" json:"input_closure,omitempty"`
+}
+
+// VisualCaptureUISelector selects the UI-specific capture profile only from
+// durable task metadata. Its role IDs are checked against the canonical role
+// registry when AIH selects a profile.
+type VisualCaptureUISelector struct {
+	AllRequiredRoles []string `yaml:"all_required_roles" json:"all_required_roles"`
+	NoneOfRoles      []string `yaml:"none_of_roles,omitempty" json:"none_of_roles,omitempty"`
 }
 
 type VisualInputClosure struct {
@@ -390,63 +400,17 @@ func (p Project) Validate() error {
 			}
 		}
 	}
-	if p.VisualCapture != nil {
-		if len(p.VisualCapture.Server) == 0 || strings.TrimSpace(p.VisualCapture.Server[0]) == "" {
-			return errors.New("visual_capture needs a server command argv")
-		}
-		if p.VisualCapture.Timeout < 1 || p.VisualCapture.Timeout > 300 {
-			return errors.New("visual_capture timeout_seconds must be between 1 and 300")
-		}
-		if len(p.VisualCapture.Prepare) == 0 && p.VisualCapture.PrepareTimeout != 0 {
-			return errors.New("visual_capture prepare_timeout_seconds requires a prepare command argv")
-		}
-		if len(p.VisualCapture.Prepare) > 0 {
-			if strings.TrimSpace(p.VisualCapture.Prepare[0]) == "" {
-				return errors.New("visual_capture prepare needs a command argv")
-			}
-			if p.VisualCapture.PrepareTimeout != 0 && (p.VisualCapture.PrepareTimeout < 1 || p.VisualCapture.PrepareTimeout > 300) {
-				return errors.New("visual_capture prepare_timeout_seconds must be between 1 and 300")
-			}
-		}
-		if len(p.VisualCapture.Targets) > maxVisualCaptureTargets {
-			return fmt.Errorf("visual_capture targets must contain at most %d entries", maxVisualCaptureTargets)
-		}
-		if closure := p.VisualCapture.InputClosure; closure != nil {
-			if closure.Version != 1 || strings.TrimSpace(closure.Runtime) == "" || len(closure.Runtime) > 160 {
-				return errors.New("visual_capture input_closure needs version 1 and a bounded runtime_identity")
-			}
-			targets := p.VisualCapture.CaptureTargets()
-			if len(closure.Targets) != len(targets) {
-				return errors.New("visual_capture input_closure must cover every capture target exactly once")
-			}
-			seenClosure := map[string]bool{}
-			for i, declared := range closure.Targets {
-				if declared.ID != targets[i].ID || seenClosure[declared.ID] {
-					return errors.New("visual_capture input_closure must cover every capture target exactly once")
-				}
-				seenClosure[declared.ID] = true
-			}
-		}
-		seen := map[string]bool{}
-		pixels := 0
-		for _, target := range p.VisualCapture.Targets {
-			filenameID := strings.ToLower(target.ID)
-			if !visualTargetID.MatchString(target.ID) || seen[filenameID] || windowsReservedVisualTargetID[filenameID] {
-				return errors.New("visual_capture target IDs must be unique case-insensitive safe filenames")
-			}
-			seen[filenameID] = true
-			u, err := url.Parse(target.Path)
-			if err != nil || target.Path == "" || !strings.HasPrefix(target.Path, "/") || strings.HasPrefix(target.Path, "//") || u.IsAbs() || u.Host != "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-				return errors.New("visual_capture target path must be a same-origin absolute path without host, query, or fragment")
-			}
-			if target.Width < 1 || target.Height < 1 || target.Width > 4096 || target.Height > 4096 || target.Width*target.Height > maxVisualTargetPixels {
-				return errors.New("visual_capture target viewport exceeds the allowed dimensions")
-			}
-			pixels += target.Width * target.Height
-			if pixels > maxVisualCapturePixels {
-				return errors.New("visual_capture target viewports exceed the aggregate pixel limit")
-			}
-		}
+	if err := validateVisualCapture(p.VisualCapture, "visual_capture"); err != nil {
+		return err
+	}
+	if err := validateVisualCapture(p.VisualCaptureUI, "visual_capture_ui"); err != nil {
+		return err
+	}
+	if (p.VisualCaptureUI == nil) != (p.VisualCaptureUISelector == nil) {
+		return errors.New("visual_capture_ui and visual_capture_ui_selector must be configured together")
+	}
+	if err := validateVisualCaptureUISelector(p.VisualCaptureUISelector); err != nil {
+		return err
 	}
 	for _, capability := range p.Models {
 		if capability != "normal" && capability != "strong" && capability != "strongest" {
@@ -456,6 +420,88 @@ func (p Project) Validate() error {
 	for capability := range p.ProviderModels {
 		if capability != "normal" && capability != "strong" && capability != "strongest" {
 			return errors.New("unknown provider model capability mapping")
+		}
+	}
+	return nil
+}
+
+func validateVisualCaptureUISelector(selector *VisualCaptureUISelector) error {
+	if selector == nil {
+		return nil
+	}
+	if len(selector.AllRequiredRoles) == 0 || len(selector.AllRequiredRoles) > 8 || len(selector.NoneOfRoles) > 8 {
+		return errors.New("visual_capture_ui_selector role lists must be bounded and require at least one role")
+	}
+	roleID := regexp.MustCompile(`^[a-z][a-z0-9-]{1,60}$`)
+	seen := map[string]bool{}
+	for _, group := range [][]string{selector.AllRequiredRoles, selector.NoneOfRoles} {
+		for _, role := range group {
+			if !roleID.MatchString(role) || seen[role] {
+				return errors.New("visual_capture_ui_selector roles must be unique canonical role IDs")
+			}
+			seen[role] = true
+		}
+	}
+	return nil
+}
+
+func validateVisualCapture(capture *VisualCapture, name string) error {
+	if capture == nil {
+		return nil
+	}
+	if len(capture.Server) == 0 || strings.TrimSpace(capture.Server[0]) == "" {
+		return errors.New(name + " needs a server command argv")
+	}
+	if capture.Timeout < 1 || capture.Timeout > 300 {
+		return errors.New(name + " timeout_seconds must be between 1 and 300")
+	}
+	if len(capture.Prepare) == 0 && capture.PrepareTimeout != 0 {
+		return errors.New(name + " prepare_timeout_seconds requires a prepare command argv")
+	}
+	if len(capture.Prepare) > 0 {
+		if strings.TrimSpace(capture.Prepare[0]) == "" {
+			return errors.New(name + " prepare needs a command argv")
+		}
+		if capture.PrepareTimeout != 0 && (capture.PrepareTimeout < 1 || capture.PrepareTimeout > 300) {
+			return errors.New(name + " prepare_timeout_seconds must be between 1 and 300")
+		}
+	}
+	if len(capture.Targets) > maxVisualCaptureTargets {
+		return fmt.Errorf("%s targets must contain at most %d entries", name, maxVisualCaptureTargets)
+	}
+	if closure := capture.InputClosure; closure != nil {
+		if closure.Version != 1 || strings.TrimSpace(closure.Runtime) == "" || len(closure.Runtime) > 160 {
+			return errors.New(name + " input_closure needs version 1 and a bounded runtime_identity")
+		}
+		targets := capture.CaptureTargets()
+		if len(closure.Targets) != len(targets) {
+			return errors.New(name + " input_closure must cover every capture target exactly once")
+		}
+		seenClosure := map[string]bool{}
+		for i, declared := range closure.Targets {
+			if declared.ID != targets[i].ID || seenClosure[declared.ID] {
+				return errors.New(name + " input_closure must cover every capture target exactly once")
+			}
+			seenClosure[declared.ID] = true
+		}
+	}
+	seen, pixels := map[string]bool{}, 0
+	for _, target := range capture.Targets {
+		filenameID := strings.ToLower(target.ID)
+		if !visualTargetID.MatchString(target.ID) || seen[filenameID] || windowsReservedVisualTargetID[filenameID] {
+			return errors.New(name + " target IDs must be unique case-insensitive safe filenames")
+		}
+		seen[filenameID] = true
+		u, err := url.Parse(target.Path)
+		if err != nil || target.Path == "" || !strings.HasPrefix(target.Path, "/") || strings.HasPrefix(target.Path, "//") || u.IsAbs() || u.Host != "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+			return errors.New(name + " target path must be a same-origin absolute path without host, query, or fragment")
+		}
+		if target.Width < 1 || target.Height < 1 || target.Width > 4096 || target.Height > 4096 || target.Width*target.Height > maxVisualTargetPixels {
+			return errors.New(name + " target viewport exceeds the allowed dimensions")
+		}
+		pixels += target.Width * target.Height
+		if pixels > maxVisualCapturePixels {
+			return errors.New(name + " target viewports exceed the aggregate pixel limit")
 		}
 	}
 	return nil
