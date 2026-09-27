@@ -62,6 +62,23 @@ func appendReviewFindingReceipts(task *model.Task, receipts []model.ReviewFindin
 	}
 }
 
+// retainedReviewFindingsForReceipts keeps receipt issuance aligned with the
+// exact full finding that appendUniqueFindings actually retained. Its older
+// identity-only deduplication may retain a near-duplicate with stale
+// resolution, relevance, or baseline metadata; that historic value must never
+// inherit a new review receipt.
+func retainedReviewFindingsForReceipts(retained []model.Finding, incoming []model.Finding) []model.Finding {
+	persisted := make([]model.Finding, 0, len(incoming))
+	for _, finding := range incoming {
+		if slices.ContainsFunc(retained, func(current model.Finding) bool {
+			return reviewFindingFingerprint(current) == reviewFindingFingerprint(finding)
+		}) {
+			persisted = append(persisted, finding)
+		}
+	}
+	return persisted
+}
+
 // hasAttributedConcreteReviewFinding accepts only a retained, source-located
 // high/critical defect from the same exact review input. A low/medium receipt
 // must never authorize the controller's synthetic retry summary.

@@ -98,3 +98,29 @@ func TestRepairFirstRecoveryRejectsMediumReceiptWithSyntheticHighSummary(t *test
 		t.Fatalf("medium receipt fabricated high repair-first proof: %#v", task)
 	}
 }
+
+func TestReviewReceiptDoesNotStampRetainedNearDuplicate(t *testing.T) {
+	task, _ := repairFirstFixture(t)
+	old := task.Findings[0]
+	old.Resolution = "historical resolution"
+	old.Relevance = model.FindingBaseline
+	old.BaselineSHA = strings.Repeat("d", 40)
+	old.BaselineEvidence = "historical baseline evidence"
+	incoming := old
+	incoming.Resolution = "repair the saved draft"
+	incoming.Relevance = model.FindingChanged
+	incoming.BaselineSHA = ""
+	incoming.BaselineEvidence = ""
+
+	retained := appendUniqueFindings([]model.Finding{old}, []model.Finding{incoming})
+	if len(retained) != 1 || retained[0] != old {
+		t.Fatalf("near duplicate did not retain the historical value: %#v", retained)
+	}
+	persisted := retainedReviewFindingsForReceipts(retained, []model.Finding{incoming})
+	if len(persisted) != 0 {
+		t.Fatalf("retained near duplicate was eligible for a new receipt: %#v", persisted)
+	}
+	if receipts := reviewFindingReceipts(task, task.Evidence, persisted, false); len(receipts) != 0 {
+		t.Fatalf("near duplicate minted a receipt: %#v", receipts)
+	}
+}

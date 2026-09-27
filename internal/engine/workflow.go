@@ -2312,7 +2312,13 @@ func (c *Controller) preserveReviewFindings(id string, evidence *model.Evidence,
 	return c.mutate(func(s *model.Snapshot) error {
 		task := s.Tasks[id]
 		task.Findings = appendUniqueFindings(task.Findings, findings)
-		appendReviewFindingReceipts(task, reviewFindingReceipts(task, evidence, findings, false))
+		// Findings deduplicate by their established identity. A new provider
+		// outcome may therefore lose to an older retained value that differs in
+		// relevance, baseline, or resolution. Mint a receipt only when that
+		// exact normalized outcome survived persistence; otherwise it could
+		// incorrectly attribute the older finding to this review input.
+		persisted := retainedReviewFindingsForReceipts(task.Findings, findings)
+		appendReviewFindingReceipts(task, reviewFindingReceipts(task, evidence, persisted, false))
 		return nil
 	})
 }

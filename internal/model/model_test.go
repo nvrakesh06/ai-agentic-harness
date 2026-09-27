@@ -471,6 +471,25 @@ func TestSchemaElevenMigrationDropsUnprovenRepairFirstReceipts(t *testing.T) {
 	}
 }
 
+func TestRepairFirstConsumptionRoundTripsWithSupervisorReceipt(t *testing.T) {
+	s := NewSnapshot("project123")
+	base, head := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	hash := strings.Repeat("c", 64)
+	s.Tasks["task"] = &Task{
+		ID: "task", State: SyncRequired, BaseSHA: base, HeadSHA: head,
+		ReviewFindingProvenance: []ReviewFindingProvenance{{Finding: hash, SourceTask: "task", Base: base, Head: head, Config: hash, Rules: hash, Role: "reviewer"}},
+		RepairFirst:             &RepairFirstRecovery{Base: base, Head: head, Config: hash, Rules: hash, Findings: []string{hash}},
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, changed, err := Decode(b)
+	if err != nil || changed || len(decoded.Tasks["task"].ReviewFindingProvenance) != 1 || decoded.Tasks["task"].RepairFirst == nil {
+		t.Fatalf("consumed repair-first receipt did not round-trip: %#v changed=%t err=%v", decoded.Tasks["task"], changed, err)
+	}
+}
+
 func TestDirectFixWaiverRoundTripsAndRejectsIncompleteIdentity(t *testing.T) {
 	s := NewSnapshot("project123")
 	base, head := fmt.Sprintf("%040x", 1), fmt.Sprintf("%040x", 2)
