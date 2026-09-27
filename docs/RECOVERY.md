@@ -49,7 +49,7 @@ checkpoint. Unpushed edits cannot be reconstructed. On the same machine, existin
 worktrees are retained rather than reset, so uncommitted work can be checkpointed
 after inspection. Interrupted review/test processes are disposable and rerun.
 
-Schema-12 repair-first recovery remains conservative. After normal fetch, merge,
+Schema-13 recovery remains conservative. Schema 13 adds a supervisor-owned dependency-cycle recovery receipt ledger; schema-12 snapshots migrate with that ledger empty, and legacy task decisions never authorize a replay. Schema-12 repair-first recovery remains conservative. After normal fetch, merge,
 checkpoint, ancestry, and immutable-scope checks preserve the task's exact reviewed
 input, AIH can schedule one ordinary FIX before rerunning an unchanged-head native
 gate only from supervisor-issued retained-finding receipts at that input. Historical
@@ -147,6 +147,55 @@ does not claim a historical boundary. AIH still
 classifies the new areas at the canonical base and applies the same ownership,
 dependency, and cycle checks. This authorizes a new immutable contract only;
 it does not restore or infer a historical checkpoint.
+
+## Explicit dependency-cycle recovery
+
+`aih task dependency-cycle-recover --file cycle-recovery.json --preview` is a
+one-edge repair for a durable dependency cycle that ordinary scheduling and
+replanning correctly refuse to mutate. It does not start providers, alter a
+supersession link, replace a task, clear evidence, or change source refs.
+
+The schema-1 request pins the current `aih-state` revision, canonical `main`,
+policy and rules hashes, plus the named owner state/base/head and the digest of
+its original dependency list. It names exactly one existing `owner_id` to
+`dependency_id` edge and an operator reason. Generate these values from the
+current remote snapshot; do not edit a request after preview:
+
+```json
+{
+  "schema": 1,
+  "command_id": "cycle-recovery-20260927",
+  "expected_state_ref": "<aih-state commit>",
+  "expected_main_sha": "<canonical main commit>",
+  "policy_hash": "<canonical policy hash>",
+  "rules_hash": "<current rules hash>",
+  "owner_id": "owner-task",
+  "dependency_id": "predecessor-task",
+  "owner_state": "READY",
+  "owner_base_sha": "<owner base>",
+  "owner_head_sha": "<owner head>",
+  "dependencies_hash": "<sha256 of the exact JSON dependency array>",
+  "reason": "Operator removes the one audited edge that closes the proven successor-aware cycle."
+}
+```
+
+Preview reads the live graph without taking a lease or publishing state. Apply
+requires the normal local supervisor lock and an idle remote lease, then repeats
+the exact remote state, main, policy, rules, graph, cycle-member activity,
+integration reservation, pending-merge, and ownership-serialization proofs
+immediately before its fenced `aih-state` publication. The owner must be one of
+the recoverable idle states `READY`, `FIX`, `SYNC_REQUIRED`, or `BLOCKED_HUMAN`;
+`DONE` and `SUPERSEDED` tasks may appear only as historical witness members.
+The witness follows both dependencies and `SUPERSEDED` replacement links. Missing
+targets, malformed links, active cycle members, retained `SyncBase`, a retained
+`MERGE_HEAD` or unresolved merge paths, a residual owner-reachable cycle, or an
+overlap made concurrent by the deletion are rejected. An accepted command stores
+a supervisor-owned typed Schema-13 snapshot receipt linked to `Applied`, including
+the request digest, owner/dependency, before/after dependency digests, and pinned
+state/main/policy/rules/checkpoint fields. Owner decision text is audit-only and
+never grants replay authority. The same command ID and identical request is
+idempotent even after later legitimate task advancement; an `Applied` entry
+without the typed receipt, an invalid receipt, or any changed payload is rejected.
 
 ## Network or permission failures
 
