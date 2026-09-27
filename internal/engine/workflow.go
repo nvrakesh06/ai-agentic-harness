@@ -1316,6 +1316,9 @@ func (c *Controller) checkpointAtBase(ctx context.Context, id, immutableBase str
 			task.SyncBase = ""
 		}
 		task.Evidence = nil
+		task.ReviewFindingProvenance = nil
+		task.ReviewFindingReceiptOverflow = false
+		task.RepairFirst = nil
 		if task.VisualRequired != nil {
 			task.VisualRequired.Head = sha
 		}
@@ -1392,7 +1395,14 @@ func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result 
 	resumed := false
 	err = c.save(ctx, func(s *model.Snapshot) error {
 		task := s.Tasks[id]
+		priorHead := task.HeadSHA
 		task.HeadSHA = sha
+		if sha != priorHead {
+			task.Evidence = nil
+			task.ReviewFindingProvenance = nil
+			task.ReviewFindingReceiptOverflow = false
+			task.RepairFirst = nil
+		}
 		if pendingMerge {
 			task.BaseSHA = immutableBase
 			task.SyncBase = ""
@@ -1980,7 +1990,15 @@ func (c *Controller) retry(id, kind, reason string) {
 				return nil
 			}
 		}
-		task.Findings = append(task.Findings, model.Finding{Severity: "high", Category: kind, Reason: reason, Role: kind})
+		summaryFinding := model.Finding{Severity: "high", Category: kind, Reason: reason, Role: kind, Relevance: model.FindingChanged}
+		task.Findings = append(task.Findings, summaryFinding)
+		// A blocking completed review is retained both as its concrete provider
+		// findings and as this controller-generated retry summary. Record the
+		// latter separately so a future recovery can ignore only this redundant
+		// marker; provider-supplied unlocated findings never receive that status.
+		if task.State == model.Review && task.Evidence != nil && task.Evidence.Reviews[kind] == reason && slices.Contains(task.Evidence.ReviewRoster, kind) && hasAttributedConcreteReviewFinding(task, task.Evidence, kind) {
+			appendReviewFindingReceipts(task, reviewFindingReceipts(task, task.Evidence, []model.Finding{summaryFinding}, true))
+		}
 		task.State = model.Fix
 		if preflightErr == nil {
 			reusePreflightForFix(task.Preflight, task, effective, preflightRoles)
@@ -2054,6 +2072,17 @@ func (c *Controller) syncTask(ctx context.Context, id string) (config.Effective,
 			task.VisualRequired.Head = head
 			task.VisualRequired.Config = effective.Hash
 			task.VisualRequired.Rules = roles.Hash()
+		}
+		// Synchronization, checkpointing, and immutable-scope validation above
+		// are deliberately unconditional. Only after they preserve the exact
+		// reviewed input may a supervisor-issued retained finding run one normal
+		// FIX before another unchanged-head native gate.
+		if head == t.HeadSHA && base == t.BaseSHA {
+			if recovery := repairFirstRecovery(task, effective); recovery != nil {
+				task.State = model.Fix
+				task.RepairFirst = recovery
+				return nil
+			}
 		}
 		task.State = model.Verifying
 		// A retry of the same exact task head and canonical base may retain only
@@ -2276,12 +2305,14 @@ func visualRequirementMatches(task *model.Task, effective config.Effective) bool
 	return requirement.Base == effective.BaseSHA && requirement.Head == task.HeadSHA && requirement.Config == effective.Hash && requirement.Rules == roles.Hash()
 }
 
-func (c *Controller) preserveReviewFindings(id string, findings []model.Finding) error {
+func (c *Controller) preserveReviewFindings(id string, evidence *model.Evidence, findings []model.Finding) error {
 	if len(findings) == 0 {
 		return nil
 	}
 	return c.mutate(func(s *model.Snapshot) error {
-		s.Tasks[id].Findings = appendUniqueFindings(s.Tasks[id].Findings, findings)
+		task := s.Tasks[id]
+		task.Findings = appendUniqueFindings(task.Findings, findings)
+		appendReviewFindingReceipts(task, reviewFindingReceipts(task, evidence, findings, false))
 		return nil
 	})
 }
@@ -2350,6 +2381,16 @@ func (c *Controller) verifyReview(id string) error {
 		return e
 	}
 	t = c.Snapshot().Tasks[id]
+	// syncTask may have selected the one bounded repair-first route only after
+	// ordinary synchronization and scope validation. Do not fall through into
+	// the unchanged-head native gate in this worker; the scheduler will admit
+	// the normal FIX writer and its changed checkpoint returns here afterward.
+	if t == nil {
+		return errors.New("task disappeared after synchronization")
+	}
+	if t.State == model.Fix {
+		return nil
+	}
 	dir := c.P.TaskPath(t)
 	diff, paths, e := c.P.Git.Diff(c.ctx, t.BaseSHA, t.HeadSHA)
 	if e != nil {
@@ -2441,6 +2482,11 @@ func (c *Controller) verifyReview(id string) error {
 		task.UI = t.UI
 		task.Security = t.Security
 		task.Findings = nil
+		task.ReviewFindingProvenance = nil
+		task.ReviewFindingReceiptOverflow = false
+		if task.RepairFirst != nil && (task.RepairFirst.Base != task.BaseSHA || task.RepairFirst.Head != task.HeadSHA) {
+			task.RepairFirst = nil
+		}
 		task.Verification = nil
 		task.Evidence = evidence
 		return nil
@@ -2466,7 +2512,7 @@ func (c *Controller) verifyReview(id string) error {
 		return reviewErr
 	}
 	assessment := assessReviews(activeRequired, outcomes, reviewFindingBlocksOrigin(t, paths, activeRequired))
-	if e = c.preserveReviewFindings(id, assessment.findings); e != nil {
+	if e = c.preserveReviewFindings(id, evidence, assessment.findings); e != nil {
 		return e
 	}
 	if reviewAuthenticationFailure(outcomes) {
@@ -2574,7 +2620,7 @@ func (c *Controller) verifyReview(id string) error {
 			return refreshErr
 		}
 		refreshAssessment := assessReviews(refreshRoles, refreshed, reviewFindingBlocksOrigin(t, paths, refreshRoles))
-		if e = c.preserveReviewFindings(id, refreshAssessment.findings); e != nil {
+		if e = c.preserveReviewFindings(id, evidence, refreshAssessment.findings); e != nil {
 			return e
 		}
 		if reviewAuthenticationFailure(refreshed) {
