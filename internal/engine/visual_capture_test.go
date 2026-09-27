@@ -558,14 +558,37 @@ func TestNativeVisualCapturePinsHeadAndStoresOutsideSource(t *testing.T) {
 	adapter := []string{os.Args[0], "-test.run=^TestNativeVisualAdapter$"}
 	c := &Controller{P: &Project{Home: home, Dir: state, Git: gitx.Git{Dir: control}}}
 	targets := []config.VisualCaptureTarget{{ID: "desktop", Path: "/", Width: 1280, Height: 720}, {ID: "detail", Path: "/detail", Width: 640, Height: 480}}
-	effective := config.Effective{Hash: strings.Repeat("b", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: adapter, Timeout: 10, Targets: targets}}}
-	task := &model.Task{ID: "task-visual", HeadSHA: head}
+	canonicalHash := strings.Repeat("b", 64)
+	// The default profile is deliberately unusable and has a different target.
+	// A successful capture below therefore proves that the durable UI flag chose
+	// visual_capture_ui instead of silently launching the default profile.
+	effective := config.Effective{Hash: canonicalHash, Project: config.Project{
+		VisualCapture:   &config.VisualCapture{Server: []string{"missing-default-adapter"}, Timeout: 10, Targets: []config.VisualCaptureTarget{{ID: "default-sentinel", Path: "/default", Width: 2, Height: 2}}},
+		VisualCaptureUI: &config.VisualCapture{Server: adapter, Timeout: 10, Targets: targets},
+	}}
+	task := &model.Task{ID: "task-visual", HeadSHA: head, UI: true}
+	selected, workload, err := visualCaptureEffective(effective, task)
+	if err != nil || workload != "ui" || selected.Hash == canonicalHash || selected.Project.VisualCapture != effective.Project.VisualCaptureUI {
+		t.Fatalf("UI capture selection = %#v workload=%q error=%v", selected.Project.VisualCapture, workload, err)
+	}
 	if _, err := c.captureVisual(context.Background(), effective, &model.Task{ID: "../outside", HeadSHA: head}, worktree); err == nil {
 		t.Fatal("unsafe task ID escaped evidence root")
 	}
 	visual, err := c.captureVisual(context.Background(), effective, task, worktree)
 	if err != nil || visual.Head != head || len(visual.Artifacts) != 3 {
 		t.Fatalf("capture failed: %#v %v", visual, err)
+	}
+	visualDir := filepath.Join(state, filepath.FromSlash(filepath.Dir(visual.Manifest)))
+	if _, _, err := loadVisualSeal(visualDir, task.ID, task.HeadSHA, selected.Hash, targets); err != nil {
+		t.Fatalf("UI capture was not sealed with selected capture hash: %v", err)
+	}
+	if _, _, err := loadVisualSeal(visualDir, task.ID, task.HeadSHA, canonicalHash, targets); err == nil {
+		t.Fatal("UI capture seal accepted the canonical default config hash")
+	}
+	missingUI := effective
+	missingUI.Project.VisualCaptureUI = nil
+	if _, err := c.captureVisual(context.Background(), missingUI, task, worktree); err == nil {
+		t.Fatal("UI task reused valid default-profile cache after visual_capture_ui was removed")
 	}
 	manifest, err := os.ReadFile(filepath.Join(state, filepath.FromSlash(visual.Manifest)))
 	if err != nil || !strings.Contains(string(manifest), `"id":"detail"`) || !strings.Contains(string(manifest), `"screenshot":"detail.png"`) {
