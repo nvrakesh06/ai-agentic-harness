@@ -159,6 +159,7 @@ func findingsFingerprint(findings []model.Finding) string {
 var directFixLocation = regexp.MustCompile(`^[A-Za-z0-9_./-]+\.(?:tsx|jsx|css|scss|html|vue|svelte):[1-9][0-9]*$`)
 var actionableSourceLocation = regexp.MustCompile(`^[A-Za-z0-9_./-]+\.[A-Za-z0-9_+-]+:[1-9][0-9]*$`)
 var renderedFrameEvidenceLocation = regexp.MustCompile(`^Rendered-frame evidence for head [a-f0-9]{40}$`)
+var pendingDocsVerificationLocation = regexp.MustCompile(`^docs/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.md:[1-9][0-9]*$`)
 
 func directFixSensitive(text string) bool {
 	text = strings.ToLower(text)
@@ -217,24 +218,76 @@ func (c *Controller) visualRequirementHead(task *model.Task) (string, error) {
 // latter are passed to the implementer; the former remains a final-review
 // requirement and can never count as visual approval.
 func preflightEvidenceSourceFindings(role roles.Role, result provider.Result) ([]model.Finding, bool) {
+	sources, _, ok := preflightEvidenceMixedFindings(role, result)
+	return sources, ok
+}
+
+// preflightEvidenceMixedFindings preserves one documentation-only pending
+// verification record while admitting one or two located source repairs. The
+// record is not an approval and remains in task findings for the eventual
+// exact-head review; only the source subset is implementer work.
+func preflightEvidenceMixedFindings(role roles.Role, result provider.Result) ([]model.Finding, []model.Finding, bool) {
 	// UI tasks currently inject the built-in designer into preflight even though
 	// that reusable role is also configured as a review-stage validator.
 	preflightSpecialist := role.Stage == "pre-implementation" || role.Name == "designer"
 	if !preflightSpecialist || result.Status != "in_progress" ||
 		preflightHumanDecision(result) || !supervisorEvidenceRequest(result) || !visualEvidenceRequest(result) || len(result.Findings) == 0 {
-		return nil, false
+		return nil, nil, false
 	}
 	sources := make([]model.Finding, 0, 2)
+	pending := make([]model.Finding, 0, 1)
 	for _, finding := range result.Findings {
 		if actionablePreflightSourceFinding(finding) {
 			sources = append(sources, finding)
 			continue
 		}
+		if pendingDocsVerificationFinding(finding) {
+			if !strings.Contains(strings.ToLower(result.Question), "supervisor") {
+				return nil, nil, false
+			}
+			pending = append(pending, finding)
+			continue
+		}
 		if !preflightVisualEvidenceOnlyFinding(finding) {
-			return nil, false
+			return nil, nil, false
 		}
 	}
-	return sources, len(sources) > 0 && len(sources) <= 2
+	return sources, pending, len(sources) > 0 && len(sources) <= 2 && len(pending) <= 1
+}
+
+// pendingDocsVerificationFinding recognizes only a location-recorded request
+// for missing exact-head verification. It deliberately rejects documentation
+// defects, claimed passes, sensitive scope, and broad prose so those findings
+// keep their ordinary fail-closed preflight behavior.
+func pendingDocsVerificationFinding(finding model.Finding) bool {
+	category := strings.ToLower(strings.TrimSpace(finding.Category))
+	location := strings.TrimSpace(finding.Location)
+	if (category != "verification" && category != "visual verification") ||
+		!pendingDocsVerificationLocation.MatchString(location) {
+		return false
+	}
+	path := strings.SplitN(location, ":", 2)[0]
+	for _, segment := range strings.Split(path, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	if strings.Contains(path, `\`) {
+		return false
+	}
+	reason := strings.ToLower(strings.TrimSpace(finding.Reason))
+	resolution := strings.ToLower(strings.TrimSpace(finding.Resolution))
+	text := reason + " " + resolution
+	if preflightEvidenceSensitive(text) || directFixSensitive(text) ||
+		containsAny(text, "passed", "pass", "verified", "verification completed", "evidence available") {
+		return false
+	}
+	exactHeadUnavailable := containsAny(reason, "exact-head", "exact head") &&
+		containsAny(reason, "unavailable", "cannot", "could not", "missing", "not available")
+	evidenceKind := containsAny(reason, "native validation", "native validate", "native check", "screenshot", "studio", "rendered", "visual evidence", "browser capture", "playwright")
+	resolutionRequestsEvidence := containsAny(resolution, "supply", "capture") &&
+		containsAny(resolution, "native", "screenshot", "studio", "rendered", "visual", "evidence", "browser", "playwright")
+	return exactHeadUnavailable && evidenceKind && resolutionRequestsEvidence
 }
 
 func actionablePreflightSourceFinding(finding model.Finding) bool {
@@ -637,8 +690,8 @@ func (c *Controller) preflight(id string) {
 				task.VisualRequired = &model.VisualRequirement{Role: "designer", Base: effective.BaseSHA, Head: visualHead, Config: effective.Hash, Rules: roles.Hash(), Reason: "UI designer preflight requested supervisor-owned exact-head rendered evidence; final visual review remains required"}
 			}
 			if evidenceFix {
-				findings, _ := preflightEvidenceSourceFindings(r, result)
-				findings = append([]model.Finding(nil), findings...)
+				sources, pending, _ := preflightEvidenceMixedFindings(r, result)
+				findings := append(append([]model.Finding(nil), sources...), pending...)
 				for index := range findings {
 					findings[index].Role = r.Name
 				}

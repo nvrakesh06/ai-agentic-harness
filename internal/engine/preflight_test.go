@@ -80,6 +80,57 @@ func TestPreflightVisualEvidenceFixRequiresConcreteSourceFinding(t *testing.T) {
 	}
 }
 
+func TestPreflightEvidenceFixRetainsOnlyPendingDocsVerificationAlongsideSourceRepairs(t *testing.T) {
+	designer := roles.Builtins()["designer"]
+	result := provider.Result{Status: "in_progress", Question: "Supervisor: provide exact-head native validation and Studio screenshots for final visual review.", Summary: "The designer cannot access native validation or Studio captures.", Findings: []model.Finding{
+		{Severity: "medium", Category: "accessibility", Location: "src/App.tsx:174", Reason: "The focus trap leaves the background interactive while the modal is open.", Resolution: "Use the existing inert modal helper and add the focused dialog test."},
+		{Severity: "medium", Category: "state handling", Location: "src/App.tsx:288", Reason: "The disabled conflict action still renders stale draft copy.", Resolution: "Replace the stale draft copy with the disabled conflict state and test it."},
+		{Severity: "high", Category: "visual verification", Location: "docs/implementation/status.md:80", Reason: "Exact-head native validation and Studio screenshot evidence are unavailable to this restricted reviewer.", Resolution: "Have the supervisor capture native validation output and Studio screenshots as exact-head visual evidence."},
+	}}
+	sources, pending, ok := preflightEvidenceMixedFindings(designer, result)
+	if !ok || len(sources) != 2 || sources[0].Location != "src/App.tsx:174" || sources[1].Location != "src/App.tsx:288" || len(pending) != 1 || pending[0] != result.Findings[2] {
+		t.Fatalf("mixed source and pending verification result was not partitioned precisely: sources=%#v pending=%#v ok=%t", sources, pending, ok)
+	}
+
+	negative := []struct {
+		name   string
+		mutate func(*model.Finding)
+	}{
+		{"source location", func(f *model.Finding) { f.Location = "src/App.tsx:80" }},
+		{"test location", func(f *model.Finding) { f.Location = "tests/App.test.tsx:80" }},
+		{"unsafe traversal", func(f *model.Finding) { f.Location = "docs/../implementation/status.md:80" }},
+		{"claimed pass", func(f *model.Finding) {
+			f.Reason = "Exact-head native validation passed, but screenshot evidence is unavailable."
+		}},
+		{"generic documentation update", func(f *model.Finding) { f.Resolution = "Update verification documentation." }},
+		{"security category", func(f *model.Finding) { f.Category = "security" }},
+		{"consequential API scope", func(f *model.Finding) {
+			f.Reason = "Exact-head native validation evidence is unavailable for the API contract."
+		}},
+		{"consequential auth scope", func(f *model.Finding) {
+			f.Reason = "Exact-head native validation evidence is unavailable for the authentication boundary."
+		}},
+		{"question omits supervisor", func(_ *model.Finding) {}},
+		{"third source repair", func(_ *model.Finding) {}},
+	}
+	for _, tc := range negative {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := result
+			candidate.Findings = append([]model.Finding(nil), result.Findings...)
+			if tc.name == "third source repair" {
+				candidate.Findings = append(candidate.Findings, model.Finding{Severity: "medium", Category: "layout", Location: "src/App.tsx:332", Reason: "The banner overlaps the compact toolbar.", Resolution: "Adjust the existing compact layout and test it."})
+			} else if tc.name == "question omits supervisor" {
+				candidate.Question = "Provide exact-head native validation and Studio screenshots for final visual review."
+			} else {
+				tc.mutate(&candidate.Findings[2])
+			}
+			if preflightEvidenceFix(designer, candidate) {
+				t.Fatalf("%s was admitted as a mixed evidence repair", tc.name)
+			}
+		})
+	}
+}
+
 func TestVisualRequirementMatchesOnlyItsExactHeadAndPolicy(t *testing.T) {
 	effective := config.Effective{BaseSHA: strings.Repeat("a", 40), Hash: strings.Repeat("b", 64)}
 	task := &model.Task{HeadSHA: strings.Repeat("c", 40), VisualRequired: &model.VisualRequirement{Role: "designer", Base: effective.BaseSHA, Head: strings.Repeat("c", 40), Config: effective.Hash, Rules: roles.Hash(), Reason: "final rendered evidence required"}}

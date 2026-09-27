@@ -52,9 +52,10 @@ func (p *checkpointContinuationProvider) Run(ctx context.Context, request provid
 }
 
 type evidenceLoopProvider struct {
-	designers atomic.Int32
-	writers   atomic.Int32
-	decision  bool
+	designers   atomic.Int32
+	writers     atomic.Int32
+	decision    bool
+	pendingDocs bool
 }
 
 func (p *evidenceLoopProvider) Name() string                   { return "codex" }
@@ -64,9 +65,9 @@ func (p *evidenceLoopProvider) Run(ctx context.Context, request provider.Request
 	case "designer":
 		p.designers.Add(1)
 		if p.decision {
-			return provider.Result{Schema: 1, Status: "in_progress", Question: "Provide an exact-head screenshot, then choose whether the product should permit clipping this caption.", Summary: "A product decision is required before changing the presentation.", Findings: preflightEvidenceLoopFindings()}, nil
+			return provider.Result{Schema: 1, Status: "in_progress", Question: "Provide an exact-head screenshot, then choose whether the product should permit clipping this caption.", Summary: "A product decision is required before changing the presentation.", Findings: preflightEvidenceLoopFindings(p.pendingDocs)}, nil
 		}
-		return provider.Result{Schema: 1, Status: "in_progress", Question: "Please provide an exact-head rendered frame or Playwright screenshot for this visual review.", Summary: "The restricted designer cannot launch Playwright, but found two source defects.", Findings: preflightEvidenceLoopFindings()}, nil
+		return provider.Result{Schema: 1, Status: "in_progress", Question: "Please provide an exact-head rendered frame or Playwright screenshot for this visual review.", Summary: "The restricted designer cannot launch Playwright, but found two source defects.", Findings: preflightEvidenceLoopFindings(p.pendingDocs)}, nil
 	case "implementer":
 		p.writers.Add(1)
 		<-ctx.Done()
@@ -76,12 +77,18 @@ func (p *evidenceLoopProvider) Run(ctx context.Context, request provider.Request
 	}
 }
 
-func preflightEvidenceLoopFindings() []model.Finding {
-	return []model.Finding{
+func preflightEvidenceLoopFindings(pendingDocs bool) []model.Finding {
+	findings := []model.Finding{
 		{Severity: "medium", Category: "layout validation", Location: "src/engine/layout.ts:462", Reason: "The measured label path does not reject a narrow overflow.", Resolution: "Add the existing narrow-width validation before rendering the label."},
 		{Severity: "medium", Category: "schema compatibility", Location: "src/project-model/schemas.ts:26", Reason: "The scene schema omits the compatible text-fit field used by the renderer.", Resolution: "Add the compatible optional field and validate it with the existing schema test."},
 		{Severity: "high", Category: "visual verification", Location: "Rendered-frame evidence for head dae939776385f468aaf0818940925f384927782e", Reason: "No exact-head rendered frames or browser capture were available.", Resolution: "Have the supervisor supply native captures of healthy, timeout, failure, and rebalance frames for final visual review."},
 	}
+	if pendingDocs {
+		findings[0] = model.Finding{Severity: "medium", Category: "accessibility", Location: "src/App.tsx:174", Reason: "The focus trap leaves the background interactive while the modal is open.", Resolution: "Use the existing inert modal helper and add the focused dialog test."}
+		findings[1] = model.Finding{Severity: "medium", Category: "state handling", Location: "src/App.tsx:288", Reason: "The disabled conflict action still renders stale draft copy.", Resolution: "Replace the stale draft copy with the disabled conflict state and test it."}
+		findings[2] = model.Finding{Severity: "high", Category: "visual verification", Location: "docs/implementation/status.md:80", Reason: "Exact-head native validation and Studio screenshot evidence are unavailable to this restricted reviewer.", Resolution: "Have the supervisor capture native validation output and Studio screenshots as exact-head visual evidence."}
+	}
+	return findings
 }
 
 func TestPreflightEvidenceLoopAdmitsOneFixWithoutRepeatingDesigner(t *testing.T) {
@@ -113,7 +120,7 @@ func TestPreflightEvidenceLoopAdmitsOneFixWithoutRepeatingDesigner(t *testing.T)
 	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: old, New: next}}); err != nil {
 		t.Fatal(err)
 	}
-	workers := &evidenceLoopProvider{}
+	workers := &evidenceLoopProvider{pendingDocs: true}
 	f.P.Provider = workers
 	c := engine.New(f.P)
 	done := make(chan error, 1)
@@ -131,7 +138,7 @@ func TestPreflightEvidenceLoopAdmitsOneFixWithoutRepeatingDesigner(t *testing.T)
 		}
 	}
 	current := c.Snapshot().Tasks[task.ID]
-	if workers.designers.Load() != 1 || current.Preflight == nil || current.Preflight.Config != effective.Hash || current.VisualRequired == nil || current.VisualRequired.Head != base || !containsDecision(current.Decisions, "Final visual review must still use rendered evidence") || len(current.Findings) != 2 || current.Findings[1].Category != "schema compatibility" {
+	if workers.designers.Load() != 1 || current.Preflight == nil || current.Preflight.Config != effective.Hash || current.VisualRequired == nil || current.VisualRequired.Head != base || current.VisualRequired.Reason == "" || !containsDecision(current.Decisions, "Final visual review must still use rendered evidence") || len(current.Findings) != 3 || current.Findings[0].Location != "src/App.tsx:174" || current.Findings[1].Location != "src/App.tsx:288" || current.Findings[2].Location != "docs/implementation/status.md:80" || current.Findings[2].Role != "designer" {
 		t.Fatalf("evidence-guided fix did not preserve exact-head guidance or bounded admission: designers=%d task=%#v", workers.designers.Load(), current)
 	}
 	cancel()
