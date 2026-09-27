@@ -5,6 +5,14 @@ still prove behavior; avoiding duplicate work must not become a way to skip it.
 This workflow belongs to AIH and applies across consuming repositories through
 their canonical check configuration, rather than adding product-specific runners.
 
+Built-in implementer and QA role instructions carry this policy into consumer
+tasks, including custom roles that inherit QA. Implementers distinguish focused
+feedback from complete native acceptance; QA independently evaluates coverage and
+acceptance using exact-head results and adds probes for concrete gaps. This does
+not override canonical repository instructions or make a supplied pass substitute
+for missing proof. Role instruction changes invalidate old rules-bound evidence
+through the existing rules hash.
+
 ## Implementation feedback
 
 Read the changed contract and its existing tests. Run the relevant package or named
