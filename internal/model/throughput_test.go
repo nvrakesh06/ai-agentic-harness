@@ -91,7 +91,7 @@ func TestThroughputMigrationLeavesHistoricalTimingUnavailable(t *testing.T) {
 	s.Runs = []Run{{Task: "task", Role: "qa", Outcome: "completed", DurationMS: 42}}
 	b, _ := json.Marshal(s)
 	migrated, changed, err := Decode(b)
-	if err != nil || !changed || migrated.Schema != 11 || migrated.Tasks["task"].Timing != nil || migrated.Runs[0].Context != nil {
+	if err != nil || !changed || migrated.Schema != StateSchema || migrated.Tasks["task"].Timing != nil || migrated.Runs[0].Context != nil {
 		t.Fatalf("historical metrics inferred: %#v %v", migrated, err)
 	}
 	report := Throughput(migrated, time.Now())

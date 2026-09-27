@@ -49,6 +49,16 @@ checkpoint. Unpushed edits cannot be reconstructed. On the same machine, existin
 worktrees are retained rather than reset, so uncommitted work can be checkpointed
 after inspection. Interrupted review/test processes are disposable and rerun.
 
+Schema-12 repair-first recovery remains conservative. After normal fetch, merge,
+checkpoint, ancestry, and immutable-scope checks preserve the task's exact reviewed
+input, AIH can schedule one ordinary FIX before rerunning an unchanged-head native
+gate only from supervisor-issued retained-finding receipts at that input. Historical
+findings, review summaries, provider run contexts, local caches, and answer text
+are not receipts. Missing, stale, baseline, unknown, unlocated, outside-scope, or
+overflowed receipts continue through ordinary verification. A source checkpoint
+after the FIX requires the complete native and final-review sequence; the receipt
+does not approve or bypass any gate.
+
 For a UI task with native visual evidence, recovery uses `visual_capture_ui` only
 when durable `UI` and the exact persisted role list match its configured selector.
 A matching task cannot substitute `visual_capture` when the UI profile is absent;
