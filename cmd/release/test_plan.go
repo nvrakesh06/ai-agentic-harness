@@ -222,8 +222,10 @@ func runCompleteReleaseTests(ctx context.Context) error {
 		group := plan.groups[index]
 		fmt.Printf("release test group %d/%d\n", index+1, len(plan.groups))
 		unit, cancelUnit := context.WithTimeout(ctx, releaseUnitWatchdog)
+		defer cancelUnit()
 		current, identityErr := releaseReceiptIdentityForFn(unit, plan.groups)
 		if identityErr != nil || current != plan.identity {
+			cancelUnit()
 			if identityErr != nil {
 				if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {
 					return yielded
@@ -261,6 +263,7 @@ func runCompleteReleaseTests(ctx context.Context) error {
 		// before a cooperative handoff can expose the slot to product work.
 		current, identityErr = releaseReceiptIdentityForFn(unit, plan.groups)
 		if identityErr != nil || current != plan.identity {
+			cancelUnit()
 			if identityErr != nil {
 				if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {
 					return yielded

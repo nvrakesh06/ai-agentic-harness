@@ -155,6 +155,80 @@ func TestReleaseInvocationCursorRejectsChangedIdentityBeforePendingGroup(t *test
 	}
 }
 
+func TestReleaseInitialIdentityExitCancelsUnit(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		ctx       func() (context.Context, context.CancelFunc)
+		identity  func(releaseReceiptIdentity) (releaseReceiptIdentity, error)
+		wantYield bool
+	}{
+		{"identity error", func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) }, func(releaseReceiptIdentity) (releaseReceiptIdentity, error) {
+			return releaseReceiptIdentity{}, errors.New("identity probe failed")
+		}, false},
+		{"identity mismatch", func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) }, func(identity releaseReceiptIdentity) (releaseReceiptIdentity, error) {
+			identity.Head = "changed-head"
+			return identity, nil
+		}, false},
+		{"yielded identity cancellation", func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cancel(errReleaseYielded)
+			return ctx, func() {}
+		}, func(releaseReceiptIdentity) (releaseReceiptIdentity, error) {
+			return releaseReceiptIdentity{}, context.Canceled
+		}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			originalDiscover := discoverReleaseTestPlanFn
+			originalIdentity := releaseReceiptIdentityForFn
+			originalGroup := runReleaseTestGroupCommandFn
+			originalDemand := releasePriorityDemandFn
+			originalDir, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.Chdir(t.TempDir()); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				discoverReleaseTestPlanFn = originalDiscover
+				releaseReceiptIdentityForFn = originalIdentity
+				runReleaseTestGroupCommandFn = originalGroup
+				releasePriorityDemandFn = originalDemand
+				_ = os.Chdir(originalDir)
+			}()
+
+			identity, _ := receiptFixture()
+			groups := []releaseTestGroup{{Packages: []string{"example.com/pending"}, Tests: []string{"TestPending"}}}
+			discoverReleaseTestPlanFn = func(context.Context) (releaseTestPlan, error) {
+				return releaseTestPlan{groups: groups, identity: identity, packages: 1, namedTests: 1}, nil
+			}
+			var unit context.Context
+			releaseReceiptIdentityForFn = func(ctx context.Context, _ []releaseTestGroup) (releaseReceiptIdentity, error) {
+				unit = ctx
+				return test.identity(identity)
+			}
+			runReleaseTestGroupCommandFn = func(context.Context, string, []string, []string, []string) error {
+				t.Fatal("identity exit ran a test group")
+				return nil
+			}
+			releasePriorityDemandFn = func(string, config.Machine) (bool, error) { return false, nil }
+			ctx, cancel := test.ctx()
+			defer cancel()
+			err = runCompleteReleaseTests(withReleaseBoundary(ctx, "unused", config.Machine{MaxHeavyChecks: 1}, newReleaseInvocationProgress()))
+			if test.wantYield {
+				if !errors.Is(err, errReleaseYielded) {
+					t.Fatalf("yielded identity exit = %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "identity") {
+				t.Fatalf("identity exit = %v", err)
+			}
+			if unit == nil || unit.Err() == nil {
+				t.Fatal("initial identity exit left its watchdog unit live")
+			}
+		})
+	}
+}
+
 func TestReleaseInvocationCursorDoesNotAdvanceInterruptedOrFailedGroup(t *testing.T) {
 	originalDiscover := discoverReleaseTestPlanFn
 	originalIdentity := releaseReceiptIdentityForFn
