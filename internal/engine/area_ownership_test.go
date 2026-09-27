@@ -40,9 +40,11 @@ func TestExactCaseAppFindingRoutesToItsImmutableOwner(t *testing.T) {
 
 func TestFindingScopeRequiresExactCaseAndEveryRecognizedPath(t *testing.T) {
 	for name, location := range map[string]string{
-		"lowercase distinct path":     "src/studio/app.tsx:450",
-		"mixed contained and outside": "src/studio/App.tsx:450, src/studio/Other.tsx:492",
-		"no recognizable source":      "current-head visual evidence",
+		"lowercase distinct path":         "src/studio/app.tsx:450",
+		"punctuation distinct path":       "src/studio/App!.tsx:450",
+		"mixed contained and outside":     "src/studio/App.tsx:450, src/studio/Other.tsx:492",
+		"mixed contained and punctuation": "src/studio/App.tsx:450, src/studio/App!.tsx:492",
+		"no recognizable source":          "current-head visual evidence",
 	} {
 		t.Run(name, func(t *testing.T) {
 			origin := ownedTask("renderer", model.Review, "src/remotion", model.AreaDirectory)

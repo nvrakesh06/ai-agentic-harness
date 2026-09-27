@@ -299,7 +299,7 @@ func followupSourceFile(location string) string {
 	// Follow-up grouping historically case-folds and sorts source paths. Keep
 	// that durable key behavior separate from immutable task ownership, which
 	// must validate the reviewer's exact repository spelling.
-	sources := followupSourcePaths(strings.ToLower(location))
+	sources := followupSourcePathsForGrouping(strings.ToLower(location))
 	if len(sources) == 0 {
 		return ""
 	}
@@ -310,6 +310,16 @@ func followupSourceFile(location string) string {
 // case. Ownership validates this set against case-sensitive immutable Git
 // areas, so one contained location cannot hide another unowned location.
 func followupSourcePaths(location string) []string {
+	return parsedFollowupSourcePaths(location, false)
+}
+
+// followupSourcePathsForGrouping retains the historical sanitizer used only
+// for durable public follow-up keys. It must never supply paths for ownership.
+func followupSourcePathsForGrouping(location string) []string {
+	return parsedFollowupSourcePaths(location, true)
+}
+
+func parsedFollowupSourcePaths(location string, legacySanitize bool) []string {
 	location = strings.TrimSpace(location)
 	if location == "" {
 		return nil
@@ -337,12 +347,20 @@ func followupSourcePaths(location string) []string {
 		if strings.ContainsAny(candidate, " \t") || (!strings.Contains(candidate, ".") && !strings.HasPrefix(lower, "src/") && !strings.HasPrefix(lower, "internal/") && !strings.HasPrefix(lower, "pkg/") && !strings.HasPrefix(lower, "lib/") && !strings.HasPrefix(lower, "app/") && !strings.HasPrefix(lower, "tests/") && !strings.HasPrefix(lower, "docs/") && !strings.HasPrefix(lower, "projects/")) {
 			continue
 		}
-		candidate = strings.Map(func(r rune) rune {
+		sanitized := strings.Map(func(r rune) rune {
 			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '/' || r == '.' || r == '_' || r == '-' {
 				return r
 			}
 			return -1
 		}, candidate)
+		if legacySanitize {
+			candidate = sanitized
+		} else if sanitized != candidate {
+			// Do not turn an unsupported filename character into a different
+			// owned path. Reject the whole location set so a contained neighbor
+			// cannot hide the unsupported path.
+			return nil
+		}
 		if candidate != "" {
 			sources = append(sources, candidate)
 		}
