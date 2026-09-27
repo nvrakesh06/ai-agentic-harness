@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -43,10 +45,11 @@ type ReplanExpected struct {
 	StateRef string `json:"state_ref"`
 }
 type ReplanOriginal struct {
-	TaskID          string      `json:"task_id"`
-	State           model.State `json:"state"`
-	HeadSHA         string      `json:"head_sha"`
-	ExpectedBaseSHA string      `json:"expected_base_sha,omitempty"`
+	TaskID                    string      `json:"task_id"`
+	State                     model.State `json:"state"`
+	HeadSHA                   string      `json:"head_sha"`
+	ExpectedBaseSHA           string      `json:"expected_base_sha,omitempty"`
+	ReauthorizeUnstartedAreas []string    `json:"reauthorize_unstarted_areas,omitempty"`
 }
 type ReplanSource struct {
 	TaskID  string `json:"task_id"`
@@ -101,6 +104,12 @@ func validateReplanRequest(r ReplanRequest) error {
 		if !replanID.MatchString(old.TaskID) || (old.HeadSHA != "" && !replanSHA.MatchString(old.HeadSHA)) || (old.ExpectedBaseSHA != "" && (!replanSHA.MatchString(old.ExpectedBaseSHA) || old.HeadSHA != "")) {
 			return errors.New("invalid or duplicate original task")
 		}
+		if len(old.ReauthorizeUnstartedAreas) > 0 && (!r.Replacement.ReplaceContract || old.HeadSHA != "" || old.ExpectedBaseSHA == "" || len(old.ReauthorizeUnstartedAreas) > 32 || !sameReplanAreas(old.ReauthorizeUnstartedAreas, r.Replacement.Areas)) {
+			return errors.New("invalid unstarted area reauthorization")
+		}
+		if len(uniqueStrings(old.ReauthorizeUnstartedAreas)) != len(old.ReauthorizeUnstartedAreas) {
+			return errors.New("invalid unstarted area reauthorization")
+		}
 		if _, duplicate := seen[old.TaskID]; duplicate {
 			return errors.New("invalid or duplicate original task")
 		}
@@ -125,6 +134,25 @@ func validateReplanRequest(r ReplanRequest) error {
 		return errors.New("invalid candidate head")
 	}
 	return nil
+}
+
+func sameReplanAreas(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, area := range left {
+		if area == "" || strings.TrimSpace(area) != area || seen[area] {
+			return false
+		}
+		seen[area] = true
+	}
+	for _, area := range right {
+		if !seen[area] {
+			return false
+		}
+	}
+	return true
 }
 
 func replanActive(s *model.Snapshot, t *model.Task) bool {
@@ -225,6 +253,42 @@ func replanBaseOnlyAncestry(ctx context.Context, g gitx.Git, s *model.Snapshot, 
 	return nil
 }
 
+// replanReauthorizedDrops is the only path that can omit an immutable legacy
+// area. The operator repeats the literal successor destinations per original;
+// each omitted historical entry must then fail the same literal admission check
+// used for new tasks at the exact canonical base.
+func replanReauthorizedDrops(ctx context.Context, g gitx.Git, base string, s *model.Snapshot, request ReplanRequest) (map[string]map[string]bool, error) {
+	drops := map[string]map[string]bool{}
+	for _, original := range request.Originals {
+		if len(original.ReauthorizeUnstartedAreas) == 0 {
+			continue
+		}
+		t := s.Tasks[original.TaskID]
+		if !replanBaseOnly(s, t, original.ExpectedBaseSHA) {
+			return nil, fmt.Errorf("original task %s is not a base-only reauthorization candidate", original.TaskID)
+		}
+		if err := g.ValidateNewPlanAreasAtRef(ctx, base, original.ReauthorizeUnstartedAreas); err != nil {
+			return nil, fmt.Errorf("reauthorized destinations for %s are not strict literal areas: %w", original.TaskID, err)
+		}
+		areas, ok := model.ImmutableAreas(t)
+		if !ok {
+			return nil, fmt.Errorf("original task %s has no immutable areas", original.TaskID)
+		}
+		for _, area := range areas {
+			if err := g.ValidateNewPlanAreasAtRef(ctx, base, []string{area}); err != nil {
+				if drops[t.ID] == nil {
+					drops[t.ID] = map[string]bool{}
+				}
+				drops[t.ID][area] = true
+			}
+		}
+		if len(drops[t.ID]) == 0 {
+			return nil, fmt.Errorf("original task %s has no malformed literal area to reauthorize", original.TaskID)
+		}
+	}
+	return drops, nil
+}
+
 func replanDigest(request ReplanRequest) string {
 	encoded, _ := json.Marshal(request)
 	return fmt.Sprintf("%x", sha256.Sum256(encoded))
@@ -249,7 +313,7 @@ func replanPolicyRequired(s *model.Snapshot, request ReplanRequest) (bool, error
 	return !accepted, err
 }
 
-func mergeReplanContract(r ReplanRequest, originals []*model.Task) (model.Task, error) {
+func mergeReplanContract(r ReplanRequest, originals []*model.Task, drops map[string]map[string]bool) (model.Task, error) {
 	originalSet := make(map[string]bool, len(originals))
 	for _, old := range originals {
 		if old != nil {
@@ -270,7 +334,7 @@ func mergeReplanContract(r ReplanRequest, originals []*model.Task) (model.Task, 
 		// cannot be silently narrowed by the replacement contract. An unstarted
 		// legacy placeholder with no classified assignment has no trustworthy
 		// source boundary; its explicit replacement contract supplies one instead.
-		if areas, ok := replanTransferredAreas(r, old); ok {
+		if areas, ok := replanTransferredAreas(r, old, drops[old.ID]); ok {
 			next.Areas = unionStrings(next.Areas, areas)
 		}
 		if !r.Replacement.ReplaceContract && old.Objective != next.Objective {
@@ -292,28 +356,23 @@ func mergeReplanContract(r ReplanRequest, originals []*model.Task) (model.Task, 
 	return next, nil
 }
 
-func replanTransferredAreas(request ReplanRequest, task *model.Task) ([]string, bool) {
+func replanTransferredAreas(request ReplanRequest, task *model.Task, drops map[string]bool) ([]string, bool) {
 	areas, ok := model.ImmutableAreas(task)
 	if !ok {
 		return nil, false
 	}
 	if len(task.AssignedAreas) != 0 {
-		kinds := model.ImmutableAreaKinds(task)
 		transferred := make([]string, 0, len(areas))
 		for _, area := range areas {
-			// A started task's historical assignment remains an authorization
-			// boundary even if a legacy runtime could not classify its kind.
-			if kinds[area] == model.AreaUnknown && replanRequestMarksUnstarted(request, task.ID) {
+			// A historical assignment remains an authorization boundary unless an
+			// explicitly authorized, never-started original proved this exact entry
+			// is not a literal admissible destination at canonical main.
+			if drops[area] {
 				continue
 			}
 			transferred = append(transferred, area)
 		}
 		return transferred, len(transferred) != 0
-	}
-	// The only assignment-free fallback is an explicitly unstarted original.
-	// Its mutable legacy Areas prose must not be promoted into the successor.
-	if replanRequestMarksUnstarted(request, task.ID) {
-		return nil, false
 	}
 	return areas, true
 }
@@ -408,7 +467,11 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 	if objective == "" || s.Tasks[request.Replacement.ID] != nil {
 		return errors.New("replacement task already exists or originals lack an objective")
 	}
-	next, err := mergeReplanContract(request, originals)
+	drops, err := replanReauthorizedDrops(ctx, c.P.Git, effective.BaseSHA, s, request)
+	if err != nil {
+		return err
+	}
+	next, err := mergeReplanContract(request, originals, drops)
 	if err != nil {
 		return err
 	}
@@ -504,6 +567,12 @@ func (c *Controller) applyReplan(ctx context.Context, request ReplanRequest) err
 	// worktree that appeared while the successor candidate was being built.
 	if err := replanUnstartedRefs(ctx, c.P, s, request); err != nil {
 		return err
+	}
+	if currentDrops, dropErr := replanReauthorizedDrops(ctx, c.P.Git, effective.BaseSHA, s, request); dropErr != nil || !reflect.DeepEqual(drops, currentDrops) {
+		if dropErr != nil {
+			return dropErr
+		}
+		return errors.New("reauthorized literal area proof changed during replan validation")
 	}
 	if err := c.save(ctx, func(current *model.Snapshot) error {
 		if applied, err := replanReceipt(current, request); err != nil {
@@ -642,6 +711,9 @@ func replanUnstartedRefs(ctx context.Context, p *Project, s *model.Snapshot, req
 			}
 		}
 		if !replanBaseOnly(s, t, base) {
+			if len(expected.ReauthorizeUnstartedAreas) != 0 {
+				return fmt.Errorf("reauthorization original task %s is not base-only", expected.TaskID)
+			}
 			continue
 		}
 		if t.Branch == "" {
@@ -651,10 +723,29 @@ func replanUnstartedRefs(ctx context.Context, p *Project, s *model.Snapshot, req
 		if err != nil || strings.TrimSpace(local) != "" {
 			return fmt.Errorf("base-only original task %s local source ref exists or cannot be checked", expected.TaskID)
 		}
-		if _, err = os.Stat(p.TaskPath(t)); err == nil {
+		if _, err = os.Lstat(p.TaskPath(t)); err == nil {
 			return fmt.Errorf("base-only original task %s has a retained worktree", expected.TaskID)
 		} else if !os.IsNotExist(err) {
 			return fmt.Errorf("inspect base-only original task %s worktree: %w", expected.TaskID, err)
+		}
+		if len(expected.ReauthorizeUnstartedAreas) == 0 {
+			continue
+		}
+		worktrees, err := p.Git.Run(ctx, "", "worktree", "list", "--porcelain")
+		if err != nil {
+			return fmt.Errorf("inspect reauthorization worktrees for %s: %w", expected.TaskID, err)
+		}
+		taskPath, err := filepath.Abs(p.TaskPath(t))
+		if err != nil {
+			return fmt.Errorf("resolve reauthorization worktree for %s: %w", expected.TaskID, err)
+		}
+		for _, line := range strings.Split(worktrees, "\n") {
+			if strings.HasPrefix(line, "worktree ") {
+				registered, pathErr := filepath.Abs(strings.TrimPrefix(line, "worktree "))
+				if pathErr != nil || filepath.Clean(registered) == filepath.Clean(taskPath) {
+					return fmt.Errorf("reauthorization original task %s has a registered worktree", expected.TaskID)
+				}
+			}
 		}
 	}
 	return nil

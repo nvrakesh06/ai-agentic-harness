@@ -48,6 +48,14 @@ checkpoint. Unpushed edits cannot be reconstructed. On the same machine, existin
 worktrees are retained rather than reset, so uncommitted work can be checkpointed
 after inspection. Interrupted review/test processes are disposable and rerun.
 
+An operator replan may reauthorize malformed legacy assigned areas only through
+`reauthorize_unstarted_areas` on a base-only original. The request must replace
+the contract, repeat the exact literal successor destinations, bind the saved
+base, and prove the original has no lifecycle history, local or remote branch,
+retained path, or registered worktree. Started assignments and every valid legacy
+area remain inherited. AIH checks the literal destinations and each proposed drop
+at canonical main again immediately before its fenced replacement publication.
+
 An implementation worker approaching its deadline receives one bounded checkpoint
 pass before hard termination. If that pass cannot return structured output, AIH
 creates a sanitized local session `handoff.json`, then atomically publishes safe
