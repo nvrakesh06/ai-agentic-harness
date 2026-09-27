@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -107,6 +108,94 @@ func TestReleaseWorkspaceAndModfileAuthorityAreRejected(t *testing.T) {
 	if err := releaseGoFlagsAllowed("-modfile=from-goenv.mod"); err == nil {
 		t.Fatal("effective GOENV flags were accepted when process GOFLAGS was empty")
 	}
+}
+
+func TestReleaseReceiptIdentityCombinesStructuredGoEnvironmentProbe(t *testing.T) {
+	groups := []releaseTestGroup{{Packages: []string{"example.com/engine"}, Tests: []string{"TestReceipt"}}}
+	t.Setenv("GOFLAGS", "-from-process")
+	goEnv := releaseGoEnvJSON(t, "-from-goenv", "off")
+	identity, calls, err := releaseReceiptIdentityForProbeFixture(groups, goEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 6 {
+		t.Fatalf("identity probe launches = %d, want 6: %#v", len(calls), calls)
+	}
+	if got := strings.Join(calls[4], " "); got != "go env -json GOVERSION GOOS GOARCH CGO_ENABLED GOFLAGS GOTOOLCHAIN GOWORK" {
+		t.Fatalf("combined go env query = %q", got)
+	}
+	t.Setenv("GOFLAGS", "-different-process-value")
+	fromProcessChange, _, err := releaseReceiptIdentityForProbeFixture(groups, goEnv)
+	if err != nil || fromProcessChange != identity {
+		t.Fatalf("process GOFLAGS overrode effective go env: identity=%#v error=%v", fromProcessChange, err)
+	}
+	changedGoEnv, _, err := releaseReceiptIdentityForProbeFixture(groups, releaseGoEnvJSON(t, "-changed-in-goenv", "off"))
+	if err != nil || changedGoEnv.Environment == identity.Environment || changedGoEnv.Toolchain == identity.Toolchain {
+		t.Fatalf("effective go env change did not alter environment and toolchain identity: identity=%#v error=%v", changedGoEnv, err)
+	}
+	if _, _, err = releaseReceiptIdentityForProbeFixture(groups, releaseGoEnvJSON(t, "-modfile=outside.mod", "off")); err == nil {
+		t.Fatal("GOENV -modfile authority was accepted")
+	}
+	if _, _, err = releaseReceiptIdentityForProbeFixture(groups, releaseGoEnvJSON(t, "", `C:\outside\go.work`)); err == nil {
+		t.Fatal("active GOWORK authority was accepted")
+	}
+}
+
+func TestReleaseGoEnvironmentJSONIsStrict(t *testing.T) {
+	if _, err := releaseGoEnvironmentFromJSON("not-json"); err == nil {
+		t.Fatal("invalid go env JSON was accepted")
+	}
+	missing := map[string]any{"GOVERSION": "go1.24"}
+	data, err := json.Marshal(missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = releaseGoEnvironmentFromJSON(string(data)); err == nil {
+		t.Fatal("missing go env fields were accepted")
+	}
+	invalid := map[string]any{"GOVERSION": "go1.24", "GOOS": "windows", "GOARCH": "amd64", "CGO_ENABLED": "1", "GOFLAGS": []string{"-race"}, "GOTOOLCHAIN": "auto", "GOWORK": "off"}
+	data, err = json.Marshal(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = releaseGoEnvironmentFromJSON(string(data)); err == nil {
+		t.Fatal("non-string go env field was accepted")
+	}
+}
+
+func releaseGoEnvJSON(t *testing.T, flags, work string) string {
+	t.Helper()
+	data, err := json.Marshal(map[string]string{"GOVERSION": "go1.24.0", "GOOS": "windows", "GOARCH": "amd64", "CGO_ENABLED": "1", "GOFLAGS": flags, "GOTOOLCHAIN": "auto", "GOWORK": work})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func releaseReceiptIdentityForProbeFixture(groups []releaseTestGroup, goEnv string) (releaseReceiptIdentity, [][]string, error) {
+	var calls [][]string
+	runner := func(_ context.Context, _ string, _ []string, _ string, name string, args ...string) (string, error) {
+		call := append([]string{name}, args...)
+		calls = append(calls, call)
+		switch strings.Join(call, " ") {
+		case "git status --porcelain":
+			return "", nil
+		case "git rev-parse HEAD":
+			return "head", nil
+		case "git rev-parse HEAD^{tree}":
+			return "tree", nil
+		case "go version":
+			return "go version go1.24.0 windows/amd64", nil
+		case "go env -json GOVERSION GOOS GOARCH CGO_ENABLED GOFLAGS GOTOOLCHAIN GOWORK":
+			return goEnv, nil
+		case "git --version":
+			return "git version 2.0", nil
+		default:
+			return "", fmt.Errorf("unexpected identity probe %q", strings.Join(call, " "))
+		}
+	}
+	identity, err := releaseReceiptIdentityWithRun(context.Background(), groups, runner)
+	return identity, calls, err
 }
 
 func TestReleaseYieldCancellationPreservesOnlyYieldedCancellation(t *testing.T) {
