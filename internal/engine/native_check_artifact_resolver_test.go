@@ -14,6 +14,7 @@ import (
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 )
 
 func TestResolveNativeArtifactInventoryReturnsOnlyValidatedLocalPaths(t *testing.T) {
@@ -92,13 +93,45 @@ func TestResolveNativeArtifactInventoryBindsReceiptToItsConfiguredCheckAndEviden
 func TestResolveNativeArtifactInventoryAllowsIntegrationEvidenceToRetainReviewedHead(t *testing.T) {
 	fixture := newNativeArtifactResolverFixture(t)
 	reviewed := strings.Repeat("b", 40)
+	merge := fixture.plan.ExpectedHead
+	repaired := strings.Repeat("c", 40)
+	fixture.receipt = rewriteNativeArtifactManifest(t, fixture.receiptDir, func(m *nativeArtifactManifest, _ *nativeArtifactResolverFixture) {
+		m.Expected.Head = repaired
+		m.Actual.HeadBefore, m.Actual.HeadAfter = repaired, repaired
+	}, fixture)
+	fixture.plan.ExpectedHead = repaired
+	fixture.evidence.Checks[0] = passedCheckEvidence(fixture.plan.Checks[0], "") + " artifact=" + fixture.receipt
 	fixture.evidence.Head = reviewed
-	fixture.evidence.IntegrationSHA = fixture.plan.ExpectedHead
+	fixture.evidence.IntegrationSHA = merge
 	fixture.evidence.Visual = &model.VisualEvidence{Head: reviewed, Config: fixture.evidence.Config}
-	fixture.task.HeadSHA = fixture.plan.ExpectedHead
+	fixture.task.HeadSHA, fixture.task.MergeSHA, fixture.task.PostVerifySHA = merge, merge, repaired
 	inventory, err := ResolveNativeArtifactInventory(fixture.project, fixture.plan, fixture.task, fixture.evidence, fixture.sealRoot, fixture.receipt)
 	if err != nil || inventory == nil || fixture.evidence.Head != reviewed || fixture.evidence.Visual.Head != reviewed {
 		t.Fatalf("integration evidence was not resolved without changing visual provenance: %#v, %v", inventory, err)
+	}
+}
+
+func TestResolveNativeArtifactInventoryRejectsOldRulesAndUnpublishedIntegration(t *testing.T) {
+	fixture := newNativeArtifactResolverFixture(t)
+	oldRules := strings.Repeat("f", 64)
+	fixture.evidence.Rules = oldRules
+	fixture.receipt = rewriteNativeArtifactManifest(t, fixture.receiptDir, func(m *nativeArtifactManifest, _ *nativeArtifactResolverFixture) { m.Expected.Rules = oldRules }, fixture)
+	fixture.evidence.Checks[0] = passedCheckEvidence(fixture.plan.Checks[0], "") + " artifact=" + fixture.receipt
+	if _, err := ResolveNativeArtifactInventory(fixture.project, fixture.plan, fixture.task, fixture.evidence, fixture.sealRoot, fixture.receipt); err == nil {
+		t.Fatal("self-consistent old rules accepted")
+	}
+
+	fixture = newNativeArtifactResolverFixture(t)
+	fixture.evidence.IntegrationSHA = fixture.plan.ExpectedHead
+	if _, err := ResolveNativeArtifactInventory(fixture.project, fixture.plan, fixture.task, fixture.evidence, fixture.sealRoot, fixture.receipt); err == nil {
+		t.Fatal("ordinary task used IntegrationSHA to skip ordinary head fence")
+	}
+
+	fixture = newNativeArtifactResolverFixture(t)
+	fixture.evidence.IntegrationSHA = fixture.plan.ExpectedHead
+	fixture.task.MergeSHA = strings.Repeat("b", 40)
+	if _, err := ResolveNativeArtifactInventory(fixture.project, fixture.plan, fixture.task, fixture.evidence, fixture.sealRoot, fixture.receipt); err == nil {
+		t.Fatal("foreign integration provenance accepted")
 	}
 }
 
@@ -202,7 +235,7 @@ func newNativeArtifactResolverFixture(t *testing.T) *nativeArtifactResolverFixtu
 		t.Fatal(err)
 	}
 	check := config.Check{Name: "browser", Command: []string{"test"}, Artifacts: true}
-	bind := &nativeArtifactContext{ExpectedHead: strings.Repeat("a", 40), Config: strings.Repeat("c", 64), Rules: strings.Repeat("d", 64), PlanInput: strings.Repeat("e", 64), Toolchain: "test=hash", Project: "project", Task: "task", StateRoot: state, SourceRoot: source, SealRoot: filepath.Join(state, "seal")}
+	bind := &nativeArtifactContext{ExpectedHead: strings.Repeat("a", 40), Config: strings.Repeat("c", 64), Rules: roles.Hash(), PlanInput: strings.Repeat("e", 64), Toolchain: "test=hash", Project: "project", Task: "task", StateRoot: state, SourceRoot: source, SealRoot: filepath.Join(state, "seal")}
 	pending := sealFixturePending(t, space, "staging", color.RGBA{R: 255, A: 255}, bind.ExpectedHead)
 	pending.check = check
 	receipt, err := sealNativeArtifacts(pending, bind)

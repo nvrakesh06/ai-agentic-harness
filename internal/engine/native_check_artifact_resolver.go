@@ -16,6 +16,7 @@ import (
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 )
 
 const (
@@ -82,7 +83,7 @@ func ResolveNativeArtifactInventory(project string, plan validationPlan, task *m
 }
 
 func nativeArtifactEvidenceBinding(plan validationPlan, task *model.Task, evidence *model.Evidence, receipt string) (string, error) {
-	if task == nil || task.ID == "" || evidence == nil || plan.ExpectedHead == "" || plan.ExpectedConfig == "" || plan.Input == "" || plan.Toolchain == "" || plan.TestInputs == "" || evidence.Config != plan.ExpectedConfig || evidence.Rules == "" || evidence.ValidationInput != plan.Input || evidence.Toolchain != plan.Toolchain || evidence.TestInputs != plan.TestInputs {
+	if task == nil || task.ID == "" || evidence == nil || plan.ExpectedHead == "" || plan.ExpectedConfig == "" || plan.Input == "" || plan.Toolchain == "" || plan.TestInputs == "" || evidence.Config != plan.ExpectedConfig || evidence.Rules != roles.Hash() || evidence.ValidationInput != plan.Input || evidence.Toolchain != plan.Toolchain || evidence.TestInputs != plan.TestInputs {
 		return "", errors.New("native artifact receipt does not match current validation evidence")
 	}
 	if evidence.IntegrationSHA == "" {
@@ -93,7 +94,7 @@ func nativeArtifactEvidenceBinding(plan validationPlan, task *model.Task, eviden
 		if task.HeadSHA != plan.ExpectedHead || evidence.Head != plan.ExpectedHead {
 			return "", errors.New("native artifact ordinary evidence head is stale")
 		}
-	} else if !nativeArtifactRevision.MatchString(evidence.IntegrationSHA) {
+	} else if !nativeArtifactRevision.MatchString(evidence.IntegrationSHA) || !nativeArtifactRevision.MatchString(task.MergeSHA) || task.MergeSHA != evidence.IntegrationSHA {
 		return "", errors.New("native artifact integration provenance is malformed")
 	}
 	for _, record := range evidence.Checks {
