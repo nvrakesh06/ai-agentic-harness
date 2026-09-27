@@ -48,6 +48,10 @@ checkpoint. Unpushed edits cannot be reconstructed. On the same machine, existin
 worktrees are retained rather than reset, so uncommitted work can be checkpointed
 after inspection. Interrupted review/test processes are disposable and rerun.
 
+For a UI task with native visual evidence, recovery selects only
+`visual_capture_ui`. A default `visual_capture` profile cannot substitute for it;
+the UI capture cache/seal has separate local provenance and is recreated when absent.
+
 An implementation worker approaching its deadline receives one bounded checkpoint
 pass before hard termination. If that pass cannot return structured output, AIH
 creates a sanitized local session `handoff.json`, then atomically publishes safe

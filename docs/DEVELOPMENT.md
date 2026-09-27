@@ -115,6 +115,15 @@ visual_capture:
     targets:
       - id: desktop
       - id: settings
+visual_capture_ui:
+  # Optional UI-only adapter. UI tasks fail closed when this profile is absent.
+  server: [node, scripts/aih-studio-visual-server.mjs]
+  timeout_seconds: 90
+  targets:
+    - id: planner
+      path: /planner
+      width: 1280
+      height: 720
 release_repo: nvrakesh06/ai-agentic-harness
 ```
 
@@ -175,6 +184,15 @@ with target IDs. Capture fails as a unit if any target, dimensions, or manifest
 mapping fails, so AIH never seals or caches a partial result. It verifies the
 worktree remains clean at the exact head before sealing hashes and gives the
 requesting reviewer one exact-head retry. Capture is evidence, never a visual pass.
+
+`visual_capture_ui` is an optional sibling profile with the same bounded adapter,
+target, closure, TLS, and artifact rules. AIH selects it only from durable task
+`UI: true`; it never infers a profile from paths, provider text, or environment.
+A UI task without this profile reports capture unavailable and does not fall back
+to `visual_capture`. UI captures use a domain-separated local provenance hash, so a
+default-profile seal cannot satisfy UI evidence; general review evidence remains
+bound to the canonical configuration hash. Enable this profile only after a real
+product scenario adapter is registered.
 
 `input_closure` is an opt-in, fail-closed identity for history-only sync heads.
 AIH hashes the complete committed Git tree, the closure version, capture

@@ -118,6 +118,23 @@ func TestVisualEnvironmentBindsPrivatePlaywrightBrowserCache(t *testing.T) {
 	}
 }
 
+func TestVisualCaptureSelectsDurableUIProfileAndSeparatesProvenance(t *testing.T) {
+	effective := config.Effective{Hash: strings.Repeat("a", 64), Project: config.Project{VisualCapture: &config.VisualCapture{Server: []string{"default-server"}, Timeout: 10, Targets: []config.VisualCaptureTarget{{ID: "default", Path: "/", Width: 2, Height: 2}}}, VisualCaptureUI: &config.VisualCapture{Server: []string{"ui-server"}, Timeout: 10, Targets: []config.VisualCaptureTarget{{ID: "ui", Path: "/planner", Width: 2, Height: 2}}}}}
+	defaultProfile, workload, err := visualCaptureEffective(effective, &model.Task{ID: "task"})
+	if err != nil || workload != "default" || defaultProfile.Hash != effective.Hash || defaultProfile.Project.VisualCapture.Server[0] != "default-server" {
+		t.Fatalf("default profile = %#v workload=%q error=%v", defaultProfile.Project.VisualCapture, workload, err)
+	}
+	uiProfile, workload, err := visualCaptureEffective(effective, &model.Task{ID: "task", UI: true})
+	if err != nil || workload != "ui" || uiProfile.Hash == effective.Hash || uiProfile.Project.VisualCapture.Server[0] != "ui-server" || uiProfile.Project.VisualCapture.CaptureTargets()[0].ID != "ui" {
+		t.Fatalf("UI profile = %#v workload=%q hash=%q error=%v", uiProfile.Project.VisualCapture, workload, uiProfile.Hash, err)
+	}
+	missing := effective
+	missing.Project.VisualCaptureUI = nil
+	if _, _, err = visualCaptureEffective(missing, &model.Task{ID: "task", UI: true}); err == nil || visualCaptureConfigured(missing, &model.Task{ID: "task", UI: true}) {
+		t.Fatal("UI task fell back to the default capture profile")
+	}
+}
+
 func visualCheckoutFixture(t *testing.T) (*Controller, *model.Task, string, string, func(string, ...string) string) {
 	t.Helper()
 	state, source, control := t.TempDir(), t.TempDir(), filepath.Join(t.TempDir(), "control.git")

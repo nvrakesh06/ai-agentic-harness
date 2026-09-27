@@ -2394,7 +2394,7 @@ func (c *Controller) verifyReview(id string) error {
 		}
 		_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_requested", "roles="+strings.Join(names, ",")+" head="+t.HeadSHA)
 		if visualRequested {
-			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_queued", "head="+t.HeadSHA)
+			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_queued", "head="+t.HeadSHA+" workload="+visualCaptureWorkload(effective, t))
 		}
 		if !visualRequested || sourceRequested {
 			plan, planErr := fullValidationPlan(c.ctx, effective, dir, t.HeadSHA, "reviewer requested source evidence refresh")
@@ -2411,18 +2411,18 @@ func (c *Controller) verifyReview(id string) error {
 			}
 		}
 		if visualRequested {
-			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_running", "head="+t.HeadSHA)
+			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_running", "head="+t.HeadSHA+" workload="+visualCaptureWorkload(effective, t))
 			visual, visualErr := c.captureVisual(c.ctx, effective, t, dir)
 			if visualErr != nil {
 				kind := "visual_capture_failed"
-				if effective.Project.VisualCapture == nil {
+				if !visualCaptureConfigured(effective, t) {
 					kind = "visual_capture_unavailable"
 				}
 				_ = c.P.DB.Event(id, t.RunID, "verification", "native", kind, short(safety.Redact(visualErr.Error()), 500))
 				return visualErr
 			}
 			evidence.Visual = visual
-			message := "head=" + t.HeadSHA + " manifest=" + visual.Manifest
+			message := "head=" + t.HeadSHA + " workload=" + visualCaptureWorkload(effective, t) + " manifest=" + visual.Manifest
 			if visual.ReuseReason != "" {
 				message += " provenance=reattested source_head=" + visual.SourceHead + " closure=" + visual.Closure[:16]
 			}

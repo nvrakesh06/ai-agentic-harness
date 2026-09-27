@@ -209,6 +209,19 @@ func TestVisualCaptureRequiresServerAdapterCommand(t *testing.T) {
 	}
 }
 
+func TestVisualCaptureUIUsesTheSameValidationWithoutRequiringDefault(t *testing.T) {
+	p := Defaults()
+	p.VisualCapture = nil
+	p.VisualCaptureUI = &VisualCapture{Server: []string{"node", "scripts/ui-visual-server.mjs"}, Timeout: 30, Targets: []VisualCaptureTarget{{ID: "planner", Path: "/planner", Width: 1280, Height: 720}}}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("UI-only capture profile rejected: %v", err)
+	}
+	p.VisualCaptureUI.Timeout = 0
+	if err := p.Validate(); err == nil {
+		t.Fatal("invalid UI timeout accepted")
+	}
+}
+
 func TestVisualCaptureTargetValidationAndLegacyDefault(t *testing.T) {
 	p := Defaults()
 	p.VisualCapture = &VisualCapture{Server: []string{"node", "scripts/visual-server.mjs"}, Timeout: 30}

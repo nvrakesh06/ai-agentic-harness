@@ -735,7 +735,7 @@ func (c *Controller) preflight(id string) {
 			c.retry(id, "implementation", roleErr.Error())
 			return
 		}
-		if eligibleVisualPreflight(current, r) && (preflightEvidenceFix(r, result) || (preflightVisualEvidenceDeferral(r, result) && effective.Project.VisualCapture != nil)) {
+		if eligibleVisualPreflight(current, r) && (preflightEvidenceFix(r, result) || (preflightVisualEvidenceDeferral(r, result) && visualCaptureConfigured(effective, current))) {
 			_ = c.P.DB.Event(id, current.RunID, r.Name, effective.Project.Provider, "preflight_visual_evidence_fix_admitted", "exact-head visual evidence remains required for final review; concrete source findings preserved for one bounded implementer pass")
 			continue
 		}
