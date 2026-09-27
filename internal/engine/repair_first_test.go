@@ -84,3 +84,17 @@ func TestRepairFirstRecoveryFailsClosedForUnprovenOrUnsafeFindings(t *testing.T)
 		})
 	}
 }
+
+func TestRepairFirstRecoveryRejectsMediumReceiptWithSyntheticHighSummary(t *testing.T) {
+	task, effective := repairFirstFixture(t)
+	medium := task.Findings[0]
+	medium.Severity = "medium"
+	task.Findings = []model.Finding{medium}
+	task.ReviewFindingProvenance = reviewFindingReceipts(task, task.Evidence, task.Findings, false)
+	summary := model.Finding{Severity: "high", Category: "reviewer", Reason: "draft-loss verdict", Role: "reviewer", Relevance: model.FindingChanged}
+	task.Findings = append(task.Findings, summary)
+	appendReviewFindingReceipts(task, reviewFindingReceipts(task, task.Evidence, []model.Finding{summary}, true))
+	if hasAttributedConcreteReviewFinding(task, task.Evidence, "reviewer", effective) || repairFirstRecovery(task, effective) != nil {
+		t.Fatalf("medium receipt fabricated high repair-first proof: %#v", task)
+	}
+}

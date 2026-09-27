@@ -62,14 +62,24 @@ func appendReviewFindingReceipts(task *model.Task, receipts []model.ReviewFindin
 	}
 }
 
-func hasAttributedConcreteReviewFinding(task *model.Task, evidence *model.Evidence, role string) bool {
+// hasAttributedConcreteReviewFinding accepts only a retained, source-located
+// high/critical defect from the same exact review input. A low/medium receipt
+// must never authorize the controller's synthetic retry summary.
+func hasAttributedConcreteReviewFinding(task *model.Task, evidence *model.Evidence, role string, effective config.Effective) bool {
 	if task == nil || evidence == nil {
 		return false
 	}
-	return slices.ContainsFunc(task.ReviewFindingProvenance, func(receipt model.ReviewFindingProvenance) bool {
-		return !receipt.ControllerSummary && receipt.SourceTask == task.ID && receipt.Base == evidence.Base && receipt.Head == evidence.Head &&
-			receipt.Config == evidence.Config && receipt.Rules == evidence.Rules && receipt.Role == role
-	})
+	for _, finding := range task.Findings {
+		if finding.Role != role || (finding.Severity != "critical" && finding.Severity != "high") ||
+			(finding.Relevance != model.FindingChanged && finding.Relevance != model.FindingCausal) || !findingInTaskScope(task, finding) {
+			continue
+		}
+		receipt, ok := receiptForFinding(task, finding, effective)
+		if ok && !receipt.ControllerSummary && receipt.Base == evidence.Base && receipt.Head == evidence.Head {
+			return true
+		}
+	}
+	return false
 }
 
 func receiptForFinding(task *model.Task, finding model.Finding, effective config.Effective) (model.ReviewFindingProvenance, bool) {
@@ -103,6 +113,7 @@ func repairFirstRecovery(task *model.Task, effective config.Effective) *model.Re
 		return nil
 	}
 	keys := make([]string, 0, len(task.Findings))
+	concrete := false
 	for _, finding := range task.Findings {
 		if finding.Severity != "critical" && finding.Severity != "high" {
 			continue
@@ -118,15 +129,17 @@ func repairFirstRecovery(task *model.Task, effective config.Effective) *model.Re
 			// retry adds this marker itself from the durable exact-head review
 			// summary. A provider finding with no source location never receives
 			// this receipt and remains on the ordinary verification route.
-			if finding.Location != "" || finding.Category != receipt.Role || finding.Role != receipt.Role {
+			if finding.Location != "" || finding.Category != receipt.Role || finding.Role != receipt.Role || !hasAttributedConcreteReviewFinding(task, task.Evidence, receipt.Role, effective) {
 				return nil
 			}
 		} else if !findingInTaskScope(task, finding) {
 			return nil
+		} else {
+			concrete = true
 		}
 		keys = append(keys, receipt.Finding)
 	}
-	if len(keys) == 0 {
+	if len(keys) == 0 || !concrete {
 		return nil
 	}
 	sort.Strings(keys)

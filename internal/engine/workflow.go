@@ -1996,7 +1996,7 @@ func (c *Controller) retry(id, kind, reason string) {
 		// findings and as this controller-generated retry summary. Record the
 		// latter separately so a future recovery can ignore only this redundant
 		// marker; provider-supplied unlocated findings never receive that status.
-		if task.State == model.Review && task.Evidence != nil && task.Evidence.Reviews[kind] == reason && slices.Contains(task.Evidence.ReviewRoster, kind) && hasAttributedConcreteReviewFinding(task, task.Evidence, kind) {
+		if task.State == model.Review && task.Evidence != nil && task.Evidence.Reviews[kind] == reason && slices.Contains(task.Evidence.ReviewRoster, kind) && hasAttributedConcreteReviewFinding(task, task.Evidence, kind, effective) {
 			appendReviewFindingReceipts(task, reviewFindingReceipts(task, task.Evidence, []model.Finding{summaryFinding}, true))
 		}
 		task.State = model.Fix
