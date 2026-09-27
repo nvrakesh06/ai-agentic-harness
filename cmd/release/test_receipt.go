@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -246,32 +247,66 @@ func releaseReceiptIdentityWithRun(ctx context.Context, groups []releaseTestGrou
 }
 
 func releaseGoEnvironmentFromJSON(value string) (releaseGoEnvironment, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(value), &fields); err != nil || fields == nil {
-		if err == nil {
-			err = errors.New("go env JSON object is required")
-		}
+	decoder := json.NewDecoder(strings.NewReader(value))
+	first, err := decoder.Token()
+	if err != nil {
 		return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON: %w", err)
 	}
-	if len(fields) != len(releaseGoEnvFields) {
-		return releaseGoEnvironment{}, errors.New("release receipt identity go env JSON has missing or unexpected fields")
+	if delimiter, ok := first.(json.Delim); !ok || delimiter != '{' {
+		return releaseGoEnvironment{}, errors.New("release receipt identity go env JSON object is required")
 	}
 	values := make(map[string]string, len(releaseGoEnvFields))
-	for _, field := range releaseGoEnvFields {
-		raw, ok := fields[field]
-		if !ok || string(raw) == "null" {
-			return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON missing string %s", field)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON key: %w", err)
 		}
-		var decoded string
-		if err := json.Unmarshal(raw, &decoded); err != nil {
+		field, ok := token.(string)
+		if !ok || !releaseGoEnvFieldAllowed(field) {
+			return releaseGoEnvironment{}, errors.New("release receipt identity go env JSON has missing or unexpected fields")
+		}
+		if _, duplicate := values[field]; duplicate {
+			return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON duplicate %s", field)
+		}
+		var decoded any
+		if err := decoder.Decode(&decoded); err != nil {
 			return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON invalid %s: %w", field, err)
 		}
-		values[field] = decoded
+		text, ok := decoded.(string)
+		if !ok {
+			return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON invalid %s: string required", field)
+		}
+		values[field] = text
+	}
+	last, err := decoder.Token()
+	if err != nil {
+		return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON: %w", err)
+	}
+	if delimiter, ok := last.(json.Delim); !ok || delimiter != '}' {
+		return releaseGoEnvironment{}, errors.New("release receipt identity go env JSON object is required")
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		if err == nil {
+			return releaseGoEnvironment{}, errors.New("release receipt identity go env JSON has trailing data")
+		}
+		return releaseGoEnvironment{}, fmt.Errorf("release receipt identity go env JSON trailing data: %w", err)
+	}
+	if len(values) != len(releaseGoEnvFields) {
+		return releaseGoEnvironment{}, errors.New("release receipt identity go env JSON has missing or unexpected fields")
 	}
 	return releaseGoEnvironment{
 		GoVersion: values["GOVERSION"], GoOS: values["GOOS"], GoArch: values["GOARCH"], CGOEnabled: values["CGO_ENABLED"],
 		GoFlags: values["GOFLAGS"], GoToolchain: values["GOTOOLCHAIN"], GoWork: values["GOWORK"],
 	}, nil
+}
+
+func releaseGoEnvFieldAllowed(value string) bool {
+	for _, field := range releaseGoEnvFields {
+		if value == field {
+			return true
+		}
+	}
+	return false
 }
 
 func (e releaseGoEnvironment) identity() string {

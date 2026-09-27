@@ -142,6 +142,10 @@ func TestReleaseReceiptIdentityCombinesStructuredGoEnvironmentProbe(t *testing.T
 }
 
 func TestReleaseGoEnvironmentJSONIsStrict(t *testing.T) {
+	valid := releaseGoEnvJSON(t, "", "off")
+	if _, err := releaseGoEnvironmentFromJSON(" \n\t" + valid + "\r\n "); err != nil {
+		t.Fatalf("whitespace-wrapped go env JSON was rejected: %v", err)
+	}
 	if _, err := releaseGoEnvironmentFromJSON("not-json"); err == nil {
 		t.Fatal("invalid go env JSON was accepted")
 	}
@@ -161,6 +165,27 @@ func TestReleaseGoEnvironmentJSONIsStrict(t *testing.T) {
 	if _, err = releaseGoEnvironmentFromJSON(string(data)); err == nil {
 		t.Fatal("non-string go env field was accepted")
 	}
+	for _, value := range []string{
+		strings.Replace(valid, `"GOFLAGS":""`, `"GOFLAGS":null`, 1),
+		valid + ` {}`,
+		strings.Replace(valid, `"GOWORK":"off"`, `"UNKNOWN":"off"`, 1),
+	} {
+		if _, err = releaseGoEnvironmentFromJSON(value); err == nil {
+			t.Fatalf("invalid strict go env JSON was accepted: %q", value)
+		}
+	}
+	for _, tc := range []struct {
+		field, first, second string
+	}{
+		{"GOFLAGS", "-modfile=forbidden.mod", ""},
+		{"GOFLAGS", "", "-modfile=forbidden.mod"},
+		{"GOWORK", `C:\forbidden\go.work`, ""},
+		{"GOWORK", "", `C:\forbidden\go.work`},
+	} {
+		if _, err = releaseGoEnvironmentFromJSON(releaseGoEnvJSONDuplicate(t, tc.field, tc.first, tc.second)); err == nil {
+			t.Fatalf("duplicate %s was accepted: %q then %q", tc.field, tc.first, tc.second)
+		}
+	}
 }
 
 func releaseGoEnvJSON(t *testing.T, flags, work string) string {
@@ -170,6 +195,32 @@ func releaseGoEnvJSON(t *testing.T, flags, work string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func releaseGoEnvJSONDuplicate(t *testing.T, field, first, second string) string {
+	t.Helper()
+	flags, work := "", "off"
+	if field == "GOFLAGS" {
+		flags = first
+	} else {
+		work = first
+	}
+	base := releaseGoEnvJSON(t, flags, work)
+	firstJSON, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondJSON, err := json.Marshal(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	needle := `"` + field + `":` + string(firstJSON)
+	replacement := needle + `,"` + field + `":` + string(secondJSON)
+	result := strings.Replace(base, needle, replacement, 1)
+	if result == base {
+		t.Fatal("test fixture did not create duplicate JSON key")
+	}
+	return result
 }
 
 func releaseReceiptIdentityForProbeFixture(groups []releaseTestGroup, goEnv string) (releaseReceiptIdentity, [][]string, error) {
