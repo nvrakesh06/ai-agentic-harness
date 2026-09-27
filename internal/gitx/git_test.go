@@ -2,6 +2,7 @@ package gitx_test
 
 import (
 	"context"
+	"errors"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/demo"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
@@ -188,7 +189,7 @@ func TestConflictRecoveryAndCheckpointMarkers(t *testing.T) {
 	if e = g.PrepareMerge(ctx, dir, base); e != nil {
 		t.Fatal(e)
 	}
-	if e = g.ValidatePendingMergeScope(ctx, dir, base, []gitx.Area{{Pattern: "README.md", Kind: gitx.AreaExplicitFile}}); e == nil {
+	if e = g.ValidatePendingMergeScope(ctx, dir, base, []gitx.Area{{Pattern: "README.md", Kind: gitx.AreaExplicitFile}}); !errors.Is(e, gitx.ErrPendingMergeUnresolved) {
 		t.Fatal("unresolved merge passed pending scope validation")
 	}
 	if _, e = g.Checkpoint(ctx, dir, "conflict"); e == nil {
