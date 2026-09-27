@@ -137,7 +137,7 @@ func boundedFailureDiagnostic(output string) string {
 	}
 	parts := []string{
 		failureDiagnosticPrefix(output, failureDiagnosticContextHead),
-		fmt.Sprintf("\n[... %d middle diagnostic bytes omitted; retained recognized compiler/test failure context ...]\n", len(output)),
+		fmt.Sprintf("\n[... input had %d total bytes; middle diagnostic bytes omitted; retained recognized compiler/test failure context ...]\n", len(output)),
 		strings.Join(contexts, "\n[... next failure context ...]\n"),
 		"\n[... trailing diagnostic output retained ...]\n",
 		failureDiagnosticSuffix(output, failureDiagnosticContextTail),

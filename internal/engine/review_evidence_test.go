@@ -52,7 +52,7 @@ func TestBoundedFailureDiagnosticRetainsMiddleCompilerAndRunnerFailures(t *testi
 	}, "\n")
 	output := strings.Repeat("install and build succeeded \U0001F680 token="+secret+"\n", 180) + middle + "\n" + strings.Repeat("VITE deny-list negative test unrelated output\n", 280)
 	got := boundedFailureDiagnostic(safety.Redact(output))
-	for _, want := range []string{"TS2740", "expect(received).toBe", "--- FAIL: TestCapturePersistence", "VITE deny-list negative test", "retained recognized compiler/test failure context"} {
+	for _, want := range []string{"TS2740", "expect(received).toBe", "--- FAIL: TestCapturePersistence", "VITE deny-list negative test", "total bytes", "retained recognized compiler/test failure context"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("middle failure diagnostic omitted %q: %q", want, got)
 		}
