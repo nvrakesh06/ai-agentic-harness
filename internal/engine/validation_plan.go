@@ -24,7 +24,10 @@ import (
 // keeps the complete configured gate before its PR is merge-ready.
 type validationPlan struct {
 	Gate, Reason, Package, Toolchain, TestInputs, Input string
-	Checks                                              []config.Check
+	// ExpectedHead and ExpectedConfig are deliberately internal execution
+	// bindings. Portable evidence continues to use its existing fields.
+	ExpectedHead, ExpectedConfig string
+	Checks                       []config.Check
 }
 
 // validationToolUnavailableError preserves the configured native-check
@@ -187,7 +190,7 @@ func makeValidationPlan(ctx context.Context, e config.Effective, toolDir, gitDir
 		Commands                                                   [][]string
 	}{head, e.Hash, gate, reason, pkg, toolchain, inputs, command})
 	hash := sha256.Sum256(payload)
-	return validationPlan{Gate: gate, Reason: reason, Package: pkg, Toolchain: toolchain, TestInputs: inputs, Input: hex.EncodeToString(hash[:]), Checks: checks}, nil
+	return validationPlan{Gate: gate, Reason: reason, Package: pkg, Toolchain: toolchain, TestInputs: inputs, Input: hex.EncodeToString(hash[:]), ExpectedHead: head, ExpectedConfig: e.Hash, Checks: checks}, nil
 }
 
 // applicableValidationChecks keeps validation-plan identity aligned with execution. A
