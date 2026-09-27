@@ -1,8 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 )
 
 func TestReleaseInvocationProgressAllowsProductiveHandoffsBeyondLegacyBudget(t *testing.T) {
@@ -75,5 +81,23 @@ func TestReleaseResourcePolicyBindsUnitBoundaryRules(t *testing.T) {
 		if !strings.Contains(policy, want) {
 			t.Fatalf("resource policy omitted %q: %s", want, policy)
 		}
+	}
+}
+
+func TestReleaseTailReacquireFailureReleasesOldPermitWithoutPanic(t *testing.T) {
+	originalDemand, originalAcquire := releasePriorityDemandFn, acquireReleaseMachinePermitFn
+	defer func() { releasePriorityDemandFn, acquireReleaseMachinePermitFn = originalDemand, originalAcquire }()
+	releasePriorityDemandFn = func(string, config.Machine) (bool, error) { return true, nil }
+	acquireReleaseMachinePermitFn = func(time.Duration) (func(), config.Machine, string, error) {
+		return nil, config.Machine{}, "", errors.New("synthetic reacquire failure")
+	}
+	var releases atomic.Int32
+	ctx := withReleaseBoundary(context.Background(), "unused", config.Machine{MaxHeavyChecks: 1}, newReleaseInvocationProgress())
+	_, _, _, err := releaseTailHandoff(ctx, func() {}, func() { releases.Add(1) }, time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "synthetic reacquire failure") {
+		t.Fatalf("tail reacquire error = %v", err)
+	}
+	if releases.Load() != 1 {
+		t.Fatalf("old permit release count = %d, want 1", releases.Load())
 	}
 }

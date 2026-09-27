@@ -239,7 +239,9 @@ func runCompleteReleaseTests(ctx context.Context) error {
 		}
 		cancelUnit()
 	}
-	current, identityErr := releaseReceiptIdentityFor(ctx, groups)
+	finalize, cancelFinalize := context.WithTimeout(ctx, releaseUnitWatchdog)
+	current, identityErr := releaseReceiptIdentityFor(finalize, groups)
+	cancelFinalize()
 	if identityErr != nil || current != identity {
 		if identityErr != nil {
 			if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {

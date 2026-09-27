@@ -36,6 +36,8 @@ type releaseBoundary struct {
 	progress *releaseInvocationProgress
 }
 
+var releasePriorityDemandFn = releasePriorityDemand
+
 func withReleaseBoundary(ctx context.Context, dir string, machine config.Machine, progress *releaseInvocationProgress) context.Context {
 	return context.WithValue(ctx, releaseBoundaryKey{}, releaseBoundary{dir: dir, machine: machine, progress: progress})
 }
@@ -52,7 +54,7 @@ func releaseBoundaryHandoff(ctx context.Context, id string) (bool, error) {
 		return false, fmt.Errorf("release boundary has no invocation progress")
 	}
 	progress := b.progress.completedFirst(id)
-	demand, err := releasePriorityDemand(b.dir, b.machine)
+	demand, err := releasePriorityDemandFn(b.dir, b.machine)
 	if err != nil || !demand {
 		return false, err
 	}

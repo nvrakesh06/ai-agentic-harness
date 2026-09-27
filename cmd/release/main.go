@@ -149,11 +149,11 @@ func release() error {
 }
 
 func runReleaseBoundedUnit(ctx context.Context, env []string, finalize func() error, name string, args ...string) error {
-	if _, err := releaseInvocationIdentity(ctx); err != nil {
-		return err
-	}
 	unit, cancel := context.WithTimeout(ctx, releaseUnitWatchdog)
 	defer cancel()
+	if _, err := releaseInvocationIdentity(unit); err != nil {
+		return err
+	}
 	if err := run(unit, env, name, args...); err != nil {
 		return err
 	}
@@ -174,7 +174,7 @@ func releaseTailHandoff(ctx context.Context, cancel context.CancelFunc, releaseP
 	if !ok {
 		return nil, nil, nil, errors.New("release tail has no resource identity")
 	}
-	demand, err := releasePriorityDemand(b.dir, b.machine)
+	demand, err := releasePriorityDemandFn(b.dir, b.machine)
 	if err != nil || !demand {
 		return ctx, cancel, releasePermit, err
 	}
