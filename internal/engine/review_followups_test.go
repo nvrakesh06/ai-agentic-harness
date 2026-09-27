@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -273,6 +274,16 @@ func TestReviewFollowupSourceScopeIgnoresLocationNotation(t *testing.T) {
 	}
 	if got := followupSourceFile(`C:\repo\src\http.ts:288-290:4`); got != "c/repo/src/http.ts" {
 		t.Fatalf("Windows source path range normalized to %q", got)
+	}
+}
+
+func TestFollowupSourceFileRetainsLegacyCaseFoldedGroupKey(t *testing.T) {
+	if got := followupSourceFile("src/studio/App.tsx:450"); got != "src/studio/app.tsx" {
+		t.Fatalf("case-folded follow-up grouping changed: %q", got)
+	}
+	paths := followupSourcePaths("src/studio/App.tsx:450, src/studio/Other.tsx:492, src/studio/App.tsx:646")
+	if want := []string{"src/studio/App.tsx", "src/studio/Other.tsx"}; !slices.Equal(paths, want) {
+		t.Fatalf("case-preserving ownership paths = %#v, want %#v", paths, want)
 	}
 }
 

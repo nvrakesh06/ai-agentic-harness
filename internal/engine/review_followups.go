@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -295,9 +296,23 @@ func followupOwnerScope(source string) string {
 }
 
 func followupSourceFile(location string) string {
-	location = strings.TrimSpace(strings.ToLower(location))
-	if location == "" {
+	// Follow-up grouping historically case-folds and sorts source paths. Keep
+	// that durable key behavior separate from immutable task ownership, which
+	// must validate the reviewer's exact repository spelling.
+	sources := followupSourcePaths(strings.ToLower(location))
+	if len(sources) == 0 {
 		return ""
+	}
+	return sources[0]
+}
+
+// followupSourcePaths extracts every recognized source path without changing
+// case. Ownership validates this set against case-sensitive immutable Git
+// areas, so one contained location cannot hide another unowned location.
+func followupSourcePaths(location string) []string {
+	location = strings.TrimSpace(location)
+	if location == "" {
+		return nil
 	}
 	// The source scope must not change when reviewers switch between line,
 	// range, column, or prose notation. Sort multi-location candidates so their
@@ -318,7 +333,8 @@ func followupSourceFile(location string) string {
 		}
 		// Reviewers sometimes put prose such as "current-head browser captures"
 		// in Location. Do not turn that phrase into a fake source-file issue.
-		if strings.ContainsAny(candidate, " \t") || (!strings.Contains(candidate, ".") && !strings.HasPrefix(candidate, "src/") && !strings.HasPrefix(candidate, "internal/") && !strings.HasPrefix(candidate, "pkg/") && !strings.HasPrefix(candidate, "lib/") && !strings.HasPrefix(candidate, "app/") && !strings.HasPrefix(candidate, "tests/") && !strings.HasPrefix(candidate, "docs/") && !strings.HasPrefix(candidate, "projects/")) {
+		lower := strings.ToLower(candidate)
+		if strings.ContainsAny(candidate, " \t") || (!strings.Contains(candidate, ".") && !strings.HasPrefix(lower, "src/") && !strings.HasPrefix(lower, "internal/") && !strings.HasPrefix(lower, "pkg/") && !strings.HasPrefix(lower, "lib/") && !strings.HasPrefix(lower, "app/") && !strings.HasPrefix(lower, "tests/") && !strings.HasPrefix(lower, "docs/") && !strings.HasPrefix(lower, "projects/")) {
 			continue
 		}
 		candidate = strings.Map(func(r rune) rune {
@@ -332,10 +348,10 @@ func followupSourceFile(location string) string {
 		}
 	}
 	if len(sources) == 0 {
-		return ""
+		return nil
 	}
 	sort.Strings(sources)
-	return sources[0]
+	return slices.Compact(sources)
 }
 
 var followupParenLine = regexp.MustCompile(`(?i)\s*\(lines?\s+\d+(?:\s*[-–]\s*\d+)?\)$`)

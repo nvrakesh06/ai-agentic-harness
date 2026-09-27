@@ -59,9 +59,9 @@ type scopeOwner struct {
 }
 
 func findingInTaskScope(task *model.Task, finding model.Finding) bool {
-	path := followupSourceFile(finding.Location)
+	paths := followupSourcePaths(finding.Location)
 	areas, ok := immutableScope(task)
-	return ok && path != "" && gitx.ValidateScopePaths(areas, []string{path}) == nil
+	return ok && len(paths) > 0 && gitx.ValidateScopePaths(areas, paths) == nil
 }
 
 func writableOwner(state model.State) bool {
@@ -76,8 +76,7 @@ func findingScopeOwner(tasks map[string]*model.Task, origin *model.Task, finding
 	if origin == nil || findingInTaskScope(origin, finding) {
 		return scopeOwner{}
 	}
-	path := followupSourceFile(finding.Location)
-	if path == "" {
+	if len(followupSourcePaths(finding.Location)) == 0 {
 		return scopeOwner{}
 	}
 	ids := make([]string, 0, len(tasks))
