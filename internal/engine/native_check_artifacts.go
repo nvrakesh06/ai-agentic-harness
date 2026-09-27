@@ -160,6 +160,17 @@ func nativeArtifactPrepareSealRoot(bind *nativeArtifactContext) error {
 }
 
 func nativeArtifactEnsureSafeDir(path string) error {
+	return nativeArtifactWalkSafeDirs(path, true)
+}
+
+// nativeArtifactExistingSafeDir performs the same ancestor validation as the
+// writer path without creating anything. Local receipt resolution must never
+// turn an attach-loss or stale reference into a filesystem mutation.
+func nativeArtifactExistingSafeDir(path string) error {
+	return nativeArtifactWalkSafeDirs(path, false)
+}
+
+func nativeArtifactWalkSafeDirs(path string, create bool) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -183,6 +194,9 @@ func nativeArtifactEnsureSafeDir(path string) error {
 				return errors.New("native artifact directory is not a directory")
 			}
 		} else if errors.Is(statErr, os.ErrNotExist) {
+			if !create {
+				return statErr
+			}
 			if mkdirErr := os.Mkdir(current, 0700); mkdirErr != nil && !errors.Is(mkdirErr, os.ErrExist) {
 				return mkdirErr
 			}
@@ -325,10 +339,9 @@ func sealNativeArtifacts(pending *nativeArtifactPending, bind *nativeArtifactCon
 	if err = nativeArtifactPrepareSealRoot(bind); err != nil {
 		return "", err
 	}
-	id := model.ID()
-	dir, err := os.MkdirTemp(bind.SealRoot, "receipt-"+id+"-")
+	id, dir, err := nativeArtifactReceiptDirectory(bind.SealRoot)
 	if err != nil {
-		return "", fmt.Errorf("allocate native artifact receipt: %w", err)
+		return "", err
 	}
 	remove := true
 	defer func() {
@@ -357,6 +370,29 @@ func sealNativeArtifacts(pending *nativeArtifactPending, bind *nativeArtifactCon
 	}
 	remove = false
 	return id + "." + hex.EncodeToString(hash[:]), nil
+}
+
+// nativeArtifactReceiptDirectory gives each opaque ID one deterministic
+// controller-owned directory. Mkdir is exclusive, so a collision retries
+// without an unbounded directory scan or a second random path suffix.
+func nativeArtifactReceiptDirectory(root string) (string, string, error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		id := model.ID()
+		dir := filepath.Join(root, "receipt-"+id)
+		err := os.Mkdir(dir, 0700)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", "", fmt.Errorf("allocate native artifact receipt: %w", err)
+		}
+		if err = nativeArtifactPathSafe(dir, true); err != nil {
+			_ = os.RemoveAll(dir)
+			return "", "", fmt.Errorf("allocate native artifact receipt: %w", err)
+		}
+		return id, dir, nil
+	}
+	return "", "", errors.New("native artifact receipt ID collision limit reached")
 }
 
 func writeNativeArtifact(path string, data []byte) error {
@@ -471,25 +507,36 @@ func readNativePNG(path string, before os.FileInfo) ([]byte, int, int, error) {
 	if before.Size() < int64(len(nativePNGSignature)) || before.Size() > maxNativeArtifactImageBytes {
 		return nil, 0, 0, errors.New("file size exceeds PNG bounds")
 	}
-	f, err := os.Open(path)
+	data, err := readNativeArtifactBytes(path, before, maxNativeArtifactImageBytes)
 	if err != nil {
 		return nil, 0, 0, err
+	}
+	width, height, err := validateNativePNG(data)
+	return data, width, height, err
+}
+
+func readNativeArtifactBytes(path string, before os.FileInfo, limit int64) ([]byte, error) {
+	if before == nil || before.Size() < 1 || before.Size() > limit {
+		return nil, errors.New("file size exceeds bounds")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
 	defer f.Close()
 	opened, err := f.Stat()
 	if err != nil || nativeArtifactUnsafeInfo(opened) || !nativeArtifactOpenedSafe(f) || !os.SameFile(before, opened) || opened.Size() != before.Size() {
-		return nil, 0, 0, errors.New("file identity changed before inspection")
+		return nil, errors.New("file identity changed before inspection")
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxNativeArtifactImageBytes+1))
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, err
 	}
 	after, err := f.Stat()
 	if err != nil || nativeArtifactUnsafeInfo(after) || !nativeArtifactOpenedSafe(f) || !os.SameFile(opened, after) || after.Size() != int64(len(data)) {
-		return nil, 0, 0, errors.New("file identity changed during inspection")
+		return nil, errors.New("file identity changed during inspection")
 	}
-	width, height, err := validateNativePNG(data)
-	return data, width, height, err
+	return data, nil
 }
 
 func validateNativePNG(data []byte) (int, int, error) {

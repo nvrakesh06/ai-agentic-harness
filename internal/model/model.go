@@ -1374,6 +1374,14 @@ func batchValidationAccepted(evidence *Evidence) bool {
 // strings that merely claim an exit result.
 var passedNativeCheckRecord = regexp.MustCompile(`^stage=native check="(?:[^"\\]|\\.)+" command="(?:[^"\\]|\\.)+" command_id=[a-f0-9]{12} exit=0 pass_counts="(?:[^"\\]|\\.)+" stdout=(captured|empty) stdout_bytes=(0|[1-9][0-9]*) stdout_lines=(0|[1-9][0-9]*)( artifact=[a-zA-Z0-9][a-zA-Z0-9_-]{15,95}\.[a-f0-9]{64})?$`)
 
+// ValidPassedNativeCheckRecord exposes the existing closed portable-check
+// grammar to local receipt consumers. It does not make a local receipt part of
+// portable state; it only prevents a consumer from accepting a suffix attached
+// to arbitrary text.
+func ValidPassedNativeCheckRecord(record string) bool {
+	return passedNativeCheckRecord.MatchString(record)
+}
+
 func completedDependencies(s *Snapshot, task *Task) bool {
 	for _, id := range task.Dependencies {
 		if !DependencyDone(s, id) {
