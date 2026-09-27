@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -26,6 +27,7 @@ type releaseInvocationProgress struct {
 	handoffs   int
 	identity   *releaseReceiptIdentity
 	groups     []releaseTestGroup
+	nextGroup  int
 }
 
 type releaseBoundaryKey struct{}
@@ -37,6 +39,7 @@ type releaseBoundary struct {
 }
 
 var releasePriorityDemandFn = releasePriorityDemand
+var releaseReceiptIdentityForFn = releaseReceiptIdentityFor
 
 func withReleaseBoundary(ctx context.Context, dir string, machine config.Machine, progress *releaseInvocationProgress) context.Context {
 	return context.WithValue(ctx, releaseBoundaryKey{}, releaseBoundary{dir: dir, machine: machine, progress: progress})
@@ -104,12 +107,23 @@ func (p *releaseInvocationProgress) bindIdentity(identity releaseReceiptIdentity
 	return nil
 }
 
+// completeGroup advances the invocation-local cursor only after the group has
+// reached a validated terminal state. It makes cooperative re-entry resume at
+// pending work without rescanning the already completed prefix.
+func (p *releaseInvocationProgress) completeGroup(group releaseTestGroup) error {
+	if p.nextGroup >= len(p.groups) || releaseGroupID(p.groups[p.nextGroup]) != releaseGroupID(group) {
+		return errors.New("release invocation cursor does not match completed group")
+	}
+	p.nextGroup++
+	return nil
+}
+
 func releaseInvocationIdentity(ctx context.Context) (*releaseInvocationProgress, error) {
 	b, ok := ctx.Value(releaseBoundaryKey{}).(releaseBoundary)
 	if !ok || b.progress == nil || b.progress.identity == nil {
 		return nil, nil
 	}
-	current, err := releaseReceiptIdentityFor(ctx, b.progress.groups)
+	current, err := releaseReceiptIdentityForFn(ctx, b.progress.groups)
 	if err != nil {
 		return nil, err
 	}
