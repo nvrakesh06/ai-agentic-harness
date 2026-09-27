@@ -176,4 +176,3 @@ Machine configuration is process environment plus an explicitly selected literal
 environment file. Credentials remain outside portable project policy. `doctor`
 checks tools/auth status, canonical config and local storage without calling a
 model or executing application checks.
-
