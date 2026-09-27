@@ -143,6 +143,13 @@ func TestArtifactRootAndSealRootRejectLinks(t *testing.T) {
 	if err := nativeArtifactPrepareSealRoot(bind); err == nil {
 		t.Fatal("linked seal root accepted")
 	}
+	ordinaryChild := filepath.Join(target, "ordinary-child")
+	if err := os.Mkdir(ordinaryChild, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := nativeArtifactEnsureSafeDir(filepath.Join(linked, "ordinary-child")); err == nil {
+		t.Fatal("ordinary existing child beneath linked ancestor accepted")
+	}
 }
 
 func TestSealNativeArtifactsWritesReceiptOutsideStaging(t *testing.T) {

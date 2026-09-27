@@ -164,27 +164,52 @@ func nativeArtifactEnsureSafeDir(path string) error {
 	if err != nil {
 		return err
 	}
-	info, err := os.Lstat(abs)
-	if err == nil {
-		if !info.IsDir() {
-			return errors.New("native artifact directory is not a directory")
-		}
-		return nativeArtifactPathSafe(abs, true)
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	parent := filepath.Dir(abs)
-	if parent == abs {
+	root, rest := nativeArtifactPathRoot(abs)
+	if root == "" {
 		return fmt.Errorf("native artifact directory root is unavailable: %s", abs)
 	}
-	if err = nativeArtifactEnsureSafeDir(parent); err != nil {
-		return err
+	if err = nativeArtifactPathSafe(root, true); err != nil {
+		return fmt.Errorf("unsafe native artifact directory ancestor %s: %w", root, err)
 	}
-	if err = os.Mkdir(abs, 0700); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
+	current := root
+	for _, part := range strings.Split(rest, string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, statErr := os.Lstat(current)
+		if statErr == nil {
+			if !info.IsDir() {
+				return errors.New("native artifact directory is not a directory")
+			}
+		} else if errors.Is(statErr, os.ErrNotExist) {
+			if mkdirErr := os.Mkdir(current, 0700); mkdirErr != nil && !errors.Is(mkdirErr, os.ErrExist) {
+				return mkdirErr
+			}
+		} else {
+			return statErr
+		}
+		if safeErr := nativeArtifactPathSafe(current, true); safeErr != nil {
+			return fmt.Errorf("unsafe native artifact directory ancestor %s: %w", current, safeErr)
+		}
 	}
-	return nativeArtifactPathSafe(abs, true)
+	return nil
+}
+
+// nativeArtifactPathRoot separates a volume-aware absolute root from the
+// remaining components. On Windows this validates C:\\ (or a UNC share root)
+// as an actual directory before inspecting every child; on Unix it starts at
+// / and performs the same walk.
+func nativeArtifactPathRoot(abs string) (string, string) {
+	volume := filepath.VolumeName(abs)
+	root := string(filepath.Separator)
+	if volume != "" {
+		root = volume + string(filepath.Separator)
+	}
+	if !strings.HasPrefix(abs, root) {
+		return "", ""
+	}
+	return root, strings.TrimPrefix(abs, root)
 }
 
 func nativeArtifactOutsideSource(source, candidate string) error {
