@@ -750,6 +750,37 @@ func (c *Controller) recordReadOnlyDeadline(e config.Effective, stage string, r 
 	return retry, nil
 }
 
+// workerExitCause is local observability only. It classifies the live role
+// error without retaining provider diagnostics, paths, command arguments, or
+// output in the event record. Deadline and cancellation take precedence over
+// an InvocationError wrapper because they describe the actual termination.
+type workerExitCause string
+
+const (
+	workerExitNone           workerExitCause = "none"
+	workerExitDeadline       workerExitCause = "deadline"
+	workerExitCanceled       workerExitCause = "canceled"
+	workerExitProcessFailure workerExitCause = "process_failure"
+	workerExitAdapterFailure workerExitCause = "adapter_failure"
+)
+
+func classifyWorkerExit(err error) workerExitCause {
+	if err == nil {
+		return workerExitNone
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return workerExitDeadline
+	}
+	if errors.Is(err, context.Canceled) {
+		return workerExitCanceled
+	}
+	var invocation *provider.InvocationError
+	if errors.As(err, &invocation) {
+		return workerExitProcessFailure
+	}
+	return workerExitAdapterFailure
+}
+
 func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effective, r roles.Role, t *model.Task, dir, objective, diff, evidence string, complete func(*model.Snapshot, provider.Result, error) error, explicitReadRef string) (provider.Result, error) {
 	if r.Name != "implementer" {
 		select {
@@ -942,7 +973,7 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 			return result, saveErr
 		}
 	}
-	_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "worker_exit", fmt.Sprintf("outcome=%s capability=%s effective_model=%s", outcome, resolved.Capability, resolved.EffectiveModel))
+	_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "worker_exit", fmt.Sprintf("outcome=%s capability=%s effective_model=%s cause=%s", outcome, resolved.Capability, resolved.EffectiveModel, classifyWorkerExit(err)))
 	return result, err
 }
 
