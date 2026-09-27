@@ -176,6 +176,38 @@ func TestIntroducesDependencyCycleRejectsMalformedSupersessionTarget(t *testing.
 	}
 }
 
+func TestIntroducesDependencyCycleRejectsReachableSupersessionLoops(t *testing.T) {
+	for name, tasks := range map[string]map[string]*model.Task{
+		"self loop": {
+			"owner":  {ID: "owner", State: model.Ready, Dependencies: []string{"legacy"}},
+			"legacy": {ID: "legacy", State: model.Superseded, SupersededBy: "legacy"},
+		},
+		"two node loop": {
+			"owner":    {ID: "owner", State: model.Ready, Dependencies: []string{"legacy-a"}},
+			"legacy-a": {ID: "legacy-a", State: model.Superseded, SupersededBy: "legacy-b"},
+			"legacy-b": {ID: "legacy-b", State: model.Superseded, SupersededBy: "legacy-a"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !introducesDependencyCycle(tasks, "origin", "owner") {
+				t.Fatalf("reachable supersession loop %q admitted a new dependency", name)
+			}
+		})
+	}
+}
+
+func TestIntroducesDependencyCycleAllowsAcyclicDiamondWithCompletedSharedDescendant(t *testing.T) {
+	tasks := map[string]*model.Task{
+		"owner":  {ID: "owner", State: model.Ready, Dependencies: []string{"legacy", "other"}},
+		"legacy": {ID: "legacy", State: model.Superseded, SupersededBy: "shared"},
+		"other":  {ID: "other", State: model.Ready, Dependencies: []string{"shared"}},
+		"shared": {ID: "shared", State: model.Done},
+	}
+	if introducesDependencyCycle(tasks, "origin", "owner") {
+		t.Fatal("acyclic diamond with a completed shared descendant was rejected")
+	}
+}
+
 func TestCrossTaskRoutingFailsClosedForRunningOwner(t *testing.T) {
 	origin := ownedTask("renderer", model.Review, "src/remotion", model.AreaDirectory)
 	owner := ownedTask("studio", model.Running, "src/studio", model.AreaDirectory)
