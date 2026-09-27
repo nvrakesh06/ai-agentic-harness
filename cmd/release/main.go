@@ -84,7 +84,7 @@ func release() error {
 			releasePermit()
 		}
 	}()
-	if e := runReleaseBoundedUnit(ctx, nil, "go", "vet", "./..."); e != nil {
+	if e := runReleaseBoundedUnit(ctx, nil, nil, "go", "vet", "./..."); e != nil {
 		return e
 	}
 	if ctx, cancel, releasePermit, e = releaseTailHandoff(ctx, cancel, releasePermit, wait); e != nil {
@@ -110,14 +110,18 @@ func release() error {
 			}
 		}
 		env = append(env, "GOOS="+target[0], "GOARCH="+target[1], "CGO_ENABLED=0")
-		if e := runReleaseBoundedUnit(ctx, env, "go", "build", "-trimpath", "-ldflags=-s -w", "-o", p, "./cmd/aih"); e != nil {
+		var digest [sha256.Size]byte
+		if e := runReleaseBoundedUnit(ctx, env, func() error {
+			data, readErr := os.ReadFile(p)
+			if readErr != nil {
+				return readErr
+			}
+			digest = sha256.Sum256(data)
+			return nil
+		}, "go", "build", "-trimpath", "-ldflags=-s -w", "-o", p, "./cmd/aih"); e != nil {
 			return e
 		}
-		data, e := os.ReadFile(p)
-		if e != nil {
-			return e
-		}
-		fmt.Fprintf(&sums, "%x  %s\n", sha256.Sum256(data), name)
+		fmt.Fprintf(&sums, "%x  %s\n", digest, name)
 		assets = append(assets, p)
 		if index+1 < len(targets) {
 			if ctx, cancel, releasePermit, e = releaseTailHandoff(ctx, cancel, releasePermit, wait); e != nil {
@@ -144,7 +148,7 @@ func release() error {
 	return nil
 }
 
-func runReleaseBoundedUnit(ctx context.Context, env []string, name string, args ...string) error {
+func runReleaseBoundedUnit(ctx context.Context, env []string, finalize func() error, name string, args ...string) error {
 	if _, err := releaseInvocationIdentity(ctx); err != nil {
 		return err
 	}
@@ -152,6 +156,11 @@ func runReleaseBoundedUnit(ctx context.Context, env []string, name string, args 
 	defer cancel()
 	if err := run(unit, env, name, args...); err != nil {
 		return err
+	}
+	if finalize != nil {
+		if err := finalize(); err != nil {
+			return err
+		}
 	}
 	_, err := releaseInvocationIdentity(unit)
 	return err
