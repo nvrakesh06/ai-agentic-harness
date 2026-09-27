@@ -899,6 +899,9 @@ func visualCaptureEffective(e config.Effective, task *model.Task) (config.Effect
 func visualCaptureUISelected(e config.Effective, task *model.Task) (bool, string, error) {
 	selector := e.Project.VisualCaptureUISelector
 	if selector == nil {
+		if e.Project.VisualCaptureUI == nil {
+			return false, "", nil
+		}
 		return false, "", &visualCaptureUnavailableError{errors.New("visual_capture_ui_selector is required for UI task visual evidence")}
 	}
 	registered, err := roles.Load(e.Files)

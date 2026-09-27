@@ -132,6 +132,11 @@ func TestVisualCaptureSelectsDurableUIProfileAndSeparatesProvenance(t *testing.T
 	if err != nil || workload != "default" || defaultProfile.Hash != effective.Hash || defaultProfile.Project.VisualCapture.Server[0] != "default-server" {
 		t.Fatalf("default profile = %#v workload=%q error=%v", defaultProfile.Project.VisualCapture, workload, err)
 	}
+	legacy := config.Effective{Hash: effective.Hash, Project: config.Project{VisualCapture: effective.Project.VisualCapture}}
+	legacyProfile, legacyWorkload, legacyErr := visualCaptureEffective(legacy, &model.Task{ID: "task", UI: true})
+	if legacyErr != nil || legacyWorkload != "default" || legacyProfile.Project.VisualCapture != legacy.Project.VisualCapture {
+		t.Fatalf("legacy UI task did not retain default capture: %#v workload=%q error=%v", legacyProfile.Project.VisualCapture, legacyWorkload, legacyErr)
+	}
 	uiProfile, workload, err := visualCaptureEffective(effective, &model.Task{ID: "task", UI: true, Roles: []string{"visual-quality"}})
 	if err != nil || workload != "ui" || uiProfile.Hash == effective.Hash || uiProfile.Project.VisualCapture.Server[0] != "ui-server" || uiProfile.Project.VisualCapture.CaptureTargets()[0].ID != "ui" {
 		t.Fatalf("UI profile = %#v workload=%q hash=%q error=%v", uiProfile.Project.VisualCapture, workload, uiProfile.Hash, err)
