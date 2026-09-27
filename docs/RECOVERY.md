@@ -49,9 +49,11 @@ checkpoint. Unpushed edits cannot be reconstructed. On the same machine, existin
 worktrees are retained rather than reset, so uncommitted work can be checkpointed
 after inspection. Interrupted review/test processes are disposable and rerun.
 
-For a UI task with native visual evidence, recovery selects only
-`visual_capture_ui`. A default `visual_capture` profile cannot substitute for it;
-the UI capture cache/seal has separate local provenance and is recreated when absent.
+For a UI task with native visual evidence, recovery uses `visual_capture_ui` only
+when durable `UI` and the exact persisted role list match its configured selector.
+A matching task cannot substitute `visual_capture` when the UI profile is absent;
+the UI cache/seal binds selector policy and is recreated when absent. A nonmatching
+UI task uses its declared default profile.
 
 An implementation worker approaching its deadline receives one bounded checkpoint
 pass before hard termination. If that pass cannot return structured output, AIH

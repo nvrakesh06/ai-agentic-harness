@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ import (
 	"github.com/nvrakesh06/ai-agentic-harness/internal/gitx"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/platform"
+	"github.com/nvrakesh06/ai-agentic-harness/internal/roles"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/safety"
 )
 
@@ -46,7 +48,7 @@ const (
 	visualAggregateLimit = 64 << 20
 )
 const visualReadyPrefix = "AIH_VISUAL_READY "
-const visualCaptureSelectorVersion = "visual-capture-selector-v1"
+const visualCaptureSelectorVersion = "visual-capture-selector-v2"
 
 const (
 	visualSealVersion     = 3
@@ -868,23 +870,75 @@ func quarantineVisualCaptureAs(output, suffix string) error {
 	return os.Rename(output, quarantine)
 }
 
-// visualCaptureEffective selects only from the durable task UI marker. The UI
-// profile receives a domain-separated cache/seal identity while ordinary task
-// evidence continues to use the canonical effective configuration hash.
+// visualCaptureEffective selects only from durable task UI and exactly persisted
+// role IDs. The UI profile receives a domain-separated cache/seal identity while
+// ordinary task evidence continues to use the canonical effective configuration
+// hash.
 func visualCaptureEffective(e config.Effective, task *model.Task) (config.Effective, string, error) {
 	if task != nil && task.UI {
-		if e.Project.VisualCaptureUI == nil {
-			return config.Effective{}, "ui", &visualCaptureUnavailableError{errors.New("visual_capture_ui is required for UI task visual evidence")}
+		ui, selector, err := visualCaptureUISelected(e, task)
+		if err != nil {
+			return config.Effective{}, "ui", err
 		}
-		sum := sha256.Sum256([]byte(visualCaptureSelectorVersion + "\nui\n" + e.Hash))
-		e.Project.VisualCapture = e.Project.VisualCaptureUI
-		e.Hash = hex.EncodeToString(sum[:])
-		return e, "ui", nil
+		if ui {
+			if e.Project.VisualCaptureUI == nil {
+				return config.Effective{}, "ui", &visualCaptureUnavailableError{errors.New("visual_capture_ui is required for the matching UI task visual evidence")}
+			}
+			sum := sha256.Sum256([]byte(visualCaptureSelectorVersion + "\n" + selector + "\nui\n" + e.Hash))
+			e.Project.VisualCapture = e.Project.VisualCaptureUI
+			e.Hash = hex.EncodeToString(sum[:])
+			return e, "ui", nil
+		}
 	}
 	if e.Project.VisualCapture == nil {
 		return config.Effective{}, "default", &visualCaptureUnavailableError{errors.New("visual capture is not configured for this project")}
 	}
 	return e, "default", nil
+}
+
+func visualCaptureUISelected(e config.Effective, task *model.Task) (bool, string, error) {
+	selector := e.Project.VisualCaptureUISelector
+	if selector == nil {
+		return false, "", &visualCaptureUnavailableError{errors.New("visual_capture_ui_selector is required for UI task visual evidence")}
+	}
+	registered, err := roles.Load(e.Files)
+	if err != nil {
+		return false, "", &visualCaptureUnavailableError{fmt.Errorf("load canonical visual capture role registry: %w", err)}
+	}
+	for _, role := range append(append([]string(nil), selector.AllRequiredRoles...), selector.NoneOfRoles...) {
+		if _, ok := registered[role]; !ok {
+			return false, "", &visualCaptureUnavailableError{fmt.Errorf("visual_capture_ui_selector role %q is not registered", role)}
+		}
+	}
+	persisted := make(map[string]bool, len(task.Roles))
+	for _, role := range task.Roles {
+		persisted[role] = true
+	}
+	for _, role := range selector.AllRequiredRoles {
+		if !persisted[role] {
+			return false, visualCaptureSelectorFingerprint(selector), nil
+		}
+	}
+	for _, role := range selector.NoneOfRoles {
+		if persisted[role] {
+			return false, visualCaptureSelectorFingerprint(selector), nil
+		}
+	}
+	return true, visualCaptureSelectorFingerprint(selector), nil
+}
+
+func visualCaptureSelectorFingerprint(selector *config.VisualCaptureUISelector) string {
+	required := append([]string(nil), selector.AllRequiredRoles...)
+	excluded := append([]string(nil), selector.NoneOfRoles...)
+	sort.Strings(required)
+	sort.Strings(excluded)
+	body, _ := json.Marshal(struct {
+		Version  string   `json:"version"`
+		Required []string `json:"all_required_roles"`
+		Excluded []string `json:"none_of_roles"`
+	}{visualCaptureSelectorVersion, required, excluded})
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
 }
 
 func visualCaptureConfigured(e config.Effective, task *model.Task) bool {
