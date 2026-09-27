@@ -274,14 +274,12 @@ func (g Git) ValidatePendingMergeScope(ctx context.Context, worktree, base strin
 		if err != nil {
 			return err
 		}
-		for _, path := range strings.Fields(unresolved) {
-			marker, readErr := pendingMergePathHasMarker(worktree, path)
-			if readErr != nil {
-				return readErr
-			}
-			if marker {
-				return ErrPendingMergeUnresolved
-			}
+		marker, readErr := pendingMergePathsHaveMarker(worktree, strings.Fields(unresolved))
+		if readErr != nil {
+			return readErr
+		}
+		if marker {
+			return ErrPendingMergeUnresolved
 		}
 	}
 	if _, err = w.Run(ctx, "", "add", "--all"); err != nil {
@@ -304,6 +302,21 @@ func pendingMergePathHasMarker(worktree, path string) (bool, error) {
 		return false, err
 	}
 	return strings.Contains(string(content), "<<<<<<<") || strings.Contains(string(content), ">>>>>>>"), nil
+}
+
+// pendingMergePathsHaveMarker reads every unmerged path before classifying the
+// merge as locally preservable. A later unreadable path is a fail-closed I/O
+// error even when an earlier path contains a readable conflict marker.
+func pendingMergePathsHaveMarker(worktree string, paths []string) (bool, error) {
+	marker := false
+	for _, path := range paths {
+		hasMarker, err := pendingMergePathHasMarker(worktree, path)
+		if err != nil {
+			return false, err
+		}
+		marker = marker || hasMarker
+	}
+	return marker, nil
 }
 
 // ValidateCommitScope verifies an imported checkpoint against the immutable
