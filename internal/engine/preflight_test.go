@@ -82,25 +82,29 @@ func TestPreflightVisualEvidenceFixRequiresConcreteSourceFinding(t *testing.T) {
 
 func TestPreflightEvidenceFixRetainsOnlyPendingDocsVerificationAlongsideSourceRepairs(t *testing.T) {
 	designer := roles.Builtins()["designer"]
-	result := provider.Result{Status: "in_progress", Question: "Supervisor: provide exact-head native validation and Studio screenshots for final visual review.", Summary: "The designer cannot access native validation or Studio captures.", Findings: []model.Finding{
-		{Severity: "medium", Category: "accessibility", Location: "src/App.tsx:174", Reason: "The focus trap leaves the background interactive while the modal is open.", Resolution: "Use the existing inert modal helper and add the focused dialog test."},
-		{Severity: "medium", Category: "state handling", Location: "src/App.tsx:288", Reason: "The disabled conflict action still renders stale draft copy.", Resolution: "Replace the stale draft copy with the disabled conflict state and test it."},
-		{Severity: "high", Category: "visual verification", Location: "docs/implementation/status.md:80", Reason: "Exact-head native validation and Studio screenshot evidence are unavailable to this restricted reviewer.", Resolution: "Have the supervisor capture native validation output and Studio screenshots as exact-head visual evidence."},
+	result := provider.Result{Status: "in_progress", Question: "Supervisor: provide the exact-head native test results and Planner screenshot paths so the mandatory visual inspection can be completed.", Summary: "Static design review found two keyboard and draft-recovery defects. The planning reference was inspected, but no exact-head Planner visual evidence was available; no visual pass is claimed.", Risks: []string{"Actual Planner layout, spacing, text contrast, focus appearance, and overflow at 1586×992 and 1280×800 remain unverified without rendered captures."}, Findings: []model.Finding{
+		{Severity: "high", Category: "accessibility", Location: "src/studio/App.tsx:1010", Reason: "The discard dialog opens without moving focus into it or making the background inert. Keyboard focus can remain on a control behind the modal, so the required dirty-navigation decision is not reliably keyboard accessible.", Resolution: "Focus Cancel when the dialog opens, keep keyboard focus within the dialog, and restore focus when it closes. Test keyboard navigation through cancellation and discard."},
+		{Severity: "high", Category: "interaction", Location: "src/studio/App.tsx:610", Reason: "A conflict disables the textarea containing the preserved unsaved draft. The creator cannot focus, select, or copy that draft before either recovery action replaces it.", Resolution: "Keep the conflicted draft focusable and selectable, such as with a read-only textarea, while preventing another save until recovery."},
+		{Severity: "high", Category: "verification", Location: "docs/implementation/status.md:80", Reason: "The verification record names the base SHA and says native verification is pending. No exact-head Planner captures or native command results were supplied, so the required comparison with the planning reference and a visual pass cannot be established.", Resolution: "Supply exact-head native validate and Studio test results plus Planner captures at both desktop sizes for saved, conflict, missing, and error states. Inspect those captures against docs/references/ui/statmotion_studio_planning_workspace.png and update the status record with the tested head and outcomes."},
 	}}
 	sources, pending, ok := preflightEvidenceMixedFindings(designer, result)
-	if !ok || len(sources) != 2 || sources[0].Location != "src/App.tsx:174" || sources[1].Location != "src/App.tsx:288" || len(pending) != 1 || pending[0] != result.Findings[2] {
-		t.Fatalf("mixed source and pending verification result was not partitioned precisely: sources=%#v pending=%#v ok=%t", sources, pending, ok)
+	if !ok || len(sources) != 2 || sources[0].Location != "src/studio/App.tsx:1010" || sources[1].Location != "src/studio/App.tsx:610" || len(pending) != 1 || pending[0] != result.Findings[2] {
+		text := strings.ToLower(result.Findings[2].Reason + " " + result.Findings[2].Resolution)
+		t.Fatalf("mixed source and pending verification result was not partitioned precisely: sources=%#v pending=%#v ok=%t supervisor=%t visual=%t human=%t source0=%t source1=%t pending=%t sensitive=%t direct=%t pass=%t", sources, pending, ok, supervisorEvidenceRequest(result), visualEvidenceRequest(result), preflightHumanDecision(result), actionablePreflightSourceFinding(result.Findings[0]), actionablePreflightSourceFinding(result.Findings[1]), pendingDocsVerificationFinding(result.Findings[2]), preflightEvidenceSensitive(text), directFixSensitive(text), strings.Contains(text, "pass cannot be established"))
 	}
 
 	negative := []struct {
 		name   string
 		mutate func(*model.Finding)
 	}{
-		{"source location", func(f *model.Finding) { f.Location = "src/App.tsx:80" }},
-		{"test location", func(f *model.Finding) { f.Location = "tests/App.test.tsx:80" }},
+		{"source location", func(f *model.Finding) { f.Location = "src/studio/App.tsx:80" }},
+		{"test location", func(f *model.Finding) { f.Location = "tests/studio-dashboard.spec.ts:80" }},
 		{"unsafe traversal", func(f *model.Finding) { f.Location = "docs/../implementation/status.md:80" }},
 		{"claimed pass", func(f *model.Finding) {
-			f.Reason = "Exact-head native validation passed, but screenshot evidence is unavailable."
+			f.Reason = "Exact-head native validation passed, but Planner screenshot evidence is unavailable."
+		}},
+		{"claimed success", func(f *model.Finding) {
+			f.Reason = "Exact-head native validation succeeded, but Planner screenshot evidence is unavailable."
 		}},
 		{"generic documentation update", func(f *model.Finding) { f.Resolution = "Update verification documentation." }},
 		{"security category", func(f *model.Finding) { f.Category = "security" }},
@@ -110,6 +114,10 @@ func TestPreflightEvidenceFixRetainsOnlyPendingDocsVerificationAlongsideSourceRe
 		{"consequential auth scope", func(f *model.Finding) {
 			f.Reason = "Exact-head native validation evidence is unavailable for the authentication boundary."
 		}},
+		{"vague keep action", func(f *model.Finding) { f.Resolution = "Keep the draft available." }},
+		{"maybe keep action", func(f *model.Finding) {
+			f.Resolution = "Maybe keep the conflicted draft focusable and selectable while preventing another save."
+		}},
 		{"question omits supervisor", func(_ *model.Finding) {}},
 		{"third source repair", func(_ *model.Finding) {}},
 	}
@@ -118,9 +126,11 @@ func TestPreflightEvidenceFixRetainsOnlyPendingDocsVerificationAlongsideSourceRe
 			candidate := result
 			candidate.Findings = append([]model.Finding(nil), result.Findings...)
 			if tc.name == "third source repair" {
-				candidate.Findings = append(candidate.Findings, model.Finding{Severity: "medium", Category: "layout", Location: "src/App.tsx:332", Reason: "The banner overlaps the compact toolbar.", Resolution: "Adjust the existing compact layout and test it."})
+				candidate.Findings = append(candidate.Findings, model.Finding{Severity: "high", Category: "layout", Location: "src/studio/App.tsx:332", Reason: "The banner overlaps the compact toolbar.", Resolution: "Adjust the existing compact layout and test it."})
 			} else if tc.name == "question omits supervisor" {
-				candidate.Question = "Provide exact-head native validation and Studio screenshots for final visual review."
+				candidate.Question = "Provide exact-head native test results and Planner screenshot paths so visual inspection can be completed."
+			} else if tc.name == "vague keep action" || tc.name == "maybe keep action" {
+				tc.mutate(&candidate.Findings[1])
 			} else {
 				tc.mutate(&candidate.Findings[2])
 			}

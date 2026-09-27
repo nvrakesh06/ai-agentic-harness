@@ -67,7 +67,7 @@ func (p *evidenceLoopProvider) Run(ctx context.Context, request provider.Request
 		if p.decision {
 			return provider.Result{Schema: 1, Status: "in_progress", Question: "Provide an exact-head screenshot, then choose whether the product should permit clipping this caption.", Summary: "A product decision is required before changing the presentation.", Findings: preflightEvidenceLoopFindings(p.pendingDocs)}, nil
 		}
-		return provider.Result{Schema: 1, Status: "in_progress", Question: "Please provide an exact-head rendered frame or Playwright screenshot for this visual review.", Summary: "The restricted designer cannot launch Playwright, but found two source defects.", Findings: preflightEvidenceLoopFindings(p.pendingDocs)}, nil
+		return provider.Result{Schema: 1, Status: "in_progress", Question: "Supervisor: provide the exact-head native test results and Planner screenshot paths so the mandatory visual inspection can be completed.", Summary: "Static design review found two keyboard and draft-recovery defects. The planning reference was inspected, but no exact-head Planner visual evidence was available; no visual pass is claimed.", Risks: []string{"Actual Planner layout, spacing, text contrast, focus appearance, and overflow at 1586×992 and 1280×800 remain unverified without rendered captures."}, Findings: preflightEvidenceLoopFindings(p.pendingDocs)}, nil
 	case "implementer":
 		p.writers.Add(1)
 		<-ctx.Done()
@@ -84,9 +84,9 @@ func preflightEvidenceLoopFindings(pendingDocs bool) []model.Finding {
 		{Severity: "high", Category: "visual verification", Location: "Rendered-frame evidence for head dae939776385f468aaf0818940925f384927782e", Reason: "No exact-head rendered frames or browser capture were available.", Resolution: "Have the supervisor supply native captures of healthy, timeout, failure, and rebalance frames for final visual review."},
 	}
 	if pendingDocs {
-		findings[0] = model.Finding{Severity: "medium", Category: "accessibility", Location: "src/App.tsx:174", Reason: "The focus trap leaves the background interactive while the modal is open.", Resolution: "Use the existing inert modal helper and add the focused dialog test."}
-		findings[1] = model.Finding{Severity: "medium", Category: "state handling", Location: "src/App.tsx:288", Reason: "The disabled conflict action still renders stale draft copy.", Resolution: "Replace the stale draft copy with the disabled conflict state and test it."}
-		findings[2] = model.Finding{Severity: "high", Category: "visual verification", Location: "docs/implementation/status.md:80", Reason: "Exact-head native validation and Studio screenshot evidence are unavailable to this restricted reviewer.", Resolution: "Have the supervisor capture native validation output and Studio screenshots as exact-head visual evidence."}
+		findings[0] = model.Finding{Severity: "high", Category: "accessibility", Location: "src/studio/App.tsx:1010", Reason: "The discard dialog opens without moving focus into it or making the background inert. Keyboard focus can remain on a control behind the modal, so the required dirty-navigation decision is not reliably keyboard accessible.", Resolution: "Focus Cancel when the dialog opens, keep keyboard focus within the dialog, and restore focus when it closes. Test keyboard navigation through cancellation and discard."}
+		findings[1] = model.Finding{Severity: "high", Category: "interaction", Location: "src/studio/App.tsx:610", Reason: "A conflict disables the textarea containing the preserved unsaved draft. The creator cannot focus, select, or copy that draft before either recovery action replaces it.", Resolution: "Keep the conflicted draft focusable and selectable, such as with a read-only textarea, while preventing another save until recovery."}
+		findings[2] = model.Finding{Severity: "high", Category: "verification", Location: "docs/implementation/status.md:80", Reason: "The verification record names the base SHA and says native verification is pending. No exact-head Planner captures or native command results were supplied, so the required comparison with the planning reference and a visual pass cannot be established.", Resolution: "Supply exact-head native validate and Studio test results plus Planner captures at both desktop sizes for saved, conflict, missing, and error states. Inspect those captures against docs/references/ui/statmotion_studio_planning_workspace.png and update the status record with the tested head and outcomes."}
 	}
 	return findings
 }
@@ -138,13 +138,13 @@ func TestPreflightEvidenceLoopAdmitsOneFixWithoutRepeatingDesigner(t *testing.T)
 		}
 	}
 	current := c.Snapshot().Tasks[task.ID]
-	if workers.designers.Load() != 1 || current.Preflight == nil || current.Preflight.Config != effective.Hash || current.VisualRequired == nil || current.VisualRequired.Head != base || current.VisualRequired.Reason == "" || !containsDecision(current.Decisions, "Final visual review must still use rendered evidence") || len(current.Findings) != 3 || current.Findings[0].Location != "src/App.tsx:174" || current.Findings[1].Location != "src/App.tsx:288" || current.Findings[2].Location != "docs/implementation/status.md:80" || current.Findings[2].Role != "designer" {
+	if workers.designers.Load() != 1 || current.Preflight == nil || current.Preflight.Config != effective.Hash || current.VisualRequired == nil || current.VisualRequired.Head != base || current.VisualRequired.Reason == "" || !containsDecision(current.Decisions, "Final visual review must still use rendered evidence") || len(current.Findings) != 3 || current.Findings[0].Location != "src/studio/App.tsx:1010" || current.Findings[1].Location != "src/studio/App.tsx:610" || current.Findings[2].Location != "docs/implementation/status.md:80" || current.Findings[2].Role != "designer" {
 		t.Fatalf("evidence-guided fix did not preserve exact-head guidance or bounded admission: designers=%d task=%#v", workers.designers.Load(), current)
 	}
 	cancel()
 	<-done
 	persisted, _, err := f.P.Git.Load(context.Background())
-	if err != nil || persisted.Tasks[task.ID].VisualRequired == nil || persisted.Tasks[task.ID].VisualRequired.Head == "" {
+	if err != nil || persisted.Tasks[task.ID].VisualRequired == nil || persisted.Tasks[task.ID].VisualRequired.Head == "" || len(persisted.Tasks[task.ID].Findings) != 3 || persisted.Tasks[task.ID].Findings[2].Location != "docs/implementation/status.md:80" || persisted.Tasks[task.ID].Findings[2].Role != "designer" {
 		t.Fatalf("headless task lost a durable exact-head visual requirement after recovery: %#v %v", persisted.Tasks[task.ID], err)
 	}
 }

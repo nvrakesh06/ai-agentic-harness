@@ -279,12 +279,13 @@ func pendingDocsVerificationFinding(finding model.Finding) bool {
 	resolution := strings.ToLower(strings.TrimSpace(finding.Resolution))
 	text := reason + " " + resolution
 	if preflightEvidenceSensitive(text) || directFixSensitive(text) ||
-		containsAny(text, "passed", "pass", "verified", "verification completed", "evidence available") {
+		containsAny(text, "passed", "verified", "verification completed", "evidence available", "succeeded", "successful", "all tests") ||
+		(strings.Contains(text, "pass") && !strings.Contains(text, "pass cannot be established")) {
 		return false
 	}
 	exactHeadUnavailable := containsAny(reason, "exact-head", "exact head") &&
-		containsAny(reason, "unavailable", "cannot", "could not", "missing", "not available")
-	evidenceKind := containsAny(reason, "native validation", "native validate", "native check", "screenshot", "studio", "rendered", "visual evidence", "browser capture", "playwright")
+		containsAny(reason, "unavailable", "cannot", "could not", "missing", "not available", "no exact-head", "no exact head")
+	evidenceKind := containsAny(reason, "native validation", "native validate", "native check", "native command", "screenshot", "studio", "capture", "rendered", "visual evidence", "browser capture", "playwright")
 	resolutionRequestsEvidence := containsAny(resolution, "supply", "capture") &&
 		containsAny(resolution, "native", "screenshot", "studio", "rendered", "visual", "evidence", "browser", "playwright")
 	return exactHeadUnavailable && evidenceKind && resolutionRequestsEvidence
@@ -307,8 +308,18 @@ func actionablePreflightSourceFinding(finding model.Finding) bool {
 			return false
 		}
 	}
-	return strings.TrimSpace(finding.Reason) != "" &&
-		containsAny(strings.ToLower(finding.Resolution), "use ", "replace", "apply", "add", "remove", "set ", "adjust", "ensure", "render", "measure", "validate", "test", "wrap")
+	if strings.TrimSpace(finding.Reason) == "" {
+		return false
+	}
+	resolution := strings.ToLower(finding.Resolution)
+	standardAction := containsAny(resolution, "use ", "replace", "apply", "add", "remove", "set ", "adjust", "ensure", "render", "measure", "validate", "test", "wrap")
+	// Keep is accepted only for the concrete recovery action: preserve a draft's
+	// keyboard access while preventing another save. General keep advice remains
+	// too vague to skip ordinary preflight handling.
+	concreteKeepAction := strings.Contains(resolution, "keep ") &&
+		containsAny(resolution, "focusable", "selectable") &&
+		containsAny(resolution, "prevent", "preventing")
+	return standardAction || concreteKeepAction
 }
 
 func preflightVisualEvidenceOnlyFinding(finding model.Finding) bool {
