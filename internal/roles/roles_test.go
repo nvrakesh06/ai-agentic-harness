@@ -195,9 +195,18 @@ func TestBuiltinPromptsKeepOrchestrationInSupervisor(t *testing.T) {
 		}
 	}
 	implementer := builtins["implementer"].Instructions
-	for _, value := range []string{"Do not spawn", "subagents, reviewers, QA, security, or specialists", "supervisor-owned gates", "report the remaining gate and return", "blocked with an empty question", "supervisor can run canonical native checks"} {
+	for _, value := range []string{"Do not spawn", "subagents, reviewers, QA, security, or specialists", "supervisor-owned gates", "report the remaining gate and return", "blocked with an empty question", "supervisor can run canonical native checks", "Findings are unresolved defects only", "completed repairs in summary and tests_run", "changed, causal, or unknown findings", "baseline_sha and baseline_evidence must both be empty strings", "true saved base revision", "supplied historical finding is never baseline proof"} {
 		if !strings.Contains(implementer, value) {
 			t.Fatalf("implementer prompt does not preserve supervisor ownership: %q", implementer)
+		}
+	}
+}
+
+func TestRenderedImplementerPromptExplainsFindingBaselineFields(t *testing.T) {
+	prompt := Compile(config.Effective{Files: map[string]string{}}, Builtins()["implementer"], "linux", &model.Task{ID: "task", Findings: []model.Finding{{Severity: "medium", Relevance: model.FindingChanged, BaselineSHA: strings.Repeat("a", 40), BaselineEvidence: "historical finding"}}}, "repair", "", "")
+	for _, value := range []string{"Findings are unresolved defects only", "completed repairs in summary and tests_run", "baseline_sha and baseline_evidence must both be empty strings", "supplied historical finding is never baseline proof"} {
+		if !strings.Contains(prompt, value) {
+			t.Fatalf("rendered implementer prompt missing %q: %s", value, prompt)
 		}
 	}
 }

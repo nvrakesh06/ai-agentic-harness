@@ -328,9 +328,29 @@ func TestFindingRelevanceRequiresBaselineProof(t *testing.T) {
 		strings.Replace(valid, `"baseline_evidence":"go test ./internal/studio at base fails identically"`, `"baseline_evidence":""`, 1),
 		strings.Replace(valid, `"relevance":"baseline"`, `"relevance":"not-proven"`, 1),
 		strings.Replace(valid, `"relevance":"baseline"`, `"relevance":"causal"`, 1),
+		`{"schema_version":1,"status":"blocked","summary":"Implemented the scoped URL-parity repair.","question":"","changed_areas":["src/planning/contracts.ts"],"tests_run":["focused tests passed"],"remaining_risks":[],"findings":[{"severity":"medium","category":"schema parity","location":"src/planning/contracts.ts:89-127","reason":"Resolved: malformed percent escapes are rejected before WHATWG parsing.","suggested_resolution":"Implemented and covered by focused runtime rejection tests.","relevance":"changed","baseline_sha":"c1e9df8590111c706742b34d8e8d670e50d5be4d","baseline_evidence":"Supplied reviewer finding for contracts.ts:93-114."}],"plan":[]}`,
 	} {
 		if _, err := Parse(input, "reviewer"); err == nil {
 			t.Fatalf("invalid relevance proof accepted: %s", input)
+		}
+	}
+}
+
+func TestFindingSchemaGuidesBaselineEvidenceUse(t *testing.T) {
+	var schema map[string]any
+	if err := json.Unmarshal([]byte(Schema()), &schema); err != nil {
+		t.Fatal(err)
+	}
+	properties := schema["properties"].(map[string]any)
+	finding := properties["findings"].(map[string]any)["items"].(map[string]any)
+	findingProperties := finding["properties"].(map[string]any)
+	for name, want := range map[string]string{
+		"baseline_sha":      "Required only when relevance is baseline; otherwise use an empty string.",
+		"baseline_evidence": "Required only when relevance is baseline; otherwise use an empty string.",
+	} {
+		description, _ := findingProperties[name].(map[string]any)["description"].(string)
+		if !strings.Contains(description, want) {
+			t.Fatalf("%s schema guidance = %q, want %q", name, description, want)
 		}
 	}
 }
