@@ -29,6 +29,7 @@ import (
 const releaseTestTimeout = "15m"
 
 const releasePermitWait = 2 * time.Minute
+const maxReleasePermitWait = 30 * time.Minute
 const releaseYieldRetries = 3
 
 var releaseTestCommand = func() (string, []string) {
@@ -47,7 +48,12 @@ func main() {
 func release() error {
 	publish := flag.Bool("publish", false, "publish assets for an existing v1 tag on HEAD")
 	repo := flag.String("repo", config.ReleaseRepository(""), "release repository (or AIH_RELEASE_REPO)")
+	capacityWait := flag.String("capacity-wait", releasePermitWait.String(), "maximum time to wait for shared heavy-check capacity (positive duration, at most 30m)")
 	flag.Parse()
+	wait, e := parseReleasePermitWait(*capacityWait)
+	if e != nil {
+		return fmt.Errorf("release --capacity-wait: %w", e)
+	}
 	if !config.ValidRepository(*repo) {
 		return fmt.Errorf("release repository must be owner/repository")
 	}
@@ -67,7 +73,7 @@ func release() error {
 			return fmt.Errorf("HEAD must be tagged v%s", model.Version)
 		}
 	}
-	ctx, cancel, releasePermit, e := runReleaseTestsWithYieldRetry()
+	ctx, cancel, releasePermit, e := runReleaseTestsWithYieldRetry(wait)
 	if e != nil {
 		return e
 	}
@@ -128,9 +134,9 @@ func release() error {
 // current managed process has observed cancellation. Completed exact-identity
 // groups are recorded by runCompleteReleaseTests; a yielded current group has
 // no receipt and is rerun after reacquiring normal shared capacity.
-func runReleaseTestsWithYieldRetry() (context.Context, context.CancelFunc, func(), error) {
+func runReleaseTestsWithYieldRetry(wait time.Duration) (context.Context, context.CancelFunc, func(), error) {
 	for attempt := 0; attempt < releaseYieldRetries; attempt++ {
-		releaseMachine, machine, verificationDir, err := acquireReleaseMachinePermitFn()
+		releaseMachine, machine, verificationDir, err := acquireReleaseMachinePermitFn(wait)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -249,12 +255,26 @@ func runReleaseTestGroupCommand(ctx context.Context, name string, args []string,
 // capacity. Once the release starts child commands retain normal Ctrl+C
 // behavior instead of having this process consume the signal while holding the
 // machine slot.
-func acquireReleaseMachinePermit() (func(), config.Machine, string, error) {
+func parseReleasePermitWait(value string) (time.Duration, error) {
+	wait, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("must be a duration: %w", err)
+	}
+	if wait <= 0 || wait > maxReleasePermitWait {
+		return 0, fmt.Errorf("must be greater than zero and no more than %s", maxReleasePermitWait)
+	}
+	return wait, nil
+}
+
+func acquireReleaseMachinePermit(wait time.Duration) (func(), config.Machine, string, error) {
+	if wait <= 0 || wait > maxReleasePermitWait {
+		return nil, config.Machine{}, "", fmt.Errorf("release capacity wait must be greater than zero and no more than %s", maxReleasePermitWait)
+	}
 	interrupt, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	ctx, cancel := context.WithTimeout(interrupt, releasePermitWait)
+	ctx, cancel := context.WithTimeout(interrupt, wait)
 	defer cancel()
-	return releaseMachinePermit(ctx)
+	return releaseMachinePermitWithWait(ctx, wait)
 }
 
 // releaseMachinePermit shares the native heavy-check slots used by supervised
@@ -262,6 +282,10 @@ func acquireReleaseMachinePermit() (func(), config.Machine, string, error) {
 // an active consumer check instead of turning resource contention into a test
 // failure.
 func releaseMachinePermit(ctx context.Context) (func(), config.Machine, string, error) {
+	return releaseMachinePermitWithWait(ctx, releasePermitWait)
+}
+
+func releaseMachinePermitWithWait(ctx context.Context, wait time.Duration) (func(), config.Machine, string, error) {
 	home, err := config.Home("")
 	if err != nil {
 		return nil, config.Machine{}, "", err
@@ -270,11 +294,11 @@ func releaseMachinePermit(ctx context.Context) (func(), config.Machine, string, 
 	if err != nil {
 		return nil, config.Machine{}, "", err
 	}
-	fmt.Fprintf(os.Stderr, "waiting up to %s for AIH machine heavy-check capacity (%d slot(s)); interrupt to cancel\n", releasePermitWait, machine.MaxHeavyChecks)
+	fmt.Fprintf(os.Stderr, "waiting up to %s for AIH machine heavy-check capacity (%d slot(s)); interrupt to cancel\n", wait, machine.MaxHeavyChecks)
 	dir := filepath.Join(home, "verification")
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, config.Machine{}, "", fmt.Errorf("release gate resource contention: AIH machine heavy-check capacity was unavailable within %s: %w", releasePermitWait, err)
+			return nil, config.Machine{}, "", fmt.Errorf("release gate resource contention: AIH machine heavy-check capacity was unavailable within %s: %w", wait, err)
 		}
 		waiting, err := platform.HasPriorityWaiter(dir, "heavy")
 		if err != nil {
@@ -315,7 +339,7 @@ func releaseMachinePermit(ctx context.Context) (func(), config.Machine, string, 
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, config.Machine{}, "", fmt.Errorf("release gate resource contention: AIH machine heavy-check capacity was unavailable within %s: %w", releasePermitWait, ctx.Err())
+			return nil, config.Machine{}, "", fmt.Errorf("release gate resource contention: AIH machine heavy-check capacity was unavailable within %s: %w", wait, ctx.Err())
 		case <-timer.C:
 		}
 	}

@@ -147,7 +147,7 @@ func TestReleaseMachinePermitUsesCleanHomeWithoutInstallation(t *testing.T) {
 	t.Setenv("AIH_HOME", home)
 	// Exercise the production acquisition wrapper; it tears down its temporary
 	// interrupt handler before returning the held slot to the release workflow.
-	release, _, _, err := acquireReleaseMachinePermit()
+	release, _, _, err := acquireReleaseMachinePermit(releasePermitWait)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +155,19 @@ func TestReleaseMachinePermitUsesCleanHomeWithoutInstallation(t *testing.T) {
 	for _, name := range []string{"machine.yaml", "projects"} {
 		if _, err := os.Stat(filepath.Join(home, name)); !os.IsNotExist(err) {
 			t.Fatalf("release permit initialized machine state %s: %v", name, err)
+		}
+	}
+}
+
+func TestParseReleasePermitWaitRejectsInvalidOrOutOfRangeValues(t *testing.T) {
+	for _, value := range []string{"", "invalid", "0", "-1s", "30m1s"} {
+		if _, err := parseReleasePermitWait(value); err == nil {
+			t.Fatalf("parseReleasePermitWait(%q) succeeded", value)
+		}
+	}
+	for _, value := range []string{"1ms", releasePermitWait.String(), maxReleasePermitWait.String()} {
+		if _, err := parseReleasePermitWait(value); err != nil {
+			t.Fatalf("parseReleasePermitWait(%q): %v", value, err)
 		}
 	}
 }

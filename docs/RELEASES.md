@@ -13,6 +13,13 @@ dist/aih_linux_arm64
 dist/SHA256SUMS
 ```
 
+The release gate waits up to two minutes for the shared heavy-check slot by default.
+During bursty product checks, an operator may choose a bounded wait for that invocation,
+for example `go run ./cmd/release --capacity-wait 15m`. The value must be a positive
+duration no greater than 30 minutes and applies again after each priority yield. The
+existing three-yield budget remains in force; priority work can still yield the gate and
+the option does not guarantee uninterrupted completion.
+
 Publishing is explicit. Set the version in `internal/model`, update release notes,
 commit, tag `v1.x.y`, and push that tag. On a clean tagged HEAD, run
 `go run ./cmd/release -publish` (PowerShell wrapper: `-Publish`). The command uses

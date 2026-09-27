@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 )
@@ -267,7 +268,9 @@ func TestReleaseYieldRetryReleasesPermitAndDoesNotRetryFailure(t *testing.T) {
 	originalAcquire, originalRun := acquireReleaseMachinePermitFn, runCompleteReleaseTestsFn
 	defer func() { acquireReleaseMachinePermitFn, runCompleteReleaseTestsFn = originalAcquire, originalRun }()
 	var acquisitions, releases, runs atomic.Int32
-	acquireReleaseMachinePermitFn = func() (func(), config.Machine, string, error) {
+	var waits []time.Duration
+	acquireReleaseMachinePermitFn = func(wait time.Duration) (func(), config.Machine, string, error) {
+		waits = append(waits, wait)
 		acquisitions.Add(1)
 		return func() { releases.Add(1) }, config.Machine{MaxHeavyChecks: 1}, filepath.Join(t.TempDir(), "verification"), nil
 	}
@@ -277,7 +280,8 @@ func TestReleaseYieldRetryReleasesPermitAndDoesNotRetryFailure(t *testing.T) {
 		}
 		return nil
 	}
-	_, cancel, release, err := runReleaseTestsWithYieldRetry()
+	const configuredWait = 15 * time.Minute
+	_, cancel, release, err := runReleaseTestsWithYieldRetry(configuredWait)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,11 +290,14 @@ func TestReleaseYieldRetryReleasesPermitAndDoesNotRetryFailure(t *testing.T) {
 	if acquisitions.Load() != 2 || releases.Load() != 2 || runs.Load() != 2 {
 		t.Fatalf("yield retry did not release/reacquire exactly once: acquisitions=%d releases=%d runs=%d", acquisitions.Load(), releases.Load(), runs.Load())
 	}
+	if len(waits) != 2 || waits[0] != configuredWait || waits[1] != configuredWait {
+		t.Fatalf("yield retry did not reuse configured capacity wait: %v", waits)
+	}
 	runs.Store(0)
 	acquisitions.Store(0)
 	releases.Store(0)
 	runCompleteReleaseTestsFn = func(context.Context) error { runs.Add(1); return errors.New("test failed") }
-	if _, _, _, err = runReleaseTestsWithYieldRetry(); err == nil || runs.Load() != 1 || acquisitions.Load() != 1 || releases.Load() != 1 {
+	if _, _, _, err = runReleaseTestsWithYieldRetry(releasePermitWait); err == nil || runs.Load() != 1 || acquisitions.Load() != 1 || releases.Load() != 1 {
 		t.Fatalf("actual test failure retried or leaked permit: err=%v acquisitions=%d releases=%d runs=%d", err, acquisitions.Load(), releases.Load(), runs.Load())
 	}
 }
