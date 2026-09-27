@@ -926,6 +926,9 @@ func (c *Controller) commands() (bool, error) {
 					task.Roles = append(task.Roles, cmd.Payload)
 				}
 				task.Evidence = nil
+				task.ReviewFindingProvenance = nil
+				task.ReviewFindingReceiptOverflow = false
+				task.RepairFirst = nil
 				task.Preflight = nil
 			default:
 				return errors.New("unknown command")

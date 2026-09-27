@@ -1,5 +1,12 @@
 # Architecture
 
+Canonical policy reads resolve the current `origin/main` commit on every controller
+operation. Policy blobs are then read in bounded `git cat-file --batch` requests pinned
+to that commit; raw frames are validated against the bounded captured output before legacy
+terminal CR/LF trimming and the existing 128 KiB post-trim policy check. A 60-file request
+remains bounded by the platform's 8 MiB captured-output limit; any incomplete frame, including
+output truncated at that limit, rejects rather than reusing cached policy.
+
 AIH is a single Go binary. Cobra implements the CLI; a pure-Go SQLite driver
 provides the local cache/command queue. There are no database or queue services.
 

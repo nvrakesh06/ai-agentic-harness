@@ -88,11 +88,7 @@ func nativeFailureReportPath(check config.Check) (string, func(), error) {
 }
 
 func nativeFailureEnvironment(base []string, report string) []string {
-	if report == "" {
-		return base
-	}
-	env := append([]string(nil), base...)
-	return append(env, nativeFailureReportEnv+"="+report)
+	return nativeCheckEnvironment(base, report, "")
 }
 
 func sameNativeFailureReport(left, right *nativeFailureReport) bool {

@@ -30,7 +30,6 @@ const releaseTestTimeout = "15m"
 
 const releasePermitWait = 2 * time.Minute
 const maxReleasePermitWait = 30 * time.Minute
-const releaseYieldRetries = 3
 
 var releaseTestCommand = func() (string, []string) {
 	return "go", []string{"test", "-json", "-p=1", "./...", "-count=1", "-failfast", "-timeout", releaseTestTimeout}
@@ -38,6 +37,7 @@ var releaseTestCommand = func() (string, []string) {
 
 var acquireReleaseMachinePermitFn = acquireReleaseMachinePermit
 var runCompleteReleaseTestsFn = runCompleteReleaseTests
+var runReleaseBoundedUnitFn = runReleaseBoundedUnit
 
 func main() {
 	if e := release(); e != nil {
@@ -77,9 +77,18 @@ func release() error {
 	if e != nil {
 		return e
 	}
-	defer cancel()
-	defer releasePermit()
-	if e := run(ctx, nil, "go", "vet", "./..."); e != nil {
+	defer func() {
+		if cancel != nil {
+			cancel()
+		}
+		if releasePermit != nil {
+			releasePermit()
+		}
+	}()
+	if e := runReleaseBoundedUnitFn(ctx, nil, nil, "go", "vet", "./..."); e != nil {
+		return e
+	}
+	if ctx, cancel, releasePermit, e = releaseTailHandoff(ctx, cancel, releasePermit, wait); e != nil {
 		return e
 	}
 	if e := os.MkdirAll("dist", 0755); e != nil {
@@ -87,7 +96,8 @@ func release() error {
 	}
 	assets := []string{}
 	var sums strings.Builder
-	for _, target := range [][2]string{{"windows", "amd64"}, {"darwin", "arm64"}, {"darwin", "amd64"}, {"linux", "amd64"}, {"linux", "arm64"}} {
+	targets := [][2]string{{"windows", "amd64"}, {"darwin", "arm64"}, {"darwin", "amd64"}, {"linux", "amd64"}, {"linux", "arm64"}}
+	for index, target := range targets {
 		name := "aih_" + target[0] + "_" + target[1]
 		if target[0] == "windows" {
 			name += ".exe"
@@ -101,15 +111,24 @@ func release() error {
 			}
 		}
 		env = append(env, "GOOS="+target[0], "GOARCH="+target[1], "CGO_ENABLED=0")
-		if e := run(ctx, env, "go", "build", "-trimpath", "-ldflags=-s -w", "-o", p, "./cmd/aih"); e != nil {
+		var digest [sha256.Size]byte
+		if e := runReleaseBoundedUnitFn(ctx, env, func() error {
+			data, readErr := os.ReadFile(p)
+			if readErr != nil {
+				return readErr
+			}
+			digest = sha256.Sum256(data)
+			return nil
+		}, "go", "build", "-trimpath", "-ldflags=-s -w", "-o", p, "./cmd/aih"); e != nil {
 			return e
 		}
-		data, e := os.ReadFile(p)
-		if e != nil {
-			return e
-		}
-		fmt.Fprintf(&sums, "%x  %s\n", sha256.Sum256(data), name)
+		fmt.Fprintf(&sums, "%x  %s\n", digest, name)
 		assets = append(assets, p)
+		if index+1 < len(targets) {
+			if ctx, cancel, releasePermit, e = releaseTailHandoff(ctx, cancel, releasePermit, wait); e != nil {
+				return e
+			}
+		}
 	}
 	manifest := filepath.Join("dist", "SHA256SUMS")
 	if e := os.WriteFile(manifest, []byte(sums.String()), 0644); e != nil {
@@ -130,18 +149,66 @@ func release() error {
 	return nil
 }
 
+func runReleaseBoundedUnit(ctx context.Context, env []string, finalize func() error, name string, args ...string) error {
+	unit, cancel := context.WithTimeout(ctx, releaseUnitWatchdog)
+	defer cancel()
+	if _, err := releaseInvocationIdentity(unit); err != nil {
+		return err
+	}
+	if err := run(unit, env, name, args...); err != nil {
+		return err
+	}
+	if finalize != nil {
+		if err := finalize(); err != nil {
+			return err
+		}
+	}
+	_, err := releaseInvocationIdentity(unit)
+	return err
+}
+
+// releaseTailHandoff advances a finite vet/build cursor only after the
+// completed command's child has closed. It does not reset the test-group
+// no-progress accounting and preserves ordinary priority-aware admission.
+func releaseTailHandoff(ctx context.Context, cancel context.CancelFunc, releasePermit func(), wait time.Duration) (context.Context, context.CancelFunc, func(), error) {
+	b, ok := ctx.Value(releaseBoundaryKey{}).(releaseBoundary)
+	if !ok {
+		return nil, nil, nil, errors.New("release tail has no resource identity")
+	}
+	demand, err := releasePriorityDemandFn(b.dir, b.machine)
+	if err != nil || !demand {
+		return ctx, cancel, releasePermit, err
+	}
+	cancel()
+	releasePermit()
+	releaseMachine, machine, verificationDir, err := acquireReleaseMachinePermitFn(wait)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	nextCancel := context.CancelFunc(func() {})
+	next, closeNext := context.WithCancel(context.Background())
+	nextCancel = closeNext
+	return withReleaseBoundary(next, verificationDir, machine, b.progress), nextCancel, sync.OnceFunc(releaseMachine), nil
+}
+
 // runReleaseTestsWithYieldRetry releases the shared slot only after the
 // current managed process has observed cancellation. Completed exact-identity
 // groups are recorded by runCompleteReleaseTests; a yielded current group has
 // no receipt and is rerun after reacquiring normal shared capacity.
 func runReleaseTestsWithYieldRetry(wait time.Duration) (context.Context, context.CancelFunc, func(), error) {
-	for attempt := 0; attempt < releaseYieldRetries; attempt++ {
+	progress := newReleaseInvocationProgress()
+	for {
 		releaseMachine, machine, verificationDir, err := acquireReleaseMachinePermitFn(wait)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		releasePermit := sync.OnceFunc(releaseMachine)
-		ctx, cancel := releaseYieldContext(verificationDir, machine)
+		// Priority demand is observed after a truthful bounded unit, never by
+		// canceling its owned process. Explicit cancellation still flows through
+		// this context normally.
+		ctx, cancel := context.WithCancel(context.Background())
+		ctx = withReleaseBoundary(ctx, verificationDir, machine, progress)
+		beforeHandoffs := progress.handoffs
 		err = runCompleteReleaseTestsFn(ctx)
 		if !errors.Is(err, errReleaseYielded) {
 			if err != nil {
@@ -153,9 +220,15 @@ func runReleaseTestsWithYieldRetry(wait time.Duration) (context.Context, context
 		}
 		cancel()
 		releasePermit()
-		fmt.Fprintf(os.Stderr, "release gate yielded to priority work; resuming completed exact-identity groups (%d/%d)\n", attempt+1, releaseYieldRetries)
+		// Test seams may return the sentinel directly. Treat that as no-progress;
+		// production boundary handoff has already recorded its validated outcome.
+		if progress.handoffs == beforeHandoffs {
+			if progressErr := progress.handoff(false); progressErr != nil {
+				return nil, nil, nil, progressErr
+			}
+		}
+		fmt.Fprintln(os.Stderr, "release gate yielded at a completed unit boundary; reacquiring priority-aware capacity")
 	}
-	return nil, nil, nil, fmt.Errorf("release gate yielded %d times; retry later", releaseYieldRetries)
 }
 
 // runReleaseTests stops the serial suite when go test reports that a package

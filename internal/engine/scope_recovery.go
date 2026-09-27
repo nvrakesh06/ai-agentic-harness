@@ -553,6 +553,9 @@ func applyScopeRecovery(s *model.Snapshot, manifest ScopeRecoveryManifest, prepa
 		task.Preflight = nil
 		task.Evidence = nil
 		task.ReviewProvenance = nil
+		task.ReviewFindingProvenance = nil
+		task.ReviewFindingReceiptOverflow = false
+		task.RepairFirst = nil
 		task.VisualRequired = nil
 		if task.State != model.Blocked {
 			task.State = model.Ready

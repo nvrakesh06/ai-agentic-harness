@@ -18,7 +18,7 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 11
+const StateSchema = 12
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
@@ -183,9 +183,20 @@ type Task struct {
 	ReadOnlyRetries   map[string]ReadOnlyRetry    `json:"read_only_retries,omitempty"`
 	Evidence          *Evidence                   `json:"evidence,omitempty"`
 	ReviewProvenance  map[string]ReviewProvenance `json:"review_provenance,omitempty"`
-	VisualRequired    *VisualRequirement          `json:"visual_required,omitempty"`
-	Updated           time.Time                   `json:"updated"`
-	Timing            *TaskTiming                 `json:"timing,omitempty"`
+	// ReviewFindingProvenance is supervisor-issued source attribution for
+	// retained review defects. It is deliberately separate from Finding, which
+	// is part of the provider result schema and must never carry trusted state.
+	ReviewFindingProvenance []ReviewFindingProvenance `json:"review_finding_provenance,omitempty"`
+	// ReviewFindingReceiptOverflow preserves every finding while declining the
+	// bounded repair-first exception when its receipt ledger is incomplete.
+	ReviewFindingReceiptOverflow bool `json:"review_finding_receipt_overflow,omitempty"`
+	// RepairFirst records the one unchanged-head repair admission consumed for
+	// an exact attributable review input. A no-op writer therefore falls back to
+	// ordinary native verification instead of cycling indefinitely.
+	RepairFirst    *RepairFirstRecovery `json:"repair_first_recovery,omitempty"`
+	VisualRequired *VisualRequirement   `json:"visual_required,omitempty"`
+	Updated        time.Time            `json:"updated"`
+	Timing         *TaskTiming          `json:"timing,omitempty"`
 }
 
 // ReadOnlyRetry fences the one narrower retry available to a timed-out
@@ -491,6 +502,31 @@ type Finding struct {
 	Relevance        string `json:"relevance,omitempty"`
 	BaselineSHA      string `json:"baseline_sha,omitempty"`
 	BaselineEvidence string `json:"baseline_evidence,omitempty"`
+}
+
+// ReviewFindingProvenance binds one retained review finding to the exact
+// supervisor-owned review input that produced it. Finding is a hash of the
+// normalized persisted finding; it is never accepted from a provider result.
+type ReviewFindingProvenance struct {
+	Finding           string `json:"finding"`
+	SourceTask        string `json:"source_task"`
+	Base              string `json:"base"`
+	Head              string `json:"head"`
+	Config            string `json:"config"`
+	Rules             string `json:"rules"`
+	Role              string `json:"role"`
+	ControllerSummary bool   `json:"controller_summary,omitempty"`
+}
+
+// RepairFirstRecovery consumes the narrow unchanged-head repair route. It
+// contains only immutable input identities, not a review approval or a gate
+// result; every changed head returns to the normal native and review path.
+type RepairFirstRecovery struct {
+	Base     string   `json:"base"`
+	Head     string   `json:"head"`
+	Config   string   `json:"config"`
+	Rules    string   `json:"rules"`
+	Findings []string `json:"findings"`
 }
 
 const (
@@ -871,6 +907,19 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			}
 		}
 	}
+	if s.Schema <= 11 {
+		// Schema 12 adds supervisor-issued review-finding receipts and the
+		// one-shot repair-first consumption record. Historical findings have no
+		// independent review-result linkage, so never infer either from a task
+		// head, evidence summary, provider run, local cache, or human answer.
+		for _, task := range s.Tasks {
+			if task != nil {
+				task.ReviewFindingProvenance = nil
+				task.ReviewFindingReceiptOverflow = false
+				task.RepairFirst = nil
+			}
+		}
+	}
 	if migrated {
 		if s.Schema <= 10 {
 			// Earlier records have no transition clock or pinned run context.
@@ -1010,6 +1059,34 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		for role, provenance := range t.ReviewProvenance {
 			if err := validReviewProvenance(role, provenance); err != nil {
 				return nil, false, err
+			}
+		}
+		if len(t.ReviewFindingProvenance) > 64 {
+			return nil, false, errors.New("too many review finding provenance receipts")
+		}
+		for _, provenance := range t.ReviewFindingProvenance {
+			if !stateHashPattern.MatchString(provenance.Finding) ||
+				!stateIdentifierPattern.MatchString(provenance.SourceTask) ||
+				!stateRevisionPattern.MatchString(provenance.Base) ||
+				!stateRevisionPattern.MatchString(provenance.Head) ||
+				!stateHashPattern.MatchString(provenance.Config) ||
+				!stateHashPattern.MatchString(provenance.Rules) ||
+				!stateRolePattern.MatchString(provenance.Role) {
+				return nil, false, errors.New("invalid review finding provenance")
+			}
+		}
+		if recovery := t.RepairFirst; recovery != nil {
+			if !stateRevisionPattern.MatchString(recovery.Base) || !stateRevisionPattern.MatchString(recovery.Head) ||
+				!stateHashPattern.MatchString(recovery.Config) || !stateHashPattern.MatchString(recovery.Rules) ||
+				len(recovery.Findings) == 0 || len(recovery.Findings) > 64 {
+				return nil, false, errors.New("invalid repair-first recovery")
+			}
+			seen := map[string]bool{}
+			for _, finding := range recovery.Findings {
+				if !stateHashPattern.MatchString(finding) || seen[finding] {
+					return nil, false, errors.New("invalid repair-first recovery findings")
+				}
+				seen[finding] = true
 			}
 		}
 		if t.Evidence != nil {
@@ -1295,7 +1372,15 @@ func batchValidationAccepted(evidence *Evidence) bool {
 // Passed native checks are recorded by engine.passedCheckEvidence. Batch
 // admission parses that closed record shape rather than trusting arbitrary
 // strings that merely claim an exit result.
-var passedNativeCheckRecord = regexp.MustCompile(`^stage=native check="(?:[^"\\]|\\.)+" command="(?:[^"\\]|\\.)+" command_id=[a-f0-9]{12} exit=0 pass_counts="(?:[^"\\]|\\.)+" stdout=(captured|empty) stdout_bytes=(0|[1-9][0-9]*) stdout_lines=(0|[1-9][0-9]*)$`)
+var passedNativeCheckRecord = regexp.MustCompile(`^stage=native check="(?:[^"\\]|\\.)+" command="(?:[^"\\]|\\.)+" command_id=[a-f0-9]{12} exit=0 pass_counts="(?:[^"\\]|\\.)+" stdout=(captured|empty) stdout_bytes=(0|[1-9][0-9]*) stdout_lines=(0|[1-9][0-9]*)( artifact=[a-zA-Z0-9][a-zA-Z0-9_-]{15,95}\.[a-f0-9]{64})?$`)
+
+// ValidPassedNativeCheckRecord exposes the existing closed portable-check
+// grammar to local receipt consumers. It does not make a local receipt part of
+// portable state; it only prevents a consumer from accepting a suffix attached
+// to arbitrary text.
+func ValidPassedNativeCheckRecord(record string) bool {
+	return passedNativeCheckRecord.MatchString(record)
+}
 
 func completedDependencies(s *Snapshot, task *Task) bool {
 	for _, id := range task.Dependencies {

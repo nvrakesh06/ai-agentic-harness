@@ -76,6 +76,7 @@ func TestCheckResourcesDefaultAndValidation(t *testing.T) {
 	}
 	p.Checks[0].Class = "light"
 	p.Checks[0].FailureReport = true
+	p.Checks[0].Artifacts = true
 	if err := p.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,7 @@ func TestCheckResourcesDefaultAndValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var decoded Project
-	if err = yaml.Unmarshal(encoded, &decoded); err != nil || len(decoded.Checks) != 1 || !decoded.Checks[0].FailureReport {
+	if err = yaml.Unmarshal(encoded, &decoded); err != nil || len(decoded.Checks) != 1 || !decoded.Checks[0].FailureReport || !decoded.Checks[0].Artifacts {
 		t.Fatalf("failure report check setting did not round-trip: %#v %v", decoded.Checks, err)
 	}
 	legacy := canonicalFiles()

@@ -177,21 +177,41 @@ func applyCrossTaskFindings(s *model.Snapshot, originID string, findings []model
 	return route, owners
 }
 
+// introducesDependencyCycle guards a prospective origin-to-owner edge. It
+// rejects unsafe routes but does not repair existing dependency history.
 func introducesDependencyCycle(tasks map[string]*model.Task, origin, owner string) bool {
 	if owner == "" {
 		return false
 	}
-	seen := map[string]bool{}
+	visiting, done := map[string]bool{}, map[string]bool{}
 	var visit func(string) bool
 	visit = func(id string) bool {
 		if id == origin {
 			return true
 		}
-		if seen[id] || tasks[id] == nil {
+		if visiting[id] {
+			return true
+		}
+		if done[id] {
 			return false
 		}
-		seen[id] = true
-		for _, dependency := range tasks[id].Dependencies {
+		task := tasks[id]
+		if task == nil {
+			return false
+		}
+		visiting[id] = true
+		defer func() {
+			delete(visiting, id)
+			done[id] = true
+		}()
+		if task.State == model.Superseded {
+			// Dependencies on a superseded task resolve through its replacement.
+			// A malformed replacement link cannot safely admit a new route.
+			if task.SupersededBy == "" || tasks[task.SupersededBy] == nil || visit(task.SupersededBy) {
+				return true
+			}
+		}
+		for _, dependency := range task.Dependencies {
 			if visit(dependency) {
 				return true
 			}

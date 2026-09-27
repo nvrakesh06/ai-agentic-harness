@@ -34,6 +34,16 @@ type releaseTestInventory struct {
 	Groups        []releaseTestGroup `json:"planned_groups"`
 }
 
+type releaseTestPlan struct {
+	groups     []releaseTestGroup
+	identity   releaseReceiptIdentity
+	packages   int
+	namedTests int
+}
+
+var discoverReleaseTestPlanFn = discoverReleaseTestPlan
+var runReleaseTestGroupCommandFn = runReleaseTestGroupCommand
+
 // releaseTestGroups preserves complete package coverage while bounding each
 // runnable named-test invocation. Packages without runnable test names still
 // receive one package group so their build and package-terminal event remain
@@ -98,15 +108,15 @@ func releaseGroupArgs(group releaseTestGroup) []string {
 	return append(args, group.Packages...)
 }
 
-func runCompleteReleaseTests(ctx context.Context) error {
+func discoverReleaseTestPlan(ctx context.Context) (releaseTestPlan, error) {
 	discovery, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	output, err := platform.Run(discovery, "", nil, "", "go", "list", "./...")
 	if err != nil {
 		if yielded := releaseYieldCancellation(ctx, err); yielded != nil {
-			return yielded
+			return releaseTestPlan{}, yielded
 		}
-		return fmt.Errorf("discover release package inventory: %w: %s", err, output)
+		return releaseTestPlan{}, fmt.Errorf("discover release package inventory: %w: %s", err, output)
 	}
 	packages := strings.Fields(output)
 	integration := ""
@@ -116,7 +126,7 @@ func runCompleteReleaseTests(ctx context.Context) error {
 		}
 	}
 	if integration == "" {
-		return fmt.Errorf("release package inventory has no engine integration package")
+		return releaseTestPlan{}, fmt.Errorf("release package inventory has no engine integration package")
 	}
 	testsByPackage := make(map[string][]string, len(packages))
 	for _, pkg := range packages {
@@ -126,9 +136,9 @@ func runCompleteReleaseTests(ctx context.Context) error {
 		output, err = platform.Run(discovery, "", nil, "", "go", "test", "-p=1", "-list", ".", pkg)
 		if err != nil {
 			if yielded := releaseYieldCancellation(ctx, err); yielded != nil {
-				return yielded
+				return releaseTestPlan{}, yielded
 			}
-			return fmt.Errorf("discover release named-test inventory for %s: %w: %s", pkg, err, output)
+			return releaseTestPlan{}, fmt.Errorf("discover release named-test inventory for %s: %w: %s", pkg, err, output)
 		}
 		for _, line := range strings.Split(output, "\n") {
 			line = strings.TrimSpace(line)
@@ -139,18 +149,26 @@ func runCompleteReleaseTests(ctx context.Context) error {
 	}
 	groups, err := releaseTestGroups(packages, integration, testsByPackage, releaseIntegrationGroupSize)
 	if err != nil {
-		return err
+		return releaseTestPlan{}, err
 	}
 	// This local artifact records the complete planned inventory even if a
 	// group fails. It is not evidence that unexecuted groups passed.
-	identity, err := releaseReceiptIdentityFor(discovery, groups)
+	identity, err := releaseReceiptIdentityForFn(discovery, groups)
 	if err != nil {
 		if yielded := releaseYieldCancellation(ctx, err); yielded != nil {
-			return yielded
+			return releaseTestPlan{}, yielded
 		}
-		return err
+		return releaseTestPlan{}, err
 	}
-	manifest, err := json.MarshalIndent(releaseTestInventory{Schema: 1, Head: identity.Head, Tree: identity.Tree, WorktreeDirty: false, Groups: groups}, "", "  ")
+	namedTests := 0
+	for _, tests := range testsByPackage {
+		namedTests += len(tests)
+	}
+	return releaseTestPlan{groups: groups, identity: identity, packages: len(packages), namedTests: namedTests}, nil
+}
+
+func writeReleaseTestInventory(plan releaseTestPlan) error {
+	manifest, err := json.MarshalIndent(releaseTestInventory{Schema: 1, Head: plan.identity.Head, Tree: plan.identity.Tree, WorktreeDirty: false, Groups: plan.groups}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -160,55 +178,123 @@ func runCompleteReleaseTests(ctx context.Context) error {
 	if err = os.WriteFile(filepath.Join("dist", "test-inventory.json"), append(manifest, '\n'), 0644); err != nil {
 		return err
 	}
-	namedTests := 0
-	for _, tests := range testsByPackage {
-		namedTests += len(tests)
+	fmt.Printf("release test inventory: %d packages, %d named tests, %d serial groups\n", plan.packages, plan.namedTests, len(plan.groups))
+	return nil
+}
+
+func runCompleteReleaseTests(ctx context.Context) error {
+	var progress *releaseInvocationProgress
+	if boundary, ok := ctx.Value(releaseBoundaryKey{}).(releaseBoundary); ok {
+		progress = boundary.progress
 	}
-	fmt.Printf("release test inventory: %d packages, %d named tests, %d serial groups\n", len(packages), namedTests, len(groups))
+
+	var plan releaseTestPlan
+	if progress != nil && progress.identity != nil {
+		// Reacquisition must reattest the complete immutable identity before
+		// the cursor resumes pending work. The inventory itself stays local to
+		// this invocation and is never reused by a later release command.
+		if _, err := releaseInvocationIdentity(ctx); err != nil {
+			return fmt.Errorf("release test reacquisition identity: %w", err)
+		}
+		plan = releaseTestPlan{groups: progress.groups, identity: *progress.identity}
+	} else {
+		var err error
+		plan, err = discoverReleaseTestPlanFn(ctx)
+		if err != nil {
+			return err
+		}
+		if progress != nil {
+			if err := progress.bindIdentity(plan.identity, plan.groups); err != nil {
+				return err
+			}
+		}
+		if err := writeReleaseTestInventory(plan); err != nil {
+			return err
+		}
+	}
+
 	receipts := filepath.Join("dist", "release-test-receipts")
-	for index, group := range groups {
-		fmt.Printf("release test group %d/%d\n", index+1, len(groups))
-		current, identityErr := releaseReceiptIdentityFor(ctx, groups)
-		if identityErr != nil || current != identity {
+	start := 0
+	if progress != nil {
+		start = progress.nextGroup
+	}
+	for index := start; index < len(plan.groups); index++ {
+		group := plan.groups[index]
+		fmt.Printf("release test group %d/%d\n", index+1, len(plan.groups))
+		unit, cancelUnit := context.WithTimeout(ctx, releaseUnitWatchdog)
+		current, identityErr := releaseReceiptIdentityForFn(unit, plan.groups)
+		if identityErr != nil || current != plan.identity {
 			if identityErr != nil {
 				if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {
 					return yielded
 				}
-				return fmt.Errorf("release test group %d/%d identity: %w", index+1, len(groups), identityErr)
+				return fmt.Errorf("release test group %d/%d identity: %w", index+1, len(plan.groups), identityErr)
 			}
-			return fmt.Errorf("release test group %d/%d identity changed; refusing receipt reuse", index+1, len(groups))
+			return fmt.Errorf("release test group %d/%d identity changed; refusing receipt reuse", index+1, len(plan.groups))
 		}
 		if releaseBrowserSensitive(group) {
 			fmt.Println("release test group browser/visual: rerunning; receipt reuse disabled")
-		} else if loadReleaseGroupReceipt(receipts, identity, group) {
-			fmt.Printf("release test group %d/%d: cached exact-identity receipt\n", index+1, len(groups))
+		} else if loadReleaseGroupReceipt(receipts, plan.identity, group) {
+			fmt.Printf("release test group %d/%d: cached exact-identity receipt\n", index+1, len(plan.groups))
+			if progress != nil {
+				if err := progress.completeGroup(group); err != nil {
+					cancelUnit()
+					return err
+				}
+			}
+			if handoff, handoffErr := releaseBoundaryHandoff(unit, releaseGroupID(group)); handoffErr != nil {
+				return fmt.Errorf("release test group %d/%d boundary: %w", index+1, len(plan.groups), handoffErr)
+			} else if handoff {
+				cancelUnit()
+				return errReleaseYielded
+			}
+			cancelUnit()
 			continue
 		}
-		if err := runReleaseTestGroupCommand(ctx, "go", releaseGroupArgs(group), group.Tests, group.Packages); err != nil {
-			return fmt.Errorf("release test group %d/%d: %w", index+1, len(groups), err)
+		err := runReleaseTestGroupCommandFn(unit, "go", releaseGroupArgs(group), group.Tests, group.Packages)
+		if err != nil {
+			cancelUnit()
+			return fmt.Errorf("release test group %d/%d: %w", index+1, len(plan.groups), err)
 		}
-		// An interrupted group reaches neither this line nor the receipt write.
-		if !releaseBrowserSensitive(group) {
-			current, identityErr = releaseReceiptIdentityFor(ctx, groups)
-			if identityErr != nil || current != identity {
-				if identityErr != nil {
-					if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {
-						return yielded
-					}
-					return fmt.Errorf("release test group %d/%d final identity: %w", index+1, len(groups), identityErr)
+		// An interrupted group reaches neither this line nor receipt handling.
+		// Browser groups do not persist receipts, but still prove exact identity
+		// before a cooperative handoff can expose the slot to product work.
+		current, identityErr = releaseReceiptIdentityForFn(unit, plan.groups)
+		if identityErr != nil || current != plan.identity {
+			if identityErr != nil {
+				if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {
+					return yielded
 				}
-				return fmt.Errorf("release test group %d/%d changed source or runtime; refusing receipt", index+1, len(groups))
+				return fmt.Errorf("release test group %d/%d final identity: %w", index+1, len(plan.groups), identityErr)
 			}
-			if err := saveReleaseGroupReceipt(ctx, receipts, identity, group); err != nil {
+			return fmt.Errorf("release test group %d/%d changed source or runtime; refusing receipt", index+1, len(plan.groups))
+		}
+		if !releaseBrowserSensitive(group) {
+			if err := saveReleaseGroupReceipt(unit, receipts, plan.identity, group); err != nil {
 				if yielded := releaseYieldCancellation(ctx, err); yielded != nil {
 					return yielded
 				}
-				return fmt.Errorf("record release test group %d/%d: %w", index+1, len(groups), err)
+				return fmt.Errorf("record release test group %d/%d: %w", index+1, len(plan.groups), err)
 			}
 		}
+		if progress != nil {
+			if err := progress.completeGroup(group); err != nil {
+				cancelUnit()
+				return err
+			}
+		}
+		if handoff, handoffErr := releaseBoundaryHandoff(unit, releaseGroupID(group)); handoffErr != nil {
+			return fmt.Errorf("release test group %d/%d boundary: %w", index+1, len(plan.groups), handoffErr)
+		} else if handoff {
+			cancelUnit()
+			return errReleaseYielded
+		}
+		cancelUnit()
 	}
-	current, identityErr := releaseReceiptIdentityFor(ctx, groups)
-	if identityErr != nil || current != identity {
+	finalize, cancelFinalize := context.WithTimeout(ctx, releaseUnitWatchdog)
+	current, identityErr := releaseReceiptIdentityForFn(finalize, plan.groups)
+	cancelFinalize()
+	if identityErr != nil || current != plan.identity {
 		if identityErr != nil {
 			if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {
 				return yielded

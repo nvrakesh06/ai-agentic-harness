@@ -16,9 +16,16 @@ dist/SHA256SUMS
 The release gate waits up to two minutes for the shared heavy-check slot by default.
 During bursty product checks, an operator may choose a bounded wait for that invocation,
 for example `go run ./cmd/release --capacity-wait 15m`. The value must be a positive
-duration no greater than 30 minutes and applies again after each priority yield. The
-existing three-yield budget remains in force; priority work can still yield the gate and
-the option does not guarantee uninterrupted completion.
+duration no greater than 30 minutes and applies again after each cooperative handoff.
+
+When a supervisor native check queues while the release owns the only heavy slot, the
+release finishes its current bounded test group (or vet/build unit), records its normal
+terminal and identity evidence, closes the owned child, then returns the slot before
+the next unit. Completed groups remain in the same invocation cursor across that wait;
+a browser-sensitive group is rerun by a new invocation, never from a persistent cache.
+Three consecutive handoffs without a newly validated group completion stop the release.
+This preserves product admission priority after a boundary, but does not promise that a
+release can acquire a slot while older priority demand remains continuous.
 
 Publishing is explicit. Set the version in `internal/model`, update release notes,
 commit, tag `v1.x.y`, and push that tag. On a clean tagged HEAD, run

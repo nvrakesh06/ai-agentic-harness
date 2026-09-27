@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
@@ -135,6 +136,75 @@ func TestCrossTaskRoutingRejectsReverseDependencyCycle(t *testing.T) {
 	route, owners := applyCrossTaskFindings(s, "renderer", []model.Finding{{Severity: "high", Location: "src/studio/live.ts:1"}}, func(model.Finding) bool { return true })
 	if !route.gated || !route.unresolved || len(owners) != 0 || origin.State != model.Blocked || origin.Blocker == nil {
 		t.Fatalf("reverse dependency cycle was routed unsafely: route=%#v owners=%#v task=%#v", route, owners, origin)
+	}
+}
+
+func TestCrossTaskRoutingRejectsCycleThroughSupersededDependency(t *testing.T) {
+	origin := ownedTask("208", model.Review, "src/origin", model.AreaDirectory)
+	owner := ownedTask("8", model.Ready, "src/owner", model.AreaDirectory)
+	owner.Dependencies = []string{"169"}
+	legacy := &model.Task{ID: "169", State: model.Superseded, SupersededBy: origin.ID}
+	s := model.NewSnapshot("ownership-test")
+	s.Tasks = map[string]*model.Task{origin.ID: origin, owner.ID: owner, legacy.ID: legacy}
+	beforeLegacy := model.Clone(s).Tasks[legacy.ID]
+	finding := model.Finding{Severity: "high", Location: "src/owner/live.go:1", Reason: "Must repair."}
+
+	route, owners := applyCrossTaskFindings(s, origin.ID, []model.Finding{finding}, func(model.Finding) bool { return true })
+	if !route.gated || !route.unresolved || len(route.local) != 1 || route.local[0] != finding || len(owners) != 0 {
+		t.Fatalf("superseded reverse dependency cycle was routed unsafely: route=%#v owners=%#v", route, owners)
+	}
+	if origin.State != model.Blocked || origin.Blocker == nil || len(origin.Dependencies) != 0 {
+		t.Fatalf("origin did not retain its ordinary human blocker without a new dependency: %#v", origin)
+	}
+	if owner.State != model.Ready || len(owner.Findings) != 0 || len(owner.Decisions) != 0 || !reflect.DeepEqual(legacy, beforeLegacy) {
+		t.Fatalf("cycle rejection rewrote owner or supersession history: owner=%#v legacy=%#v", owner, legacy)
+	}
+}
+
+func TestIntroducesDependencyCycleRejectsMalformedSupersessionTarget(t *testing.T) {
+	for _, replacement := range []string{"", "missing"} {
+		t.Run(replacement, func(t *testing.T) {
+			tasks := map[string]*model.Task{
+				"origin": {ID: "origin", State: model.Review},
+				"owner":  {ID: "owner", State: model.Ready, Dependencies: []string{"legacy"}},
+				"legacy": {ID: "legacy", State: model.Superseded, SupersededBy: replacement},
+			}
+			if !introducesDependencyCycle(tasks, "origin", "owner") {
+				t.Fatalf("malformed replacement %q admitted a new dependency", replacement)
+			}
+		})
+	}
+}
+
+func TestIntroducesDependencyCycleRejectsReachableSupersessionLoops(t *testing.T) {
+	for name, tasks := range map[string]map[string]*model.Task{
+		"self loop": {
+			"owner":  {ID: "owner", State: model.Ready, Dependencies: []string{"legacy"}},
+			"legacy": {ID: "legacy", State: model.Superseded, SupersededBy: "legacy"},
+		},
+		"two node loop": {
+			"owner":    {ID: "owner", State: model.Ready, Dependencies: []string{"legacy-a"}},
+			"legacy-a": {ID: "legacy-a", State: model.Superseded, SupersededBy: "legacy-b"},
+			"legacy-b": {ID: "legacy-b", State: model.Superseded, SupersededBy: "legacy-a"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !introducesDependencyCycle(tasks, "origin", "owner") {
+				t.Fatalf("reachable supersession loop %q admitted a new dependency", name)
+			}
+		})
+	}
+}
+
+func TestIntroducesDependencyCycleAllowsAcyclicDiamondWithCompletedSharedDescendant(t *testing.T) {
+	tasks := map[string]*model.Task{
+		"owner":  {ID: "owner", State: model.Ready, Dependencies: []string{"legacy", "other"}},
+		"legacy": {ID: "legacy", State: model.Superseded, SupersededBy: "shared"},
+		"other":  {ID: "other", State: model.Ready, Dependencies: []string{"shared"}},
+		"shared": {ID: "shared", State: model.Done},
+	}
+	if introducesDependencyCycle(tasks, "origin", "owner") {
+		t.Fatal("acyclic diamond with a completed shared descendant was rejected")
 	}
 }
 

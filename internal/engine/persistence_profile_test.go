@@ -10,6 +10,7 @@ import (
 )
 
 func TestPersistenceProfileIsOptInAndAggregatesOnlyFixedPhases(t *testing.T) {
+	t.Setenv(persistenceProfileEnv, "")
 	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
