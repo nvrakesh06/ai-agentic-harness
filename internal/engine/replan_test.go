@@ -172,7 +172,7 @@ func TestReplanUnstartedAreaReauthorizationDropsOnlyExplicitlyProvenMalformedAre
 	base := strings.Repeat("c", 40)
 	request.Replacement.ReplaceContract = true
 	request.Replacement.Areas = []string{"tests/engine.test.ts"}
-	request.Originals = []ReplanOriginal{{TaskID: "queued", State: model.Ready, ExpectedBaseSHA: base, ReauthorizeUnstartedAreas: []string{"tests/engine.test.ts"}}}
+	request.Originals = []ReplanOriginal{{TaskID: "queued", State: model.Ready, ExpectedBaseSHA: base, ReauthorizeUnstartedAreas: []string{"tests/engine.test.ts"}, ReauthorizeUnstartedDroppedAreas: []string{"legacy annotation"}}}
 	request.Sources = []ReplanSource{{TaskID: "old", BaseSHA: base, HeadSHA: strings.Repeat("a", 40), Order: 1}}
 	// Keep the started source in the manifest so ordinary source inheritance is
 	// still represented while only the base-only original may drop an entry.
@@ -196,12 +196,13 @@ func TestReplanUnstartedAreaReauthorizationRequestFailsClosed(t *testing.T) {
 	base := strings.Repeat("c", 40)
 	request.Replacement.ReplaceContract = true
 	request.Replacement.Areas = []string{"tests/engine.test.ts"}
-	request.Originals = []ReplanOriginal{{TaskID: "queued", State: model.Ready, ExpectedBaseSHA: base, ReauthorizeUnstartedAreas: []string{"tests/engine.test.ts"}}}
+	request.Originals = []ReplanOriginal{{TaskID: "queued", State: model.Ready, ExpectedBaseSHA: base, ReauthorizeUnstartedAreas: []string{"tests/engine.test.ts"}, ReauthorizeUnstartedDroppedAreas: []string{"legacy annotation"}}}
 	request.Sources = []ReplanSource{{TaskID: "old", BaseSHA: base, HeadSHA: strings.Repeat("a", 40), Order: 1}}
 	request.Originals = append(request.Originals, ReplanOriginal{TaskID: "old", State: model.Blocked, HeadSHA: strings.Repeat("a", 40)})
 	for _, mutate := range []func(*ReplanRequest){
 		func(r *ReplanRequest) { r.Replacement.ReplaceContract = false },
 		func(r *ReplanRequest) { r.Originals[0].ExpectedBaseSHA = "" },
+		func(r *ReplanRequest) { r.Originals[0].ReauthorizeUnstartedDroppedAreas = nil },
 		func(r *ReplanRequest) { r.Originals[0].ReauthorizeUnstartedAreas = []string{"tests/other.test.ts"} },
 		func(r *ReplanRequest) {
 			r.Originals[0].ReauthorizeUnstartedAreas = []string{"tests/engine.test.ts", "tests/engine.test.ts"}
