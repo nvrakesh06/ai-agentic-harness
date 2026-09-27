@@ -2081,11 +2081,19 @@ func Verify(ctx context.Context, e config.Effective, dir string) ([]string, erro
 	return verifyWithPermit(ctx, e, dir, nil)
 }
 func verifyWithPermit(ctx context.Context, e config.Effective, dir string, permit func(context.Context, config.Check) (func(), error)) ([]string, error) {
-	return verifyChecksWithPermit(ctx, e.Project.Checks, dir, permit)
+	return verifyChecksWithPermit(ctx, e.Project.Checks, dir, permit, nil)
 }
-func verifyChecksWithPermit(ctx context.Context, configured []config.Check, dir string, permit func(context.Context, config.Check) (func(), error)) ([]string, error) {
+func verifyChecksWithPermit(ctx context.Context, configured []config.Check, dir string, permit func(context.Context, config.Check) (func(), error), artifacts *nativeArtifactContext) ([]string, error) {
 	var checked []string
-	for _, check := range configured {
+	pending := make([]*nativeArtifactPending, 0)
+	defer func() {
+		for _, item := range pending {
+			if item != nil && item.cleanup != nil {
+				item.cleanup()
+			}
+		}
+	}()
+	for index, check := range configured {
 		if !applicable(check) {
 			continue
 		}
@@ -2097,10 +2105,24 @@ func verifyChecksWithPermit(ctx context.Context, configured []config.Check, dir 
 				return checked, err
 			}
 		}
-		out, err, report := runVerificationCheck(ctx, check, dir)
+		item, beginErr := beginNativeArtifacts(ctx, check, index, dir, artifacts)
+		if beginErr != nil {
+			release()
+			return checked, beginErr
+		}
+		artifactDir := ""
+		if item != nil {
+			artifactDir = item.staging
+			item.evidence = len(checked)
+			pending = append(pending, item)
+		}
+		out, err, report := runVerificationCheckWithArtifacts(ctx, check, dir, artifactDir)
 		release()
 		if err != nil {
 			return checked, &checkFailure{name: check.Name, command: filepath.Base(check.Command[0]), err: err, output: boundedFailureDiagnostic(safety.Redact(out)), check: check, report: report}
+		}
+		if finishErr := finishNativeArtifacts(ctx, item, dir, artifacts); finishErr != nil {
+			return checked, finishErr
 		}
 		checked = append(checked, passedCheckEvidence(check, out))
 	}
@@ -2114,17 +2136,33 @@ func verifyChecksWithPermit(ctx context.Context, configured []config.Check, dir 
 	if dirty != "" {
 		return checked, errors.New("verification modified source or created unignored files; evidence invalid")
 	}
+	for _, item := range pending {
+		receipt, sealErr := sealNativeArtifacts(item, artifacts)
+		if sealErr != nil {
+			return checked, fmt.Errorf("retain native check artifacts: %w", sealErr)
+		}
+		if receipt != "" {
+			if item.evidence < 0 || item.evidence >= len(checked) {
+				return checked, errors.New("native artifact receipt lost check binding")
+			}
+			checked[item.evidence] += " artifact=" + receipt
+		}
+	}
 	return checked, nil
 }
 
 func runVerificationCheck(ctx context.Context, check config.Check, dir string) (string, error, *nativeFailureReport) {
+	return runVerificationCheckWithArtifacts(ctx, check, dir, "")
+}
+
+func runVerificationCheckWithArtifacts(ctx context.Context, check config.Check, dir, artifacts string) (string, error, *nativeFailureReport) {
 	reportPath, cleanup, setupErr := nativeFailureReportPath(check)
 	if setupErr != nil {
 		return "", setupErr, nil
 	}
 	defer cleanup()
 	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(check.Timeout)*time.Second)
-	out, err := platform.Run(checkCtx, dir, nativeFailureEnvironment(cleanEnvironment(), reportPath), "", check.Command[0], check.Command[1:]...)
+	out, err := platform.Run(checkCtx, dir, nativeCheckEnvironment(cleanEnvironment(), reportPath, artifacts), "", check.Command[0], check.Command[1:]...)
 	cancel()
 	if err == nil || reportPath == "" {
 		return out, err, nil
@@ -2144,9 +2182,10 @@ func (c *Controller) checks(ctx context.Context, e config.Effective, dir, taskID
 	})
 }
 func (c *Controller) checksForPlan(ctx context.Context, dir, taskID string, plan validationPlan) ([]string, error) {
+	artifacts := &nativeArtifactContext{ExpectedHead: plan.ExpectedHead, Config: plan.ExpectedConfig, Rules: roles.Hash(), PlanInput: plan.Input, Toolchain: plan.Toolchain, Project: c.P.Config.Project.ID, Task: taskID, SealRoot: filepath.Join(c.P.Dir, "native-check-artifacts")}
 	return verifyChecksWithPermit(ctx, plan.Checks, dir, func(ctx context.Context, check config.Check) (func(), error) {
 		return c.checkPermit(ctx, taskID, check)
-	})
+	}, artifacts)
 }
 
 func reviewPromptTask(task *model.Task, paths []string) *model.Task {

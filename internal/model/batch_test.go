@@ -7,6 +7,17 @@ import (
 	"testing"
 )
 
+func TestBatchValidationAcceptsOnlyCompactNativeArtifactSuffix(t *testing.T) {
+	evidence := &Evidence{ValidationGate: "full", ValidationInput: strings.Repeat("a", 64), Toolchain: "go=hash", TestInputs: strings.Repeat("b", 40), Checks: []string{"stage=native check=\"tests\" command=\"go\" command_id=0123456789ab exit=0 pass_counts=\"none\" stdout=empty stdout_bytes=0 stdout_lines=0 artifact=receipt_0123456789abcdef.0123456789ab"}}
+	if !batchValidationAccepted(evidence) {
+		t.Fatal("valid compact receipt suffix rejected")
+	}
+	evidence.Checks[0] += " extra=untrusted"
+	if batchValidationAccepted(evidence) {
+		t.Fatal("unrecognized portable receipt data accepted")
+	}
+}
+
 func TestSelectIntegrationBatchStableBoundedOrder(t *testing.T) {
 	s := batchSnapshot()
 	for _, id := range []string{"charlie", "alpha", "bravo", "delta"} {

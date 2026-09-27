@@ -69,6 +69,10 @@ type Check struct {
 	// AIH_FAILURE_REPORT. A child report is never trusted on its own: native
 	// routing additionally requires the same report from a canonical-base run.
 	FailureReport bool `yaml:"failure_report,omitempty" json:"failure_report,omitempty"`
+	// Artifacts opts a check into the bounded native PNG receipt protocol. The
+	// child receives a fresh AIH_CHECK_ARTIFACTS directory for this invocation;
+	// only validated PNGs are retained outside the checkout.
+	Artifacts bool `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
 }
 
 // VisualCapture declares the project adapter command. AIH supplies ephemeral
