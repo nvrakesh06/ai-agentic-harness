@@ -2285,7 +2285,7 @@ func completedWaveBlocksOrigin(task *model.Task, paths []string, required []role
 // built-in QA role completed exact-head peer artifacts. Publishing after each
 // wave makes an interrupted QA retry resume only the missing role, not rerun
 // already-completed reviewers on unchanged source and policy inputs.
-func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Task, paths []string, dir, diff string, evidence *model.Evidence, attempt int, required []roles.Role) ([]reviewOutcome, error) {
+func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Task, paths []string, dir, diff string, plan validationPlan, nativeArtifacts nativeArtifactReviewInventory, evidence *model.Evidence, attempt int, required []roles.Role) ([]reviewOutcome, error) {
 	outcomes := make([]reviewOutcome, len(required))
 	promptTask := reviewPromptTask(task, paths)
 	waves := reviewWaves(required)
@@ -2295,6 +2295,7 @@ func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Ta
 			qaWave = qaWave || required[index].Name == "qa"
 		}
 		payload := reviewEvidencePayloadWithPeers(evidence, attempt, qaWave)
+		payload += nativeArtifactReviewPayload(plan, nativeArtifacts)
 		if evidence.Visual != nil {
 			payload += "\nVISUAL ARTIFACT ROOT (local, read-only): " + filepath.Join(c.P.Dir, filepath.FromSlash(filepath.Dir(evidence.Visual.Manifest))) + "\nInspect the screenshot and diagnostics listed in visual.artifacts. A capture artifact is evidence, not a visual pass.\n"
 		}
@@ -2530,6 +2531,15 @@ func (c *Controller) verifyReview(id string) error {
 		}
 	}
 	evidence := &model.Evidence{Base: t.BaseSHA, Head: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: checks, ValidationGate: plan.Gate, ValidationReason: plan.Reason, ValidationInput: plan.Input, Toolchain: plan.Toolchain, TestInputs: plan.TestInputs, Reviews: priorReviews, ReviewRoster: roster, ReviewRosterReason: rosterReason, ReviewScope: scope, ReviewDispositions: dispositions, At: time.Now().UTC()}
+	nativeArtifacts, nativeArtifactErr := c.reviewNativeArtifactInventory(plan, t, evidence)
+	if nativeArtifactErr != nil {
+		var readiness *NativeArtifactReadinessError
+		if errors.As(nativeArtifactErr, &readiness) {
+			c.nativeArtifactReadinessBlock(id, readiness)
+			return nil
+		}
+		return nativeArtifactErr
+	}
 	if e = c.mutate(func(s *model.Snapshot) error {
 		task := s.Tasks[id]
 		task.State = model.Review
@@ -2561,7 +2571,7 @@ func (c *Controller) verifyReview(id string) error {
 		return e
 	}
 	c.mirror(id)
-	outcomes, reviewErr := c.runReviewAttempt(effective, t, paths, dir, diff, evidence, 1, activeRequired)
+	outcomes, reviewErr := c.runReviewAttempt(effective, t, paths, dir, diff, plan, nativeArtifacts, evidence, 1, activeRequired)
 	if reviewErr != nil {
 		return reviewErr
 	}
@@ -2619,6 +2629,8 @@ func (c *Controller) verifyReview(id string) error {
 		acceptReviewDispositions(evidence, t, effective, activeRequired, outcomes)
 	}
 	if len(assessment.evidence) > 0 {
+		refreshPlan := plan
+		refreshArtifacts := nativeArtifacts
 		refreshRoles := make([]roles.Role, 0, len(assessment.evidence))
 		names := make([]string, 0, len(assessment.evidence))
 		visualRequested := false
@@ -2630,9 +2642,6 @@ func (c *Controller) verifyReview(id string) error {
 			sourceRequested = sourceRequested || sourceEvidenceRequest(outcomes[index].result)
 		}
 		_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_requested", "roles="+strings.Join(names, ",")+" head="+t.HeadSHA)
-		if visualRequested {
-			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_queued", "head="+t.HeadSHA+" workload="+visualCaptureWorkload(effective, t))
-		}
 		if !visualRequested || sourceRequested {
 			plan, planErr := fullValidationPlan(c.ctx, effective, dir, t.HeadSHA, "reviewer requested source evidence refresh")
 			if planErr != nil {
@@ -2646,8 +2655,19 @@ func (c *Controller) verifyReview(id string) error {
 			if e = applyValidationEvidence(evidence, plan, checks); e != nil {
 				return e
 			}
+			refreshPlan = plan
+			refreshArtifacts, nativeArtifactErr = c.reviewNativeArtifactInventory(refreshPlan, t, evidence)
+			if nativeArtifactErr != nil {
+				var readiness *NativeArtifactReadinessError
+				if errors.As(nativeArtifactErr, &readiness) {
+					c.nativeArtifactReadinessBlock(id, readiness)
+					return nil
+				}
+				return nativeArtifactErr
+			}
 		}
 		if visualRequested {
+			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_queued", "head="+t.HeadSHA+" workload="+visualCaptureWorkload(effective, t))
 			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_running", "head="+t.HeadSHA+" workload="+visualCaptureWorkload(effective, t))
 			visual, visualErr := c.captureVisual(c.ctx, effective, t, dir)
 			if visualErr != nil {
@@ -2669,7 +2689,7 @@ func (c *Controller) verifyReview(id string) error {
 		if e = c.publishReviewProgress(id, evidence); e != nil {
 			return e
 		}
-		refreshed, refreshErr := c.runReviewAttempt(effective, t, paths, dir, diff, evidence, 2, refreshRoles)
+		refreshed, refreshErr := c.runReviewAttempt(effective, t, paths, dir, diff, refreshPlan, refreshArtifacts, evidence, 2, refreshRoles)
 		if refreshErr != nil {
 			return refreshErr
 		}
