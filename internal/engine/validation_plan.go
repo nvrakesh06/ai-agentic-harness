@@ -274,6 +274,17 @@ func applyValidationEvidence(evidence *model.Evidence, plan validationPlan, chec
 		return errors.New("missing validation evidence")
 	}
 	evidence.Checks = checks
+	// The validation source is the plan's actual checkout. This is normally the
+	// task head, while integration and recovery may verify a candidate or later
+	// repaired main target. IntegrationSHA remains the separate publication
+	// provenance; consumers must bind validation evidence to ExpectedHead rather
+	// than guessing from Task.HeadSHA.
+	if plan.ExpectedHead != "" {
+		evidence.Head = plan.ExpectedHead
+	}
+	if plan.ExpectedConfig != "" {
+		evidence.Config = plan.ExpectedConfig
+	}
 	evidence.ValidationGate = plan.Gate
 	evidence.ValidationReason = plan.Reason
 	evidence.ValidationInput = plan.Input

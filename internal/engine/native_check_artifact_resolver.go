@@ -14,12 +14,12 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/nvrakesh06/ai-agentic-harness/internal/config"
 	"github.com/nvrakesh06/ai-agentic-harness/internal/model"
 )
 
 const (
 	maxNativeArtifactManifestBytes = 128 << 10
-	maxNativeArtifactReceiptDirs   = 1024
 )
 
 var (
@@ -56,7 +56,8 @@ func ResolveNativeArtifactInventory(project string, plan validationPlan, task *m
 	if strings.TrimSpace(project) == "" || !nativeArtifactReceiptReference.MatchString(receipt) {
 		return nil, fmt.Errorf("invalid native artifact receipt reference")
 	}
-	if err := nativeArtifactEvidenceBinding(plan, task, evidence, receipt); err != nil {
+	record, err := nativeArtifactEvidenceBinding(plan, task, evidence, receipt)
+	if err != nil {
 		return nil, err
 	}
 	dir, err := nativeArtifactReceiptDir(sealRoot, receipt)
@@ -70,6 +71,9 @@ func ResolveNativeArtifactInventory(project string, plan validationPlan, task *m
 	if err = nativeArtifactManifestBinding(manifest, project, plan, task, evidence, receipt); err != nil {
 		return nil, err
 	}
+	if !nativeArtifactRecordMatchesCheck(record, plan.Checks[manifest.Check]) {
+		return nil, errors.New("native artifact receipt is attached to a different check record")
+	}
 	images, err := nativeArtifactResolveImages(dir, manifest.Images)
 	if err != nil {
 		return nil, err
@@ -77,19 +81,24 @@ func ResolveNativeArtifactInventory(project string, plan validationPlan, task *m
 	return &NativeArtifactInventory{Receipt: receipt, Images: images}, nil
 }
 
-func nativeArtifactEvidenceBinding(plan validationPlan, task *model.Task, evidence *model.Evidence, receipt string) error {
-	if task == nil || task.ID == "" || evidence == nil || plan.ExpectedHead == "" || plan.ExpectedConfig == "" || plan.Input == "" || plan.Toolchain == "" || evidence.Config != plan.ExpectedConfig || evidence.Rules == "" || evidence.ValidationInput != plan.Input || evidence.Toolchain != plan.Toolchain {
-		return errors.New("native artifact receipt does not match current validation evidence")
+func nativeArtifactEvidenceBinding(plan validationPlan, task *model.Task, evidence *model.Evidence, receipt string) (string, error) {
+	if task == nil || task.ID == "" || evidence == nil || plan.ExpectedHead == "" || plan.ExpectedConfig == "" || plan.Input == "" || plan.Toolchain == "" || evidence.Head != plan.ExpectedHead || evidence.Config != plan.ExpectedConfig || evidence.Rules == "" || evidence.ValidationInput != plan.Input || evidence.Toolchain != plan.Toolchain {
+		return "", errors.New("native artifact receipt does not match current validation evidence")
 	}
 	for _, record := range evidence.Checks {
 		if strings.HasSuffix(record, " artifact="+receipt) {
 			if !model.ValidPassedNativeCheckRecord(record) {
-				return errors.New("native artifact reference is attached to an invalid check record")
+				return "", errors.New("native artifact reference is attached to an invalid check record")
 			}
-			return nil
+			return record, nil
 		}
 	}
-	return fmt.Errorf("%w: receipt is absent from current checks", ErrNativeArtifactUnavailable)
+	return "", fmt.Errorf("%w: receipt is absent from current checks", ErrNativeArtifactUnavailable)
+}
+
+func nativeArtifactRecordMatchesCheck(record string, check config.Check) bool {
+	prefix := fmt.Sprintf("stage=native check=%q command=%q command_id=%s exit=0 ", check.Name, filepath.Base(check.Command[0]), nativeCheckCommandID(check))
+	return strings.HasPrefix(record, prefix)
 }
 
 func nativeArtifactReceiptDir(sealRoot, receipt string) (string, error) {
@@ -104,32 +113,20 @@ func nativeArtifactReceiptDir(sealRoot, receipt string) (string, error) {
 		return "", fmt.Errorf("unsafe native artifact seal root: %w", err)
 	}
 	id, _, _ := strings.Cut(receipt, ".")
-	entries, err := os.ReadDir(absRoot)
-	if err != nil {
-		return "", fmt.Errorf("%w: cannot list seal root", ErrNativeArtifactUnavailable)
-	}
-	if len(entries) > maxNativeArtifactReceiptDirs {
-		return "", errors.New("native artifact seal root has too many receipt directories")
-	}
-	prefix := "receipt-" + id + "-"
-	var match string
-	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), prefix) {
-			continue
+	candidate := filepath.Join(absRoot, "receipt-"+id)
+	if err := nativeArtifactExistingSafeDir(candidate); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("%w: receipt directory is absent", ErrNativeArtifactUnavailable)
 		}
-		candidate := filepath.Join(absRoot, entry.Name())
-		if err := nativeArtifactExistingSafeDir(candidate); err != nil {
-			return "", fmt.Errorf("unsafe native artifact receipt directory: %w", err)
-		}
-		if match != "" {
-			return "", errors.New("native artifact receipt reference is ambiguous")
-		}
-		match = candidate
+		return "", fmt.Errorf("unsafe native artifact receipt directory: %w", err)
 	}
-	if match == "" {
+	if !nativeArtifactWithin(absRoot, candidate) {
+		return "", errors.New("native artifact receipt directory escapes seal root")
+	}
+	if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("%w: receipt directory is absent", ErrNativeArtifactUnavailable)
 	}
-	return match, nil
+	return candidate, nil
 }
 
 func nativeArtifactReadManifest(dir, receipt string) (nativeArtifactManifest, error) {
@@ -139,6 +136,9 @@ func nativeArtifactReadManifest(dir, receipt string) (nativeArtifactManifest, er
 		return manifest, err
 	}
 	info, err := os.Lstat(file)
+	if errors.Is(err, os.ErrNotExist) {
+		return manifest, fmt.Errorf("%w: manifest is absent", ErrNativeArtifactUnavailable)
+	}
 	if err != nil || nativeArtifactUnsafeInfo(info) {
 		return manifest, errors.New("native artifact manifest is not a safe regular file")
 	}
@@ -203,10 +203,19 @@ func nativeArtifactResolveImages(dir string, images []nativeArtifactImage) ([]Na
 		}
 		previous = image.Path
 		file := filepath.Join(dir, filepath.FromSlash(image.Path))
-		if !nativeArtifactWithin(dir, file) || nativeArtifactExistingSafeDir(filepath.Dir(file)) != nil {
+		if !nativeArtifactWithin(dir, file) {
+			return nil, errors.New("native artifact image path escapes receipt")
+		}
+		if err := nativeArtifactExistingSafeDir(filepath.Dir(file)); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("%w: image directory is absent", ErrNativeArtifactUnavailable)
+			}
 			return nil, errors.New("native artifact image path escapes receipt")
 		}
 		info, err := os.Lstat(file)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: image is absent", ErrNativeArtifactUnavailable)
+		}
 		if err != nil || nativeArtifactUnsafeInfo(info) {
 			return nil, errors.New("native artifact image is missing or unsafe")
 		}

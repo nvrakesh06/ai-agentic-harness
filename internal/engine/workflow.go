@@ -264,8 +264,12 @@ func passedCheckEvidence(check config.Check, output string) string {
 			lines++
 		}
 	}
-	commandID := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(check.Command, "\x00"))))[:12]
+	commandID := nativeCheckCommandID(check)
 	return fmt.Sprintf("stage=native check=%q command=%q command_id=%s exit=0 pass_counts=%q stdout=%s stdout_bytes=%d stdout_lines=%d", check.Name, filepath.Base(check.Command[0]), commandID, verificationPassCounts(output), state, len([]byte(output)), lines)
+}
+
+func nativeCheckCommandID(check config.Check) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(check.Command, "\x00"))))[:12]
 }
 
 type reviewOutcome struct {

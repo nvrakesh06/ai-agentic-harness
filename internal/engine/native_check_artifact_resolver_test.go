@@ -18,6 +18,10 @@ import (
 
 func TestResolveNativeArtifactInventoryReturnsOnlyValidatedLocalPaths(t *testing.T) {
 	fixture := newNativeArtifactResolverFixture(t)
+	id, _, _ := strings.Cut(fixture.receipt, ".")
+	if filepath.Base(fixture.receiptDir) != "receipt-"+id {
+		t.Fatalf("receipt directory is not deterministic: %q", fixture.receiptDir)
+	}
 	inventory, err := ResolveNativeArtifactInventory(fixture.project, fixture.plan, fixture.task, fixture.evidence, fixture.sealRoot, fixture.receipt)
 	if err != nil || inventory == nil || inventory.Receipt != fixture.receipt || len(inventory.Images) != 1 {
 		t.Fatalf("resolve inventory = %#v, %v", inventory, err)
@@ -61,6 +65,21 @@ func TestResolveNativeArtifactInventoryRejectsCausalManifestMismatches(t *testin
 				t.Fatalf("mismatched %s accepted: %#v, %v", test.name, inventory, err)
 			}
 		})
+	}
+}
+
+func TestResolveNativeArtifactInventoryBindsReceiptToItsConfiguredCheckAndEvidenceHead(t *testing.T) {
+	fixture := newNativeArtifactResolverFixture(t)
+	other := config.Check{Name: "other", Command: []string{"other"}, Artifacts: true}
+	fixture.evidence.Checks[0] = passedCheckEvidence(other, "") + " artifact=" + fixture.receipt
+	if _, err := ResolveNativeArtifactInventory(fixture.project, fixture.plan, fixture.task, fixture.evidence, fixture.sealRoot, fixture.receipt); err == nil {
+		t.Fatal("receipt attached to a different valid check record accepted")
+	}
+
+	fixture = newNativeArtifactResolverFixture(t)
+	fixture.evidence.Head = strings.Repeat("f", 40)
+	if _, err := ResolveNativeArtifactInventory(fixture.project, fixture.plan, fixture.task, fixture.evidence, fixture.sealRoot, fixture.receipt); err == nil {
+		t.Fatal("stale evidence head accepted")
 	}
 }
 
@@ -114,6 +133,26 @@ func TestResolveNativeArtifactInventoryRejectsLinksAndReportsMissingAttachment(t
 	if _, err := ResolveNativeArtifactInventory(fixture.project, fixture.plan, fixture.task, fixture.evidence, filepath.Join(fixture.sealRoot, "absent"), fixture.receipt); !errors.Is(err, ErrNativeArtifactUnavailable) {
 		t.Fatalf("missing attachment = %v, want unavailable", err)
 	}
+	fixture = newNativeArtifactResolverFixture(t)
+	if err := os.Chmod(filepath.Join(fixture.receiptDir, "manifest.json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(fixture.receiptDir, "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveNativeArtifactInventory(fixture.project, fixture.plan, fixture.task, fixture.evidence, fixture.sealRoot, fixture.receipt); !errors.Is(err, ErrNativeArtifactUnavailable) {
+		t.Fatalf("missing manifest = %v, want unavailable", err)
+	}
+	fixture = newNativeArtifactResolverFixture(t)
+	if err := os.Chmod(filepath.Join(fixture.receiptDir, "frame.png"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(fixture.receiptDir, "frame.png")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveNativeArtifactInventory(fixture.project, fixture.plan, fixture.task, fixture.evidence, fixture.sealRoot, fixture.receipt); !errors.Is(err, ErrNativeArtifactUnavailable) {
+		t.Fatalf("missing image = %v, want unavailable", err)
+	}
 }
 
 func TestResolveNativeArtifactInventoryReportsLegacyChecksUnavailable(t *testing.T) {
@@ -156,7 +195,7 @@ func newNativeArtifactResolverFixture(t *testing.T) *nativeArtifactResolverFixtu
 		t.Fatal(err)
 	}
 	plan := validationPlan{ExpectedHead: bind.ExpectedHead, ExpectedConfig: bind.Config, Input: bind.PlanInput, Toolchain: bind.Toolchain, Checks: []config.Check{check}}
-	evidence := &model.Evidence{Config: bind.Config, Rules: bind.Rules, ValidationInput: bind.PlanInput, Toolchain: bind.Toolchain, Checks: []string{passedCheckEvidence(check, "") + " artifact=" + receipt}}
+	evidence := &model.Evidence{Head: bind.ExpectedHead, Config: bind.Config, Rules: bind.Rules, ValidationInput: bind.PlanInput, Toolchain: bind.Toolchain, Checks: []string{passedCheckEvidence(check, "") + " artifact=" + receipt}}
 	return &nativeArtifactResolverFixture{project: bind.Project, sealRoot: bind.SealRoot, receipt: receipt, receiptDir: dir, plan: plan, task: &model.Task{ID: bind.Task}, evidence: evidence}
 }
 

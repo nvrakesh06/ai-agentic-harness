@@ -339,10 +339,9 @@ func sealNativeArtifacts(pending *nativeArtifactPending, bind *nativeArtifactCon
 	if err = nativeArtifactPrepareSealRoot(bind); err != nil {
 		return "", err
 	}
-	id := model.ID()
-	dir, err := os.MkdirTemp(bind.SealRoot, "receipt-"+id+"-")
+	id, dir, err := nativeArtifactReceiptDirectory(bind.SealRoot)
 	if err != nil {
-		return "", fmt.Errorf("allocate native artifact receipt: %w", err)
+		return "", err
 	}
 	remove := true
 	defer func() {
@@ -371,6 +370,29 @@ func sealNativeArtifacts(pending *nativeArtifactPending, bind *nativeArtifactCon
 	}
 	remove = false
 	return id + "." + hex.EncodeToString(hash[:]), nil
+}
+
+// nativeArtifactReceiptDirectory gives each opaque ID one deterministic
+// controller-owned directory. Mkdir is exclusive, so a collision retries
+// without an unbounded directory scan or a second random path suffix.
+func nativeArtifactReceiptDirectory(root string) (string, string, error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		id := model.ID()
+		dir := filepath.Join(root, "receipt-"+id)
+		err := os.Mkdir(dir, 0700)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", "", fmt.Errorf("allocate native artifact receipt: %w", err)
+		}
+		if err = nativeArtifactPathSafe(dir, true); err != nil {
+			_ = os.RemoveAll(dir)
+			return "", "", fmt.Errorf("allocate native artifact receipt: %w", err)
+		}
+		return id, dir, nil
+	}
+	return "", "", errors.New("native artifact receipt ID collision limit reached")
 }
 
 func writeNativeArtifact(path string, data []byte) error {
