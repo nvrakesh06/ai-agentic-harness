@@ -35,8 +35,11 @@ toolchain, or test inputs invalidate old evidence under the existing rules.
 
 For AIH delivery, `go run ./cmd/release --capacity-wait 30m` executes the complete
 discovered Go package/named-test inventory, then vet and all five cross-builds.
-Use the documented real-browser setup in `docs/RELEASES.md` so mandatory browser
-fixtures execute. Inventory alone proves planning, not passing execution. Validate
+For this Windows acceptance gate, set `AIH_REAL_PLAYWRIGHT=1` and provision the
+external Playwright capability described in `docs/DEVELOPMENT.md`. The runner then
+rejects skips of its two mandatory real-browser fixtures. These fixtures currently
+require Windows; a cross-build is not proof of browser execution on another host.
+Inventory alone proves planning, not passing execution. Validate
 terminal test/package events, required browser results, and final build artifacts.
 There is no need to rerun a separate identical full suite immediately before this
 complete release gate unless a failure, new source, or unresolved concern requires it.
