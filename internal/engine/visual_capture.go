@@ -46,6 +46,7 @@ const (
 	visualAggregateLimit = 64 << 20
 )
 const visualReadyPrefix = "AIH_VISUAL_READY "
+const visualCaptureSelectorVersion = "visual-capture-selector-v1"
 
 const (
 	visualSealVersion     = 3
@@ -796,15 +797,46 @@ func quarantineVisualCaptureAs(output, suffix string) error {
 	return os.Rename(output, quarantine)
 }
 
-// captureVisual executes only the canonical project's configured argv in a
+// visualCaptureEffective selects only from the durable task UI marker. The UI
+// profile receives a domain-separated cache/seal identity while ordinary task
+// evidence continues to use the canonical effective configuration hash.
+func visualCaptureEffective(e config.Effective, task *model.Task) (config.Effective, string, error) {
+	if task != nil && task.UI {
+		if e.Project.VisualCaptureUI == nil {
+			return config.Effective{}, "ui", &visualCaptureUnavailableError{errors.New("visual_capture_ui is required for UI task visual evidence")}
+		}
+		sum := sha256.Sum256([]byte(visualCaptureSelectorVersion + "\nui\n" + e.Hash))
+		e.Project.VisualCapture = e.Project.VisualCaptureUI
+		e.Hash = hex.EncodeToString(sum[:])
+		return e, "ui", nil
+	}
+	if e.Project.VisualCapture == nil {
+		return config.Effective{}, "default", &visualCaptureUnavailableError{errors.New("visual capture is not configured for this project")}
+	}
+	return e, "default", nil
+}
+
+func visualCaptureConfigured(e config.Effective, task *model.Task) bool {
+	_, _, err := visualCaptureEffective(e, task)
+	return err == nil
+}
+
+func visualCaptureWorkload(e config.Effective, task *model.Task) string {
+	_, workload, _ := visualCaptureEffective(e, task)
+	return workload
+}
+
+// captureVisual executes only the selected project's configured argv in a
 // fresh supervisor-owned detached checkout. The command owns browser startup
 // and loopback policy; AIH bounds its process lifetime and accepts only
 // validated local artifacts.
 func (c *Controller) captureVisual(ctx context.Context, e config.Effective, task *model.Task, dir string) (visual *model.VisualEvidence, retErr error) {
-	capture := e.Project.VisualCapture
-	if capture == nil {
-		return nil, &visualCaptureUnavailableError{errors.New("visual capture is not configured for this project")}
+	selected, _, selectionErr := visualCaptureEffective(e, task)
+	if selectionErr != nil {
+		return nil, selectionErr
 	}
+	e = selected
+	capture := e.Project.VisualCapture
 	targets := capture.CaptureTargets()
 	if !visualTaskID.MatchString(task.ID) || !visualRevision.MatchString(task.HeadSHA) || !visualHash.MatchString(e.Hash) {
 		return nil, &visualCaptureUnavailableError{errors.New("visual capture needs an exact task head and config hash")}
