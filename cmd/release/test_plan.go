@@ -178,33 +178,55 @@ func runCompleteReleaseTests(ctx context.Context) error {
 			}
 			return fmt.Errorf("release test group %d/%d identity changed; refusing receipt reuse", index+1, len(groups))
 		}
+		// A browser-sensitive group has no durable receipt, but an already
+		// validated completion belongs to this invocation's cursor. A fresh
+		// release invocation creates a new cursor and reruns it as before.
+		if boundary, ok := ctx.Value(releaseBoundaryKey{}).(releaseBoundary); ok && boundary.progress != nil && boundary.progress.completed[releaseGroupID(group)] {
+			fmt.Printf("release test group %d/%d: completed before cooperative handoff\n", index+1, len(groups))
+			continue
+		}
 		if releaseBrowserSensitive(group) {
 			fmt.Println("release test group browser/visual: rerunning; receipt reuse disabled")
 		} else if loadReleaseGroupReceipt(receipts, identity, group) {
 			fmt.Printf("release test group %d/%d: cached exact-identity receipt\n", index+1, len(groups))
+			if handoff, handoffErr := releaseBoundaryHandoff(ctx, releaseGroupID(group)); handoffErr != nil {
+				return fmt.Errorf("release test group %d/%d boundary: %w", index+1, len(groups), handoffErr)
+			} else if handoff {
+				return errReleaseYielded
+			}
 			continue
 		}
-		if err := runReleaseTestGroupCommand(ctx, "go", releaseGroupArgs(group), group.Tests, group.Packages); err != nil {
+		unit, cancelUnit := context.WithTimeout(ctx, releaseUnitWatchdog)
+		err := runReleaseTestGroupCommand(unit, "go", releaseGroupArgs(group), group.Tests, group.Packages)
+		cancelUnit()
+		if err != nil {
 			return fmt.Errorf("release test group %d/%d: %w", index+1, len(groups), err)
 		}
-		// An interrupted group reaches neither this line nor the receipt write.
-		if !releaseBrowserSensitive(group) {
-			current, identityErr = releaseReceiptIdentityFor(ctx, groups)
-			if identityErr != nil || current != identity {
-				if identityErr != nil {
-					if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {
-						return yielded
-					}
-					return fmt.Errorf("release test group %d/%d final identity: %w", index+1, len(groups), identityErr)
+		// An interrupted group reaches neither this line nor receipt handling.
+		// Browser groups do not persist receipts, but still prove exact identity
+		// before a cooperative handoff can expose the slot to product work.
+		current, identityErr = releaseReceiptIdentityFor(ctx, groups)
+		if identityErr != nil || current != identity {
+			if identityErr != nil {
+				if yielded := releaseYieldCancellation(ctx, identityErr); yielded != nil {
+					return yielded
 				}
-				return fmt.Errorf("release test group %d/%d changed source or runtime; refusing receipt", index+1, len(groups))
+				return fmt.Errorf("release test group %d/%d final identity: %w", index+1, len(groups), identityErr)
 			}
+			return fmt.Errorf("release test group %d/%d changed source or runtime; refusing receipt", index+1, len(groups))
+		}
+		if !releaseBrowserSensitive(group) {
 			if err := saveReleaseGroupReceipt(ctx, receipts, identity, group); err != nil {
 				if yielded := releaseYieldCancellation(ctx, err); yielded != nil {
 					return yielded
 				}
 				return fmt.Errorf("record release test group %d/%d: %w", index+1, len(groups), err)
 			}
+		}
+		if handoff, handoffErr := releaseBoundaryHandoff(ctx, releaseGroupID(group)); handoffErr != nil {
+			return fmt.Errorf("release test group %d/%d boundary: %w", index+1, len(groups), handoffErr)
+		} else if handoff {
+			return errReleaseYielded
 		}
 	}
 	current, identityErr := releaseReceiptIdentityFor(ctx, groups)
