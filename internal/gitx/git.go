@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -167,6 +168,81 @@ func (g Git) SHA(ctx context.Context, ref string) (string, error) {
 }
 func (g Git) Show(ctx context.Context, ref, name string) (string, error) {
 	return g.Run(ctx, "", "show", ref+":"+name)
+}
+
+const showManyChunk = 60
+const showManyFileLimit = 128 * 1024
+
+// ShowMany reads named blobs from one already-resolved commit with cat-file's
+// byte-counted batch protocol. It deliberately has no fallback to individual
+// reads: a missing or malformed object is canonical-policy uncertainty.
+func (g Git) ShowMany(ctx context.Context, ref string, names []string) (map[string]string, error) {
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(ref) {
+		return nil, errors.New("batch blob read requires an explicit commit SHA")
+	}
+	result := make(map[string]string, len(names))
+	unique := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == "" || strings.ContainsAny(name, "\x00\r\n") {
+			return nil, fmt.Errorf("invalid batch blob path %q", name)
+		}
+		if _, ok := result[name]; ok {
+			continue
+		}
+		result[name] = ""
+		unique = append(unique, name)
+	}
+	for start := 0; start < len(unique); start += showManyChunk {
+		end := min(start+showManyChunk, len(unique))
+		chunk := unique[start:end]
+		input := ""
+		for _, name := range chunk {
+			input += ref + ":" + name + "\n"
+		}
+		out, err := g.runRaw(ctx, input, "cat-file", "--batch")
+		if err != nil {
+			return nil, err
+		}
+		parsed, err := parseBatchBlobs(out, len(chunk))
+		if err != nil {
+			return nil, err
+		}
+		for i, value := range parsed {
+			result[chunk[i]] = strings.TrimRight(value, "\r\n")
+		}
+	}
+	return result, nil
+}
+
+func parseBatchBlobs(out string, count int) ([]string, error) {
+	values := make([]string, 0, count)
+	offset := 0
+	for len(values) < count {
+		nl := strings.IndexByte(out[offset:], '\n')
+		if nl < 0 {
+			return nil, errors.New("malformed batch blob header")
+		}
+		nl += offset
+		fields := strings.Fields(out[offset:nl])
+		if len(fields) != 3 || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(fields[0]) || fields[1] != "blob" {
+			return nil, errors.New("malformed batch blob header")
+		}
+		size, err := strconv.Atoi(fields[2])
+		if err != nil || size < 0 || size > showManyFileLimit {
+			return nil, errors.New("invalid batch blob size")
+		}
+		start := nl + 1
+		end := start + size
+		if end >= len(out) || out[end] != '\n' {
+			return nil, errors.New("truncated batch blob data")
+		}
+		values = append(values, out[start:end])
+		offset = end + 1
+	}
+	if offset != len(out) {
+		return nil, errors.New("batch blob output has trailing data")
+	}
+	return values, nil
 }
 func (g Git) Files(ctx context.Context, ref, prefix string) ([]string, error) {
 	args := []string{"ls-tree", "-r", "--name-only", ref}
