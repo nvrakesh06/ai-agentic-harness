@@ -2,8 +2,9 @@
 
 ## Intentional machine switch
 
-1. On A, run `aih handoff`. Scheduling stops; workers terminate; safe work is
-   checkpointed after writers exit; issues are mirrored; the lease is released.
+1. On A, run `aih handoff`. Scheduling stops; workers terminate; portable safe
+   work is checkpointed after writers exit; issues are mirrored; the lease is
+   released. Inspect the handoff logs for locally retained work before resuming.
 2. Do not discard A's workspace if handoff reports unpersisted work.
 3. Clone the configured application on B. Install/authenticate Git, gh and its
    selected provider independently. Run `aih attach`, inspect `aih status`, then
@@ -137,8 +138,13 @@ snapshot and Git branches are the recovery authority, not a recent issue comment
 
 An automatic rebase conflict is aborted, then main is prepared as a pending merge
 for the writer to resolve. The conflict base is portable, allowing reconstruction
-on another machine. Unresolved conflict markers cannot be checkpointed as complete
-work. Retry budgets and Advisor escalation prevent endless attempts.
+on another machine. A handoff preserves a readable unresolved conflict locally and
+releases its lease, but that conflict is not a portable checkpoint: retain the
+original worktree and inspect the supervisor logs before resuming. On a replacement
+machine, the durable task head plus conflict base recreate the raw conflict; they do
+not preserve uncommitted manual resolutions. Unresolved conflict markers cannot be
+checkpointed as complete work. Retry budgets and Advisor escalation prevent endless
+attempts.
 
 A pre-integration failure never changes main. A post-integration failure has already
 changed main: AIH sets a global integration hold, continues unrelated implementation,

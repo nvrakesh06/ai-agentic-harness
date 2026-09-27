@@ -11,6 +11,11 @@ import (
 	"strings"
 )
 
+// ErrPendingMergeUnresolved identifies a readable conflict marker in a pending
+// merge. It permits shutdown to preserve that local-only work without treating
+// it as a portable checkpoint. I/O and scope failures remain ordinary errors.
+var ErrPendingMergeUnresolved = errors.New("pending merge still has unresolved paths")
+
 // AreaKind is the immutable interpretation of one task area at its planning
 // base. It deliberately describes intent, rather than the current filesystem:
 // a tracked file remains exact even if a worker replaces it with a directory.
@@ -270,9 +275,12 @@ func (g Git) ValidatePendingMergeScope(ctx context.Context, worktree, base strin
 			return err
 		}
 		for _, path := range strings.Fields(unresolved) {
-			content, readErr := os.ReadFile(filepath.Join(worktree, path))
-			if readErr != nil || strings.Contains(string(content), "<<<<<<<") || strings.Contains(string(content), ">>>>>>>") {
-				return errors.New("pending merge still has unresolved paths")
+			marker, readErr := pendingMergePathHasMarker(worktree, path)
+			if readErr != nil {
+				return readErr
+			}
+			if marker {
+				return ErrPendingMergeUnresolved
 			}
 		}
 	}
@@ -288,6 +296,14 @@ func (g Git) ValidatePendingMergeScope(ctx context.Context, worktree, base strin
 		return err
 	}
 	return ValidateScopePaths(areas, splitGitPaths(paths))
+}
+
+func pendingMergePathHasMarker(worktree, path string) (bool, error) {
+	content, err := os.ReadFile(filepath.Join(worktree, path))
+	if err != nil {
+		return false, err
+	}
+	return strings.Contains(string(content), "<<<<<<<") || strings.Contains(string(content), ">>>>>>>"), nil
 }
 
 // ValidateCommitScope verifies an imported checkpoint against the immutable

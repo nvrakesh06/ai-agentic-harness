@@ -646,6 +646,10 @@ func (c *Controller) Serve(parent context.Context) error {
 			if t.State == model.Running || t.State == model.Ready || t.State == model.Fix {
 				if _, se := os.Stat(c.P.TaskPath(t)); se == nil {
 					if se = c.checkpoint(ctx, t.ID); se != nil {
+						if t.SyncBase != "" && errors.Is(se, gitx.ErrPendingMergeUnresolved) {
+							log.Printf("AIH preserving unresolved local merge for task %s; it is not a portable checkpoint; inspect logs and retain this worktree before resuming", t.ID)
+							continue
+						}
 						e = errors.Join(e, se)
 					}
 				}
@@ -695,7 +699,7 @@ func (c *Controller) Serve(parent context.Context) error {
 		_ = c.P.DB.Event("", "", "", "", "supervisor_stopped", safety.Redact(e.Error()))
 		return fmt.Errorf("stopped with potentially unpersisted work in %s: %w", filepath.Join(c.P.Dir, "worktrees"), e)
 	}
-	log.Printf("AIH supervisor stopped: checkpoints persisted and controller lease released")
+	log.Printf("AIH supervisor stopped: controller lease released; inspect logs for retained local work before resuming")
 	return nil
 }
 
