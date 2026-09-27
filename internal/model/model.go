@@ -18,7 +18,7 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 12
+const StateSchema = 13
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
@@ -27,6 +27,7 @@ const MaxGuidanceBytes = 1600
 const MaxScopeRecoveryReasonBytes = 1600
 const MaxScopeRecoveryRecords = 8
 const maxScopeRecoveryRecordBytes = 16 * 1024
+const MaxDependencyCycleRecoveryReceipts = 8
 
 // MaxVisualEvidenceArtifacts includes up to eight screenshots and one shared diagnostic log.
 const MaxVisualEvidenceArtifacts = 9
@@ -102,6 +103,25 @@ func scopeRecoveryRecordCount(t *Task) int {
 		}
 	}
 	return count
+}
+
+// DependencyCycleRecoveryReceipt is a supervisor-issued, typed receipt for one
+// narrowly audited dependency deletion. It lives in Snapshot rather than a
+// provider-authored task decision, so an answer cannot forge idempotence.
+type DependencyCycleRecoveryReceipt struct {
+	Operation              string `json:"operation"`
+	Digest                 string `json:"digest"`
+	OwnerID                string `json:"owner_id"`
+	DependencyID           string `json:"dependency_id"`
+	BeforeDependenciesHash string `json:"before_dependencies_hash"`
+	AfterDependenciesHash  string `json:"after_dependencies_hash"`
+	StateRef               string `json:"state_ref"`
+	MainSHA                string `json:"main_sha"`
+	PolicyHash             string `json:"policy_hash"`
+	RulesHash              string `json:"rules_hash"`
+	OwnerState             State  `json:"owner_state"`
+	OwnerBaseSHA           string `json:"owner_base_sha"`
+	OwnerHeadSHA           string `json:"owner_head_sha"`
 }
 
 type State string
@@ -688,10 +708,13 @@ type Snapshot struct {
 	// Always encode this initialized receipt ledger. Clone uses the portable JSON
 	// representation, so omitting an empty ledger would turn it into nil before
 	// the first accepted replan and lose the write-ready provenance invariant.
-	Replans            map[string]ReplanReceipt `json:"replan_receipts"`
-	Improvements       []string                 `json:"improvement_candidates,omitempty"`
-	IntegrationBlocked string                   `json:"integration_blocked,omitempty"`
-	IntegrationBatch   *IntegrationBatch        `json:"integration_batch,omitempty"`
+	Replans map[string]ReplanReceipt `json:"replan_receipts"`
+	// DependencyCycleRecoveryReceipts is a separate supervisor-owned operation
+	// ledger. It never derives authority from provider-authored task decisions.
+	DependencyCycleRecoveryReceipts map[string]DependencyCycleRecoveryReceipt `json:"dependency_cycle_recovery_receipts"`
+	Improvements                    []string                                  `json:"improvement_candidates,omitempty"`
+	IntegrationBlocked              string                                    `json:"integration_blocked,omitempty"`
+	IntegrationBatch                *IntegrationBatch                         `json:"integration_batch,omitempty"`
 }
 
 // IntegrationBatch is a portable reservation for the deliberately small first
@@ -744,7 +767,7 @@ type IntegrationBatchTask struct {
 
 func NewSnapshot(project string) *Snapshot {
 	return &Snapshot{Schema: StateSchema, CreatedBy: Version, Project: project,
-		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}, Replans: map[string]ReplanReceipt{}}
+		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}, Replans: map[string]ReplanReceipt{}, DependencyCycleRecoveryReceipts: map[string]DependencyCycleRecoveryReceipt{}}
 }
 
 const (
@@ -816,6 +839,15 @@ func ID() string {
 	}
 	return hex.EncodeToString(b[:])
 }
+func dependencyCycleRecoveryOwnerState(state State) bool {
+	switch state {
+	case Ready, Fix, SyncRequired, Blocked:
+		return true
+	default:
+		return false
+	}
+}
+
 func Clone(s *Snapshot) *Snapshot {
 	b, _ := json.Marshal(s)
 	var out Snapshot
@@ -920,6 +952,12 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			}
 		}
 	}
+	if s.Schema <= 12 {
+		// Schema 13 adds supervisor-owned dependency-cycle recovery receipts.
+		// Decisions are provider-authored history, so no historical marker can
+		// establish replay authority; initialize an empty ledger instead.
+		s.DependencyCycleRecoveryReceipts = map[string]DependencyCycleRecoveryReceipt{}
+	}
 	if migrated {
 		if s.Schema <= 10 {
 			// Earlier records have no transition clock or pinned run context.
@@ -955,6 +993,25 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 	}
 	if s.Replans == nil {
 		s.Replans = map[string]ReplanReceipt{}
+	}
+	if s.DependencyCycleRecoveryReceipts == nil {
+		s.DependencyCycleRecoveryReceipts = map[string]DependencyCycleRecoveryReceipt{}
+	}
+	if len(s.DependencyCycleRecoveryReceipts) > MaxDependencyCycleRecoveryReceipts {
+		return nil, false, errors.New("dependency cycle recovery receipt limit exceeded")
+	}
+	for id, receipt := range s.DependencyCycleRecoveryReceipts {
+		owner := s.Tasks[receipt.OwnerID]
+		if !stateIdentifierPattern.MatchString(id) || !s.Applied[id] || receipt.Operation != "dependency-cycle-recover" ||
+			!stateHashPattern.MatchString(receipt.Digest) || !stateIdentifierPattern.MatchString(receipt.OwnerID) ||
+			!stateIdentifierPattern.MatchString(receipt.DependencyID) || receipt.OwnerID == receipt.DependencyID ||
+			!stateHashPattern.MatchString(receipt.BeforeDependenciesHash) || !stateHashPattern.MatchString(receipt.AfterDependenciesHash) ||
+			!stateRevisionPattern.MatchString(receipt.StateRef) || !stateRevisionPattern.MatchString(receipt.MainSHA) ||
+			!stateHashPattern.MatchString(receipt.PolicyHash) || !stateHashPattern.MatchString(receipt.RulesHash) ||
+			!stateRevisionPattern.MatchString(receipt.OwnerBaseSHA) || !stateRevisionPattern.MatchString(receipt.OwnerHeadSHA) ||
+			!dependencyCycleRecoveryOwnerState(receipt.OwnerState) || owner == nil || s.Tasks[receipt.DependencyID] == nil {
+			return nil, false, errors.New("invalid dependency cycle recovery receipt")
+		}
 	}
 	for id, receipt := range s.Replans {
 		if !stateIdentifierPattern.MatchString(id) || !s.Applied[id] || !stateHashPattern.MatchString(receipt.Digest) || !stateIdentifierPattern.MatchString(receipt.ReplacementID) || s.Tasks[receipt.ReplacementID] == nil {

@@ -85,7 +85,7 @@ func TestVerificationCapacityRoundTripAndValidation(t *testing.T) {
 	}
 }
 
-func TestSnapshotClonePreservesEmptyReplanReceiptLedger(t *testing.T) {
+func TestSnapshotClonePreservesEmptyRecoveryReceiptLedgers(t *testing.T) {
 	s := NewSnapshot("project123")
 	b, err := json.Marshal(s)
 	if err != nil {
@@ -95,23 +95,41 @@ func TestSnapshotClonePreservesEmptyReplanReceiptLedger(t *testing.T) {
 	if err = json.Unmarshal(b, &encoded); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := encoded["replan_receipts"]; !ok || string(got) != "{}" {
-		t.Fatalf("empty replan receipt ledger was not durably encoded: %s", b)
+	for _, field := range []string{"replan_receipts", "dependency_cycle_recovery_receipts"} {
+		if got, ok := encoded[field]; !ok || string(got) != "{}" {
+			t.Fatalf("empty %s ledger was not durably encoded: %s", field, b)
+		}
 	}
 	cloned := Clone(s)
-	if cloned.Replans == nil {
-		t.Fatal("clone dropped the empty replan receipt ledger")
+	if cloned.Replans == nil || cloned.DependencyCycleRecoveryReceipts == nil {
+		t.Fatal("clone dropped an empty recovery receipt ledger")
 	}
-	delete(encoded, "replan_receipts") // Legacy snapshots remain recoverable.
+	delete(encoded, "replan_receipts")
+	delete(encoded, "dependency_cycle_recovery_receipts")
 	legacy, err := json.Marshal(encoded)
 	if err != nil {
 		t.Fatal(err)
 	}
 	recovered, _, err := Decode(legacy)
-	if err != nil || recovered.Replans == nil {
-		t.Fatalf("legacy receipt omission was not recovered: %#v %v", recovered, err)
+	if err != nil || recovered.Replans == nil || recovered.DependencyCycleRecoveryReceipts == nil {
+		t.Fatalf("receipt omission was not recovered: %#v %v", recovered, err)
 	}
 }
+
+func TestSchema12MigratesToEmptyDependencyCycleRecoveryLedger(t *testing.T) {
+	s := NewSnapshot("project123")
+	s.Schema = 12
+	s.DependencyCycleRecoveryReceipts = nil
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, changed, err := Decode(b)
+	if err != nil || !changed || migrated.Schema != StateSchema || migrated.DependencyCycleRecoveryReceipts == nil || len(migrated.DependencyCycleRecoveryReceipts) != 0 {
+		t.Fatalf("schema-12 cycle receipt migration = %#v, changed=%t, err=%v", migrated, changed, err)
+	}
+}
+
 func TestSchedulerDependenciesDomainsAndBlocked(t *testing.T) {
 	s := NewSnapshot("project123")
 	for _, id := range []string{"a", "b", "c", "d", "e", "f"} {

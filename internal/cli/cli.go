@@ -276,7 +276,43 @@ func New() *cobra.Command {
 	scope.AddCommand(recoverScope)
 	root.AddCommand(scope)
 	var replanFile string
+	var cycleRecoveryFile string
+	var cycleRecoveryPreview bool
 	task := &cobra.Command{Use: "task", Short: "Task lifecycle operations"}
+	cycleRecovery := &cobra.Command{Use: "dependency-cycle-recover", Short: "Remove one explicitly proven successor-aware dependency-cycle edge", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if cycleRecoveryFile == "" {
+			return errors.New("task dependency-cycle-recover requires --file")
+		}
+		input, err := os.Open(cycleRecoveryFile)
+		if err != nil {
+			return err
+		}
+		defer input.Close()
+		request, err := engine.DecodeDependencyCycleRecoveryRequest(input)
+		if err != nil {
+			return err
+		}
+		p, err := o.open(cmd.Context(), false)
+		if err != nil {
+			return err
+		}
+		defer p.DB.Close()
+		if cycleRecoveryPreview {
+			if err = engine.PreviewDependencyCycleRecovery(cmd.Context(), p, request); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Dependency cycle recovery request %s passed read-only validation; no lease or remote state was published.\n", request.CommandID)
+			return nil
+		}
+		if err = engine.RecoverDependencyCycle(cmd.Context(), p, request); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Applied dependency cycle recovery command %s; ordinary scheduler and verification policy remain unchanged.\n", request.CommandID)
+		return nil
+	}}
+	cycleRecovery.Flags().StringVar(&cycleRecoveryFile, "file", "", "schema-1 dependency cycle recovery JSON")
+	cycleRecovery.Flags().BoolVar(&cycleRecoveryPreview, "preview", false, "validate the request without taking a lease or publishing state")
+	task.AddCommand(cycleRecovery)
 	task.AddCommand(&cobra.Command{Use: "replan", Short: "Atomically supersede bounded idle tasks with one verified successor", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if replanFile == "" {
 			return errors.New("task replan requires --file")
