@@ -215,6 +215,11 @@ There is no HTTP API, management port, browser dashboard, Redis, or external que
 See [architecture](docs/ARCHITECTURE.md), [state layout](docs/STATE.md),
 [integration decision](docs/DECISIONS.md), and [custom roles](docs/ROLES.md).
 
+For a deliberately lower-durability, coordinator-led alternative that uses
+ordinary Git/GitHub without starting or modifying AIH state, see the
+[optional lightweight workflow](docs/LIGHTWEIGHT_WORKFLOW.md). It is not an AIH
+command and must not run concurrently with supervised mode for the same project.
+
 ## Security and limitations
 
 AIH intentionally executes powerful tools and repository-controlled checks as its
