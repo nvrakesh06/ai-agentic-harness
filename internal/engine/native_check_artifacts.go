@@ -160,6 +160,17 @@ func nativeArtifactPrepareSealRoot(bind *nativeArtifactContext) error {
 }
 
 func nativeArtifactEnsureSafeDir(path string) error {
+	return nativeArtifactWalkSafeDirs(path, true)
+}
+
+// nativeArtifactExistingSafeDir performs the same ancestor validation as the
+// writer path without creating anything. Local receipt resolution must never
+// turn an attach-loss or stale reference into a filesystem mutation.
+func nativeArtifactExistingSafeDir(path string) error {
+	return nativeArtifactWalkSafeDirs(path, false)
+}
+
+func nativeArtifactWalkSafeDirs(path string, create bool) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -183,6 +194,9 @@ func nativeArtifactEnsureSafeDir(path string) error {
 				return errors.New("native artifact directory is not a directory")
 			}
 		} else if errors.Is(statErr, os.ErrNotExist) {
+			if !create {
+				return statErr
+			}
 			if mkdirErr := os.Mkdir(current, 0700); mkdirErr != nil && !errors.Is(mkdirErr, os.ErrExist) {
 				return mkdirErr
 			}
@@ -471,25 +485,36 @@ func readNativePNG(path string, before os.FileInfo) ([]byte, int, int, error) {
 	if before.Size() < int64(len(nativePNGSignature)) || before.Size() > maxNativeArtifactImageBytes {
 		return nil, 0, 0, errors.New("file size exceeds PNG bounds")
 	}
-	f, err := os.Open(path)
+	data, err := readNativeArtifactBytes(path, before, maxNativeArtifactImageBytes)
 	if err != nil {
 		return nil, 0, 0, err
+	}
+	width, height, err := validateNativePNG(data)
+	return data, width, height, err
+}
+
+func readNativeArtifactBytes(path string, before os.FileInfo, limit int64) ([]byte, error) {
+	if before == nil || before.Size() < 1 || before.Size() > limit {
+		return nil, errors.New("file size exceeds bounds")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
 	defer f.Close()
 	opened, err := f.Stat()
 	if err != nil || nativeArtifactUnsafeInfo(opened) || !nativeArtifactOpenedSafe(f) || !os.SameFile(before, opened) || opened.Size() != before.Size() {
-		return nil, 0, 0, errors.New("file identity changed before inspection")
+		return nil, errors.New("file identity changed before inspection")
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxNativeArtifactImageBytes+1))
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, err
 	}
 	after, err := f.Stat()
 	if err != nil || nativeArtifactUnsafeInfo(after) || !nativeArtifactOpenedSafe(f) || !os.SameFile(opened, after) || after.Size() != int64(len(data)) {
-		return nil, 0, 0, errors.New("file identity changed during inspection")
+		return nil, errors.New("file identity changed during inspection")
 	}
-	width, height, err := validateNativePNG(data)
-	return data, width, height, err
+	return data, nil
 }
 
 func validateNativePNG(data []byte) (int, int, error) {
