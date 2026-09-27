@@ -296,13 +296,43 @@ func followupOwnerScope(source string) string {
 }
 
 func followupSourceFile(location string) string {
-	// Follow-up grouping historically case-folds and sorts source paths. Keep
-	// that durable key behavior separate from immutable task ownership, which
-	// must validate the reviewer's exact repository spelling.
-	sources := followupSourcePathsForGrouping(strings.ToLower(location))
+	// This legacy grouping key remains case-folded and sanitized. Immutable task
+	// ownership uses followupSourcePaths below instead.
+	location = strings.TrimSpace(strings.ToLower(location))
+	if location == "" {
+		return ""
+	}
+	var sources []string
+	for _, candidate := range strings.FieldsFunc(location, func(r rune) bool { return r == ';' || r == ',' || r == '\n' }) {
+		candidate = strings.Trim(strings.TrimSpace(candidate), "`\"' ")
+		if followupBareLine.MatchString(candidate) {
+			continue
+		}
+		candidate = strings.ReplaceAll(candidate, "\\", "/")
+		candidate = followupParenLine.ReplaceAllString(candidate, "")
+		candidate = followupHashLine.ReplaceAllString(candidate, "")
+		candidate = followupColonLine.ReplaceAllString(candidate, "")
+		candidate = strings.Trim(strings.TrimSpace(candidate), "`\"' ")
+		for strings.HasPrefix(candidate, "./") {
+			candidate = strings.TrimPrefix(candidate, "./")
+		}
+		if strings.ContainsAny(candidate, " \t") || (!strings.Contains(candidate, ".") && !followupSourcePrefix(candidate)) {
+			continue
+		}
+		candidate = strings.Map(func(r rune) rune {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '/' || r == '.' || r == '_' || r == '-' {
+				return r
+			}
+			return -1
+		}, candidate)
+		if candidate != "" {
+			sources = append(sources, candidate)
+		}
+	}
 	if len(sources) == 0 {
 		return ""
 	}
+	sort.Strings(sources)
 	return sources[0]
 }
 
@@ -310,16 +340,6 @@ func followupSourceFile(location string) string {
 // case. Ownership validates this set against case-sensitive immutable Git
 // areas, so one contained location cannot hide another unowned location.
 func followupSourcePaths(location string) []string {
-	return parsedFollowupSourcePaths(location, false)
-}
-
-// followupSourcePathsForGrouping retains the historical sanitizer used only
-// for durable public follow-up keys. It must never supply paths for ownership.
-func followupSourcePathsForGrouping(location string) []string {
-	return parsedFollowupSourcePaths(location, true)
-}
-
-func parsedFollowupSourcePaths(location string, legacySanitize bool) []string {
 	location = strings.TrimSpace(location)
 	if location == "" {
 		return nil
@@ -342,18 +362,19 @@ func parsedFollowupSourcePaths(location string, legacySanitize bool) []string {
 			candidate = strings.TrimPrefix(candidate, "./")
 		}
 		lower := strings.ToLower(candidate)
-		sourceLike := strings.Contains(candidate, ".") || strings.Contains(candidate, "/") || followupSourcePrefix(lower)
+		recognized := strings.Contains(candidate, ".") || followupSourcePrefix(lower)
+		sourceLike := recognized || strings.Contains(candidate, "/")
 		if strings.ContainsAny(candidate, " \t") {
 			// Reviewers sometimes put prose such as "current-head browser
 			// captures" in Location. Leave that non-source prose ungrouped, but
 			// fail ownership closed when a source-like path has unsupported
 			// whitespace instead of silently accepting a neighboring path.
-			if !legacySanitize && sourceLike {
+			if sourceLike {
 				return nil
 			}
 			continue
 		}
-		if !sourceLike {
+		if !recognized {
 			continue
 		}
 		sanitized := strings.Map(func(r rune) rune {
@@ -362,9 +383,7 @@ func parsedFollowupSourcePaths(location string, legacySanitize bool) []string {
 			}
 			return -1
 		}, candidate)
-		if legacySanitize {
-			candidate = sanitized
-		} else if sanitized != candidate {
+		if sanitized != candidate {
 			// Do not turn an unsupported filename character into a different
 			// owned path. Reject the whole location set so a contained neighbor
 			// cannot hide the unsupported path.

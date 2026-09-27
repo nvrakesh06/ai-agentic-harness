@@ -285,6 +285,9 @@ func TestFollowupSourceFileRetainsLegacyCaseFoldedGroupKey(t *testing.T) {
 	if want := []string{"src/studio/App.tsx", "src/studio/Other.tsx"}; !slices.Equal(paths, want) {
 		t.Fatalf("case-preserving ownership paths = %#v, want %#v", paths, want)
 	}
+	if got := followupSourceFile("assets/icons"); got != "" {
+		t.Fatalf("legacy grouping recognized extensionless assets path: %q", got)
+	}
 }
 
 type followupHub struct {
