@@ -116,7 +116,7 @@ visual_capture:
       - id: desktop
       - id: settings
 visual_capture_ui:
-  # Optional UI-only adapter. UI tasks fail closed when this profile is absent.
+  # Optional UI-only adapter selected only by the sibling durable-role policy.
   server: [node, scripts/aih-studio-visual-server.mjs]
   timeout_seconds: 90
   targets:
@@ -124,6 +124,9 @@ visual_capture_ui:
       path: /planner
       width: 1280
       height: 720
+visual_capture_ui_selector:
+  all_required_roles: [visual-quality]
+  none_of_roles: [animation-architecture]
 release_repo: nvrakesh06/ai-agentic-harness
 ```
 
@@ -185,14 +188,17 @@ mapping fails, so AIH never seals or caches a partial result. It verifies the
 worktree remains clean at the exact head before sealing hashes and gives the
 requesting reviewer one exact-head retry. Capture is evidence, never a visual pass.
 
-`visual_capture_ui` is an optional sibling profile with the same bounded adapter,
-target, closure, TLS, and artifact rules. AIH selects it only from durable task
-`UI: true`; it never infers a profile from paths, provider text, or environment.
-A UI task without this profile reports capture unavailable and does not fall back
-to `visual_capture`. UI captures use a domain-separated local provenance hash, so a
-default-profile seal cannot satisfy UI evidence; general review evidence remains
-bound to the canonical configuration hash. Enable this profile only after a real
-product scenario adapter is registered.
+`visual_capture_ui` requires the sibling `visual_capture_ui_selector`; neither is
+valid alone. The selector lists canonical registered role IDs in
+`all_required_roles` and `none_of_roles`. AIH selects the UI profile only when
+durable task `UI: true` and its exact persisted `Roles` contain every required ID
+and no excluded ID. It never infers roles from paths, provider text, or
+environment. A matching task without the UI profile fails closed; other UI tasks
+use declared `visual_capture`. UI captures bind the selector policy and version
+into their domain-separated local provenance hash, so a default-profile seal
+cannot satisfy UI evidence; general review evidence remains bound to the canonical
+configuration hash. Enable this profile only after a real product scenario adapter
+is registered.
 
 `input_closure` is an opt-in, fail-closed identity for history-only sync heads.
 AIH hashes the complete committed Git tree, the closure version, capture
