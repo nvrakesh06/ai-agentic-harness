@@ -2136,6 +2136,11 @@ func verifyChecksWithPermit(ctx context.Context, configured []config.Check, dir 
 	if dirty != "" {
 		return checked, errors.New("verification modified source or created unignored files; evidence invalid")
 	}
+	if len(pending) != 0 {
+		if identityErr := finalNativeArtifactIdentity(ctx, dir, artifacts, pending); identityErr != nil {
+			return checked, identityErr
+		}
+	}
 	for _, item := range pending {
 		receipt, sealErr := sealNativeArtifacts(item, artifacts)
 		if sealErr != nil {
@@ -2182,7 +2187,7 @@ func (c *Controller) checks(ctx context.Context, e config.Effective, dir, taskID
 	})
 }
 func (c *Controller) checksForPlan(ctx context.Context, dir, taskID string, plan validationPlan) ([]string, error) {
-	artifacts := &nativeArtifactContext{ExpectedHead: plan.ExpectedHead, Config: plan.ExpectedConfig, Rules: roles.Hash(), PlanInput: plan.Input, Toolchain: plan.Toolchain, Project: c.P.Config.Project.ID, Task: taskID, SealRoot: filepath.Join(c.P.Dir, "native-check-artifacts")}
+	artifacts := &nativeArtifactContext{ExpectedHead: plan.ExpectedHead, Config: plan.ExpectedConfig, Rules: roles.Hash(), PlanInput: plan.Input, Toolchain: plan.Toolchain, Project: c.P.Config.Project.ID, Task: taskID, StateRoot: c.P.Dir, SourceRoot: c.P.Root, SealRoot: filepath.Join(c.P.Dir, "native-check-artifacts")}
 	return verifyChecksWithPermit(ctx, plan.Checks, dir, func(ctx context.Context, check config.Check) (func(), error) {
 		return c.checkPermit(ctx, taskID, check)
 	}, artifacts)

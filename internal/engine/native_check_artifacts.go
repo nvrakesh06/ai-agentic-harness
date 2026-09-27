@@ -43,7 +43,10 @@ var nativePNGSignature = []byte{137, 80, 78, 71, 13, 10, 26, 10}
 type nativeArtifactContext struct {
 	ExpectedHead, Config, Rules string
 	PlanInput, Toolchain        string
-	Project, Task, SealRoot     string
+	Project, Task               string
+	// StateRoot is controller-owned and must resolve outside SourceRoot. Both
+	// staging and receipts stay beneath it rather than trusting TMP/TEMP.
+	StateRoot, SourceRoot, SealRoot string
 }
 
 type nativeArtifactPending struct {
@@ -88,15 +91,21 @@ type nativeArtifactManifest struct {
 	Images     []nativeArtifactImage `json:"images"`
 }
 
-func nativeArtifactStaging(check config.Check) (string, func(), error) {
+func nativeArtifactStaging(check config.Check, bind *nativeArtifactContext) (string, func(), error) {
 	if !check.Artifacts {
 		return "", func() {}, nil
 	}
-	dir, err := os.MkdirTemp("", "aih-check-artifacts-")
+	if err := nativeArtifactPrepareStateRoot(bind); err != nil {
+		return "", nil, err
+	}
+	dir, err := os.MkdirTemp(bind.StateRoot, "native-check-artifacts-")
 	if err != nil {
 		return "", nil, err
 	}
-	if err = os.Chmod(dir, 0700); err != nil {
+	if err = nativeArtifactPathSafe(dir, true); err == nil {
+		err = os.Chmod(dir, 0700)
+	}
+	if err != nil {
 		_ = os.RemoveAll(dir)
 		return "", nil, err
 	}
@@ -121,6 +130,83 @@ func nativeCheckEnvironment(base []string, report, artifacts string) []string {
 	return env
 }
 
+func nativeArtifactPrepareStateRoot(bind *nativeArtifactContext) error {
+	if bind == nil || bind.StateRoot == "" || bind.SourceRoot == "" {
+		return errors.New("native artifact state root is not bound")
+	}
+	if err := nativeArtifactEnsureSafeDir(bind.StateRoot); err != nil {
+		return fmt.Errorf("prepare native artifact state root: %w", err)
+	}
+	if err := nativeArtifactOutsideSource(bind.SourceRoot, bind.StateRoot); err != nil {
+		return err
+	}
+	return nil
+}
+
+func nativeArtifactPrepareSealRoot(bind *nativeArtifactContext) error {
+	if err := nativeArtifactPrepareStateRoot(bind); err != nil {
+		return err
+	}
+	if err := nativeArtifactEnsureSafeDir(bind.SealRoot); err != nil {
+		return fmt.Errorf("prepare native artifact seal root: %w", err)
+	}
+	if err := nativeArtifactOutsideSource(bind.SourceRoot, bind.SealRoot); err != nil {
+		return err
+	}
+	if !nativeArtifactWithin(bind.StateRoot, bind.SealRoot) {
+		return errors.New("native artifact seal root is outside controller state")
+	}
+	return os.Chmod(bind.SealRoot, 0700)
+}
+
+func nativeArtifactEnsureSafeDir(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(abs)
+	if err == nil {
+		if !info.IsDir() {
+			return errors.New("native artifact directory is not a directory")
+		}
+		return nativeArtifactPathSafe(abs, true)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	parent := filepath.Dir(abs)
+	if parent == abs {
+		return fmt.Errorf("native artifact directory root is unavailable: %s", abs)
+	}
+	if err = nativeArtifactEnsureSafeDir(parent); err != nil {
+		return err
+	}
+	if err = os.Mkdir(abs, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return nativeArtifactPathSafe(abs, true)
+}
+
+func nativeArtifactOutsideSource(source, candidate string) error {
+	sourceResolved, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		return fmt.Errorf("resolve source root for native artifacts: %w", err)
+	}
+	candidateResolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return fmt.Errorf("resolve native artifact root: %w", err)
+	}
+	if nativeArtifactWithin(sourceResolved, candidateResolved) {
+		return errors.New("native artifact directory must be outside the source checkout")
+	}
+	return nil
+}
+
+func nativeArtifactWithin(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
 func checkoutIdentity(ctx context.Context, dir string) (string, string, error) {
 	g := gitx.Git{Dir: dir}
 	head, err := g.SHA(ctx, "HEAD")
@@ -138,7 +224,7 @@ func beginNativeArtifacts(ctx context.Context, check config.Check, index int, di
 	if !check.Artifacts {
 		return nil, nil
 	}
-	if bind == nil || bind.ExpectedHead == "" || bind.Config == "" || bind.Rules == "" || bind.PlanInput == "" || bind.Toolchain == "" || bind.Project == "" || bind.Task == "" || bind.SealRoot == "" {
+	if bind == nil || bind.ExpectedHead == "" || bind.Config == "" || bind.Rules == "" || bind.PlanInput == "" || bind.Toolchain == "" || bind.Project == "" || bind.Task == "" || bind.StateRoot == "" || bind.SourceRoot == "" || bind.SealRoot == "" {
 		return nil, errors.New("native artifact check requires an exact validation-plan context")
 	}
 	head, tree, err := checkoutIdentity(ctx, dir)
@@ -148,7 +234,7 @@ func beginNativeArtifacts(ctx context.Context, check config.Check, index int, di
 	if head != bind.ExpectedHead {
 		return nil, errors.New("native artifact checkout HEAD differs from validation plan")
 	}
-	staging, cleanup, err := nativeArtifactStaging(check)
+	staging, cleanup, err := nativeArtifactStaging(check, bind)
 	if err != nil {
 		return nil, fmt.Errorf("allocate native artifact staging: %w", err)
 	}
@@ -171,6 +257,29 @@ func finishNativeArtifacts(ctx context.Context, pending *nativeArtifactPending, 
 	return nil
 }
 
+// finalNativeArtifactIdentity runs after every check and the ordinary source
+// cleanliness fence. A later non-artifact check therefore cannot invalidate a
+// receipt that an earlier opted-in check happened to finish successfully.
+func finalNativeArtifactIdentity(ctx context.Context, dir string, bind *nativeArtifactContext, pending []*nativeArtifactPending) error {
+	head, tree, err := checkoutIdentity(ctx, dir)
+	if err != nil {
+		return err
+	}
+	return nativeArtifactFinalIdentityMatches(bind, head, tree, pending)
+}
+
+func nativeArtifactFinalIdentityMatches(bind *nativeArtifactContext, head, tree string, pending []*nativeArtifactPending) error {
+	if bind == nil || head != bind.ExpectedHead {
+		return errors.New("native artifact checkout HEAD differs after verification")
+	}
+	for _, item := range pending {
+		if item == nil || item.afterHead != head || item.afterTree != tree {
+			return errors.New("native artifact checkout identity changed after check completion")
+		}
+	}
+	return nil
+}
+
 func nativeArtifactCheckDigest(check config.Check) string {
 	b, _ := json.Marshal(check)
 	sum := sha256.Sum256(b)
@@ -188,10 +297,7 @@ func sealNativeArtifacts(pending *nativeArtifactPending, bind *nativeArtifactCon
 	if len(images) == 0 {
 		return "", nil
 	}
-	if err = os.MkdirAll(bind.SealRoot, 0700); err != nil {
-		return "", fmt.Errorf("create native artifact seal root: %w", err)
-	}
-	if err = os.Chmod(bind.SealRoot, 0700); err != nil {
+	if err = nativeArtifactPrepareSealRoot(bind); err != nil {
 		return "", err
 	}
 	id := model.ID()
@@ -225,11 +331,11 @@ func sealNativeArtifacts(pending *nativeArtifactPending, bind *nativeArtifactCon
 		return "", err
 	}
 	remove = false
-	return id + "." + hex.EncodeToString(hash[:])[:12], nil
+	return id + "." + hex.EncodeToString(hash[:]), nil
 }
 
 func writeNativeArtifact(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := nativeArtifactEnsureSafeDir(filepath.Dir(path)); err != nil {
 		return err
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0400)
@@ -244,8 +350,14 @@ func writeNativeArtifact(path string, data []byte) error {
 }
 
 func sealNativeArtifactTree(root string) error {
+	if err := nativeArtifactPathSafe(root, true); err != nil {
+		return err
+	}
 	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err = nativeArtifactPathSafe(path, entry.IsDir()); err != nil {
 			return err
 		}
 		if entry.IsDir() {
@@ -256,6 +368,9 @@ func sealNativeArtifactTree(root string) error {
 }
 
 func importNativeArtifactImages(root string) ([]nativeArtifactImage, error) {
+	if err := nativeArtifactPathSafe(root, true); err != nil {
+		return nil, err
+	}
 	var images []nativeArtifactImage
 	entries, total := 0, int64(0)
 	err := filepath.WalkDir(root, func(file string, entry os.DirEntry, walkErr error) error {
@@ -265,6 +380,9 @@ func importNativeArtifactImages(root string) ([]nativeArtifactImage, error) {
 		entries++
 		if entries > maxNativeArtifactEntries {
 			return errors.New("native artifact directory has too many entries")
+		}
+		if err := nativeArtifactPathSafe(file, entry.IsDir()); err != nil {
+			return err
 		}
 		rel, err := filepath.Rel(root, file)
 		if err != nil {
@@ -282,9 +400,6 @@ func importNativeArtifactImages(root string) ([]nativeArtifactImage, error) {
 			return err
 		}
 		if info.IsDir() {
-			if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-				return errors.New("native artifact contains a link or reparse point")
-			}
 			return nil
 		}
 		if nativeArtifactUnsafeInfo(info) {
@@ -382,10 +497,11 @@ func validateNativePNG(data []byte) (int, int, error) {
 			if haveIHDR || chunks != 1 || length != 13 {
 				return 0, 0, errors.New("invalid PNG header")
 			}
-			width, height = int(binary.BigEndian.Uint32(body)), int(binary.BigEndian.Uint32(body[4:]))
-			if width < 1 || height < 1 || int64(width)*int64(height) > maxNativeArtifactPixels {
+			w, h := uint64(binary.BigEndian.Uint32(body)), uint64(binary.BigEndian.Uint32(body[4:]))
+			if w == 0 || h == 0 || w > uint64(maxNativeArtifactPixels) || h > uint64(maxNativeArtifactPixels)/w {
 				return 0, 0, errors.New("PNG dimensions exceed bounds")
 			}
+			width, height = int(w), int(h)
 			haveIHDR = true
 		case "IDAT":
 			if !haveIHDR {

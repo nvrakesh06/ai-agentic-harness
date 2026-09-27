@@ -1295,7 +1295,7 @@ func batchValidationAccepted(evidence *Evidence) bool {
 // Passed native checks are recorded by engine.passedCheckEvidence. Batch
 // admission parses that closed record shape rather than trusting arbitrary
 // strings that merely claim an exit result.
-var passedNativeCheckRecord = regexp.MustCompile(`^stage=native check="(?:[^"\\]|\\.)+" command="(?:[^"\\]|\\.)+" command_id=[a-f0-9]{12} exit=0 pass_counts="(?:[^"\\]|\\.)+" stdout=(captured|empty) stdout_bytes=(0|[1-9][0-9]*) stdout_lines=(0|[1-9][0-9]*)( artifact=[a-zA-Z0-9][a-zA-Z0-9_-]{15,95}\.[a-f0-9]{12})?$`)
+var passedNativeCheckRecord = regexp.MustCompile(`^stage=native check="(?:[^"\\]|\\.)+" command="(?:[^"\\]|\\.)+" command_id=[a-f0-9]{12} exit=0 pass_counts="(?:[^"\\]|\\.)+" stdout=(captured|empty) stdout_bytes=(0|[1-9][0-9]*) stdout_lines=(0|[1-9][0-9]*)( artifact=[a-zA-Z0-9][a-zA-Z0-9_-]{15,95}\.[a-f0-9]{64})?$`)
 
 func completedDependencies(s *Snapshot, task *Task) bool {
 	for _, id := range task.Dependencies {

@@ -16,3 +16,14 @@ func nativeArtifactUnsafeInfo(info os.FileInfo) bool {
 }
 
 func nativeArtifactOpenedSafe(f *os.File) bool { return f != nil }
+
+func nativeArtifactPathSafe(path string, directory bool) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeIrregular != 0 || (directory && !info.IsDir()) || (!directory && !info.Mode().IsRegular()) {
+		return os.ErrPermission
+	}
+	return nil
+}
