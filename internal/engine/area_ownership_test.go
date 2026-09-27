@@ -45,6 +45,7 @@ func TestFindingScopeRequiresExactCaseAndEveryRecognizedPath(t *testing.T) {
 		"mixed contained and outside":     "src/studio/App.tsx:450, src/studio/Other.tsx:492",
 		"mixed contained and punctuation": "src/studio/App.tsx:450, src/studio/App!.tsx:492",
 		"mixed contained and whitespace":  "src/studio/App.tsx:450, src/studio/Other File.tsx:492",
+		"mixed contained and slash path":  "src/studio/App.tsx:450, assets/icons",
 		"no recognizable source":          "current-head visual evidence",
 	} {
 		t.Run(name, func(t *testing.T) {

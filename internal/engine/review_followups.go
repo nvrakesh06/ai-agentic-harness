@@ -374,7 +374,7 @@ func followupSourcePaths(location string) []string {
 			}
 			continue
 		}
-		if !recognized {
+		if !sourceLike {
 			continue
 		}
 		sanitized := strings.Map(func(r rune) rune {
