@@ -177,7 +177,7 @@ const showManyFileLimit = 128 * 1024
 // byte-counted batch protocol. It deliberately has no fallback to individual
 // reads: a missing or malformed object is canonical-policy uncertainty.
 func (g Git) ShowMany(ctx context.Context, ref string, names []string) (map[string]string, error) {
-	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(ref) {
+	if !shaPattern.MatchString(ref) {
 		return nil, errors.New("batch blob read requires an explicit commit SHA")
 	}
 	result := make(map[string]string, len(names))
@@ -205,7 +205,11 @@ func (g Git) ShowMany(ctx context.Context, ref string, names []string) (map[stri
 		}
 		parsed, err := parseBatchBlobs(out, len(chunk))
 		if err != nil {
-			return nil, err
+			index := len(parsed)
+			if index >= len(chunk) {
+				index = len(chunk) - 1
+			}
+			return nil, fmt.Errorf("batch blob %q: %w", chunk[index], err)
 		}
 		for i, value := range parsed {
 			result[chunk[i]] = strings.TrimRight(value, "\r\n")
@@ -220,27 +224,32 @@ func parseBatchBlobs(out string, count int) ([]string, error) {
 	for len(values) < count {
 		nl := strings.IndexByte(out[offset:], '\n')
 		if nl < 0 {
-			return nil, errors.New("malformed batch blob header")
+			return values, errors.New("malformed batch blob header")
 		}
 		nl += offset
 		fields := strings.Fields(out[offset:nl])
-		if len(fields) != 3 || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(fields[0]) || fields[1] != "blob" {
-			return nil, errors.New("malformed batch blob header")
+		if len(fields) != 3 || !shaPattern.MatchString(fields[0]) || fields[1] != "blob" {
+			return values, errors.New("malformed batch blob header")
 		}
 		size, err := strconv.Atoi(fields[2])
-		if err != nil || size < 0 || size > showManyFileLimit {
-			return nil, errors.New("invalid batch blob size")
+		if err != nil || size < 0 {
+			return values, errors.New("invalid batch blob size")
 		}
 		start := nl + 1
+		// Validate against the captured bytes before addition. platform.Run bounds
+		// successful stdout, so this also rejects output truncated at that boundary.
+		if size > len(out)-start-1 {
+			return values, errors.New("truncated batch blob data")
+		}
 		end := start + size
-		if end >= len(out) || out[end] != '\n' {
-			return nil, errors.New("truncated batch blob data")
+		if out[end] != '\n' {
+			return values, errors.New("truncated batch blob data")
 		}
 		values = append(values, out[start:end])
 		offset = end + 1
 	}
 	if offset != len(out) {
-		return nil, errors.New("batch blob output has trailing data")
+		return values, errors.New("batch blob output has trailing data")
 	}
 	return values, nil
 }
