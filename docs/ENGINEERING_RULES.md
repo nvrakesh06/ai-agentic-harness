@@ -14,10 +14,19 @@ invariants and conventions. Nested instructions apply by task area/changed path.
 Universal rules are not copied into each repository. Canonical main, not a stale
 task worktree, supplies current instruction content.
 
-The authority boundary is explicit: models advise/implement; the supervisor owns
-commits, pushes, issues, checkpoints, retries, checks and integration. Production,
-credential, billing, destructive and consequential ambiguous decisions become
-task-local human blockers. These rules are not a substitute for OS isolation.
+The authority boundary is explicit in supervised mode: models advise/implement;
+the supervisor owns commits, pushes, issues, checkpoints, retries, checks and
+integration. Production, credential, billing, destructive and consequential
+ambiguous decisions become task-local human blockers. These rules are not a
+substitute for OS isolation.
+
+The optional [lightweight coordinator workflow](LIGHTWEIGHT_WORKFLOW.md) has a
+different, explicit owner: the coordinator performs ordinary Git/GitHub
+publication and serial integration after required checks and fresh-main
+interaction review. It is not a bypass or degraded AIH supervisor: it must not
+write `aih-state`, local SQLite, leases, or receipts, and it cannot claim their
+fenced recovery semantics. A project chooses one active mode; legacy state stays
+frozen history until a separate supported adoption action, never a SQL edit.
 
 Run metadata records the rule hash and runtime version. Required verification
 evidence records both the rules and canonical configuration hash, invalidating

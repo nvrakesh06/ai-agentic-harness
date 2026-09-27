@@ -18,6 +18,14 @@ The end-to-end suite performs many real Git operations and can take minutes,
 especially with Windows antivirus. Do not replace its durability assertions with
 only in-memory mocks. `internal/platform` tests exercise timeout and parent-death
 cleanup. On Linux with GCC, also run `go test -race ./... -timeout 10m`.
+
+For a documentation-only change, validate relative links, command examples, and
+the final diff (including `git diff --check`); binary acceptance and deployment
+validation are not required. This exception ends when a change affects executable
+or runtime behavior: retain the full `go test ./...`, `go vet ./...`, and release
+cross-build gate. The optional coordinator-led process is documented in
+[LIGHTWEIGHT_WORKFLOW.md](LIGHTWEIGHT_WORKFLOW.md); it adds no runtime command or
+state schema.
 The release command serializes package workers and holds one shared AIH machine
 heavy-check slot, visibly waiting for a consumer project's native check for up to
 two minutes before reporting resource contention. On a loaded/constrained machine,

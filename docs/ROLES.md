@@ -6,6 +6,15 @@ Designer is required for UI tasks; common UI extensions also trigger it. Securit
 is triggered by high risk, explicit flags, or sensitive changed paths. Path
 heuristics are conservative aids, not complete semantic detection.
 
+Those are supervised-mode roles and requirements. The optional
+[lightweight coordinator workflow](LIGHTWEIGHT_WORKFLOW.md) does not emulate
+them with a role ceremony: it assigns one implementer per worktree and a distinct
+read-only review session, then applies QA, security, visual, animation, and
+architecture review when repository rules or actual risk require it. Lightweight
+reviews are tied to the actual commit, diff, and command evidence, and cover
+introduced defects plus consequential relevant inherited blockers. It never writes
+AIH state or claims supervised recovery/fencing guarantees.
+
 UI tasks receive pre-implementation design guidance and post-implementation design
 review. Visual checks should be configured in the application; lack of screenshots
 or runnable UI evidence must not be reported as a visual pass. Advisor is reserved
