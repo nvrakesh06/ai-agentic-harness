@@ -45,11 +45,12 @@ type ReplanExpected struct {
 	StateRef string `json:"state_ref"`
 }
 type ReplanOriginal struct {
-	TaskID                    string      `json:"task_id"`
-	State                     model.State `json:"state"`
-	HeadSHA                   string      `json:"head_sha"`
-	ExpectedBaseSHA           string      `json:"expected_base_sha,omitempty"`
-	ReauthorizeUnstartedAreas []string    `json:"reauthorize_unstarted_areas,omitempty"`
+	TaskID                           string      `json:"task_id"`
+	State                            model.State `json:"state"`
+	HeadSHA                          string      `json:"head_sha"`
+	ExpectedBaseSHA                  string      `json:"expected_base_sha,omitempty"`
+	ReauthorizeUnstartedAreas        []string    `json:"reauthorize_unstarted_areas,omitempty"`
+	ReauthorizeUnstartedDroppedAreas []string    `json:"reauthorize_unstarted_dropped_areas,omitempty"`
 }
 type ReplanSource struct {
 	TaskID  string `json:"task_id"`
@@ -104,7 +105,7 @@ func validateReplanRequest(r ReplanRequest) error {
 		if !replanID.MatchString(old.TaskID) || (old.HeadSHA != "" && !replanSHA.MatchString(old.HeadSHA)) || (old.ExpectedBaseSHA != "" && (!replanSHA.MatchString(old.ExpectedBaseSHA) || old.HeadSHA != "")) {
 			return errors.New("invalid or duplicate original task")
 		}
-		if len(old.ReauthorizeUnstartedAreas) > 0 && (!r.Replacement.ReplaceContract || old.HeadSHA != "" || old.ExpectedBaseSHA == "" || len(old.ReauthorizeUnstartedAreas) > 32 || !sameReplanAreas(old.ReauthorizeUnstartedAreas, r.Replacement.Areas)) {
+		if (len(old.ReauthorizeUnstartedAreas) == 0) != (len(old.ReauthorizeUnstartedDroppedAreas) == 0) || len(old.ReauthorizeUnstartedAreas) > 0 && (!r.Replacement.ReplaceContract || old.HeadSHA != "" || old.ExpectedBaseSHA == "" || len(old.ReauthorizeUnstartedAreas) > 32 || len(old.ReauthorizeUnstartedDroppedAreas) > 32 || !sameReplanAreas(old.ReauthorizeUnstartedAreas, r.Replacement.Areas) || !validExplicitReplanAreas(old.ReauthorizeUnstartedDroppedAreas)) {
 			return errors.New("invalid unstarted area reauthorization")
 		}
 		if len(uniqueStrings(old.ReauthorizeUnstartedAreas)) != len(old.ReauthorizeUnstartedAreas) {
@@ -134,6 +135,17 @@ func validateReplanRequest(r ReplanRequest) error {
 		return errors.New("invalid candidate head")
 	}
 	return nil
+}
+
+func validExplicitReplanAreas(areas []string) bool {
+	seen := map[string]bool{}
+	for _, area := range areas {
+		if area == "" || strings.TrimSpace(area) != area || seen[area] {
+			return false
+		}
+		seen[area] = true
+	}
+	return true
 }
 
 func sameReplanAreas(left, right []string) bool {
@@ -274,16 +286,25 @@ func replanReauthorizedDrops(ctx context.Context, g gitx.Git, base string, s *mo
 		if !ok {
 			return nil, fmt.Errorf("original task %s has no immutable areas", original.TaskID)
 		}
+		known := map[string]bool{}
 		for _, area := range areas {
-			if err := g.ValidateNewPlanAreasAtRef(ctx, base, []string{area}); err != nil {
-				if drops[t.ID] == nil {
-					drops[t.ID] = map[string]bool{}
-				}
-				drops[t.ID][area] = true
-			}
+			known[area] = true
 		}
-		if len(drops[t.ID]) == 0 {
-			return nil, fmt.Errorf("original task %s has no malformed literal area to reauthorize", original.TaskID)
+		for _, area := range original.ReauthorizeUnstartedDroppedAreas {
+			if !known[area] {
+				return nil, fmt.Errorf("reauthorized drop %q is not an immutable area of %s", area, original.TaskID)
+			}
+			eligible, proofErr := g.ReauthorizationDropEligibleAtRefs(ctx, original.ExpectedBaseSHA, base, area)
+			if proofErr != nil {
+				return nil, fmt.Errorf("prove reauthorized drop %q for %s: %w", area, original.TaskID, proofErr)
+			}
+			if !eligible {
+				return nil, fmt.Errorf("reauthorized drop %q for %s remains a tracked literal area", area, original.TaskID)
+			}
+			if drops[t.ID] == nil {
+				drops[t.ID] = map[string]bool{}
+			}
+			drops[t.ID][area] = true
 		}
 	}
 	return drops, nil
