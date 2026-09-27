@@ -60,6 +60,9 @@ func TestRepairFirstRecoveryFailsClosedForUnprovenOrUnsafeFindings(t *testing.T)
 		{"changed reviewed head", func(task *model.Task, _ *model.Finding) {
 			task.ReviewFindingProvenance[0].Head = strings.Repeat("e", 40)
 		}},
+		{"foreign receipt owner", func(task *model.Task, _ *model.Finding) {
+			task.ReviewFindingProvenance[0].SourceTask = "other-owner"
+		}},
 		{"changed task head", func(task *model.Task, _ *model.Finding) {
 			task.HeadSHA = strings.Repeat("e", 40)
 		}},
