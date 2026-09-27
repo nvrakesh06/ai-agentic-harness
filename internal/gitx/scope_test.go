@@ -97,6 +97,53 @@ func TestClassifyAreasAtRefRejectsAmbiguousPatterns(t *testing.T) {
 	}
 }
 
+func TestValidateNewPlanAreasAtRefRejectsPlannerProseButPreservesLiteralNames(t *testing.T) {
+	ctx := context.Background()
+	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.P.DB.Close()
+	g := gitx.Git{Dir: f.Source}
+	for _, name := range []string{"literal (new)", "known and literal.md"} {
+		if err := os.WriteFile(filepath.Join(f.Source, name), []byte("fixture\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := g.Run(ctx, "", "add", "--all"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Run(ctx, "", "commit", "-m", "add literal planner-area fixtures"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, areas := range [][]string{
+		{"src/studio/Planner.tsx (new)"},
+		{"src/demo-capture/adapter.ts (comments only)"},
+		{"tests/studio-project-service.test.ts and focused direction-service tests"},
+		{"docs/reference/ and accompanying notes"},
+		{"docs/why and docs/how.md"},
+		{"src/Planner.tsx (new), tests/studio-project-service.test.ts"},
+	} {
+		if err := g.ValidateNewPlanAreasAtRef(ctx, "HEAD", areas); err == nil {
+			t.Fatalf("planner prose %q was accepted", areas)
+		}
+	}
+	for _, areas := range [][]string{
+		{"README.md"},
+		{"future feature (draft).md"},
+		{"future-file.ts"},
+		{"docs/why and how.md"},
+		{"src/rock and roll.ts"},
+		{"literal (new)"},
+		{"known and literal.md"},
+	} {
+		if err := g.ValidateNewPlanAreasAtRef(ctx, "HEAD", areas); err != nil {
+			t.Fatalf("literal areas %q rejected: %v", areas, err)
+		}
+	}
+}
+
 func TestValidateCheckpointScopeIncludesUntrackedAndRenameSides(t *testing.T) {
 	ctx := context.Background()
 	f, err := demo.New(ctx, t.TempDir(), []string{"git", "diff", "--exit-code"})

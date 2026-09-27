@@ -132,8 +132,9 @@ func passedCheckEvidence(check config.Check, output string) string {
 }
 
 type reviewOutcome struct {
-	result provider.Result
-	err    error
+	result   provider.Result
+	err      error
+	deferred bool
 }
 
 type reviewAssessment struct {
@@ -252,6 +253,13 @@ func assessReviews(required []roles.Role, outcomes []reviewOutcome, blockers ...
 		}
 	}
 	for i, role := range required {
+		if outcomes[i].deferred && assessment.blocking >= 0 {
+			// A later wave was deliberately not started after a completed peer
+			// established a concrete origin blocker. It is neither a pass nor a
+			// durable provider status; verifyReview will route the FIX before
+			// considering any missing roster disposition.
+			continue
+		}
 		if outcomes[i].err != nil {
 			continue
 		}
@@ -836,17 +844,6 @@ func (c *Controller) plan(id string) {
 		}
 		return
 	}
-	if o.Issue == 0 {
-		issue, e := c.P.Hub.EnsureIssue(c.ctx, id, "AIH: "+short(o.Text, 100), o.Text)
-		if e != nil {
-			c.planFailure(id, e)
-			return
-		}
-		if e = c.mutate(func(s *model.Snapshot) error { s.Objectives[id].Issue = issue; return nil }); e != nil {
-			return
-		}
-		o = c.Snapshot().Objectives[id]
-	}
 	effective, e := c.effective(c.ctx)
 	if e != nil {
 		c.planFailure(id, e)
@@ -884,6 +881,12 @@ func (c *Controller) plan(id string) {
 		c.planFailure(id, e)
 		return
 	}
+	for _, p := range r.Plan {
+		if validateErr := c.P.Git.ValidateNewPlanAreasAtRef(c.ctx, effective.BaseSHA, p.Areas); validateErr != nil {
+			c.planFailure(id, fmt.Errorf("validate planned areas for %s: %w", p.Key, validateErr))
+			return
+		}
+	}
 	all, e := roles.Load(effective.Files)
 	if e != nil {
 		c.planFailure(id, e)
@@ -905,6 +908,16 @@ func (c *Controller) plan(id string) {
 			return
 		}
 		plannedAreas[p.Key] = classified
+	}
+	if o.Issue == 0 {
+		issue, issueErr := c.P.Hub.EnsureIssue(c.ctx, id, "AIH: "+short(o.Text, 100), o.Text)
+		if issueErr != nil {
+			c.planFailure(id, issueErr)
+			return
+		}
+		if e = c.mutate(func(s *model.Snapshot) error { s.Objectives[id].Issue = issue; return nil }); e != nil {
+			return
+		}
 	}
 	e = c.mutate(func(s *model.Snapshot) error {
 		for _, p := range r.Plan {
@@ -2029,6 +2042,31 @@ func reviewWaves(required []roles.Role) [][]int {
 	return waves
 }
 
+// completedWaveBlocksOrigin is the narrow throughput guard between review
+// waves. It only stops roles which have not started when a completed peer has
+// supplied a retained, change-attributed blocker for this task. The later role
+// receives no synthetic provider result and must run on the repaired head.
+func completedWaveBlocksOrigin(task *model.Task, paths []string, required []roles.Role, outcomes []reviewOutcome, indexes []int) bool {
+	blocksOrigin := reviewFindingBlocksOrigin(task, paths, required)
+	for _, index := range indexes {
+		outcome := outcomes[index]
+		if outcome.err != nil || outcome.result.Status != "completed" {
+			continue
+		}
+		for _, finding := range outcome.result.Findings {
+			if supervisorEvidenceOnlyFinding(outcome.result, finding) {
+				continue
+			}
+			finding.Role = required[index].Name
+			finding = normalizedReviewFinding(finding)
+			if (finding.Relevance == model.FindingChanged || finding.Relevance == model.FindingCausal) && blocksOrigin(finding) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // runReviewAttempt keeps independent reviewers concurrent, then gives the
 // built-in QA role completed exact-head peer artifacts. Publishing after each
 // wave makes an interrupted QA retry resume only the missing role, not rerun
@@ -2036,7 +2074,8 @@ func reviewWaves(required []roles.Role) [][]int {
 func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Task, paths []string, dir, diff string, evidence *model.Evidence, attempt int, required []roles.Role) ([]reviewOutcome, error) {
 	outcomes := make([]reviewOutcome, len(required))
 	promptTask := reviewPromptTask(task, paths)
-	for _, indexes := range reviewWaves(required) {
+	waves := reviewWaves(required)
+	for wave, indexes := range waves {
 		qaWave := false
 		for _, index := range indexes {
 			qaWave = qaWave || required[index].Name == "qa"
@@ -2069,6 +2108,14 @@ func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Ta
 		}
 		if err := c.publishReviewProgress(task.ID, evidence); err != nil {
 			return outcomes, err
+		}
+		if completedWaveBlocksOrigin(task, paths, required, outcomes, indexes) {
+			for _, later := range waves[wave+1:] {
+				for _, index := range later {
+					outcomes[index].deferred = true
+				}
+			}
+			break
 		}
 		// QA may only consume completed peer artifacts. A provider failure in an
 		// earlier wave is already durable progress for the completed peers; defer

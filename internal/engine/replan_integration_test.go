@@ -69,6 +69,125 @@ func TestReplanPublishesMergedSuccessorAndExactRetryDoesNotReplayBusinessState(t
 	assertSameReplanBusinessState(t, retried, collided)
 }
 
+func TestReplanPublishesBaseOnlyOriginalBoundToAncestorAfterCanonicalAdvance(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	f, request := replanFixture(t, ctx)
+	defer f.P.DB.Close()
+
+	savedBase := request.Expected.BaseSHA
+	request.Originals[2].ExpectedBaseSHA = savedBase
+	advanceCanonicalConfig(t, ctx, f)
+	effective, err := engine.Canonical(ctx, f.P.Git)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Expected.BaseSHA = effective.BaseSHA
+	request.Expected.Config = effective.Hash
+	request.Expected.Rules = roles.Hash()
+
+	if err = engine.Replan(ctx, f.P, request); err != nil {
+		t.Fatal(err)
+	}
+	after, _, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPublishedReplan(t, ctx, f, after, request)
+	if after.Tasks["queued"].BaseSHA != savedBase || after.Tasks[request.Replacement.ID].BaseSHA != effective.BaseSHA {
+		t.Fatalf("saved and successor bases were not preserved independently: queued=%s successor=%s", after.Tasks["queued"].BaseSHA, after.Tasks[request.Replacement.ID].BaseSHA)
+	}
+}
+
+func TestReplanRejectsBaseOnlyOriginalWithLocalSourceRefBeforeLease(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	f, request := replanFixture(t, ctx)
+	defer f.P.DB.Close()
+
+	task := "aih/queued"
+	if _, err := f.P.Git.Run(ctx, "", "update-ref", "refs/heads/"+task, request.Expected.BaseSHA); err != nil {
+		t.Fatal(err)
+	}
+	before, err := f.P.Git.RemoteHead(ctx, "aih-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = engine.Replan(ctx, f.P, request); err == nil || !strings.Contains(err.Error(), "local source ref") {
+		t.Fatalf("base-only original with a local source ref was accepted: %v", err)
+	}
+	after, err := f.P.Git.RemoteHead(ctx, "aih-state")
+	if err != nil || after != before {
+		t.Fatalf("local source-ref rejection acquired a lease: before=%s after=%s err=%v", before, after, err)
+	}
+	if successor, err := f.P.Git.RemoteHead(ctx, "aih/"+request.Replacement.ID); err != nil || successor != "" {
+		t.Fatalf("local source-ref rejection published successor: %q %v", successor, err)
+	}
+}
+
+func TestReplanRejectsBaseOnlyOriginalWithRetainedWorktreeBeforeLease(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	f, request := replanFixture(t, ctx)
+	defer f.P.DB.Close()
+
+	queued := &model.Task{ID: "queued"}
+	if err := os.MkdirAll(f.P.TaskPath(queued), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before, err := f.P.Git.RemoteHead(ctx, "aih-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = engine.Replan(ctx, f.P, request); err == nil || !strings.Contains(err.Error(), "retained worktree") {
+		t.Fatalf("base-only original with a retained task worktree was accepted: %v", err)
+	}
+	after, err := f.P.Git.RemoteHead(ctx, "aih-state")
+	if err != nil || after != before {
+		t.Fatalf("retained-worktree rejection acquired a lease: before=%s after=%s err=%v", before, after, err)
+	}
+	if successor, err := f.P.Git.RemoteHead(ctx, "aih/"+request.Replacement.ID); err != nil || successor != "" {
+		t.Fatalf("retained-worktree rejection published successor: %q %v", successor, err)
+	}
+}
+
+func TestReplanRejectsBaseOnlyOriginalWithUnrelatedSavedBaseBeforeLease(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	f, request := replanFixture(t, ctx)
+	defer f.P.DB.Close()
+
+	unrelated, err := f.P.Git.StateCommit(ctx, "", model.NewSnapshot(f.Project.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, stateRef, err := f.P.Git.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Tasks["queued"].BaseSHA = unrelated
+	next, err := f.P.Git.StateCommit(ctx, stateRef, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.P.Git.Publish(ctx, []gitx.Update{{Branch: "aih-state", Old: stateRef, New: next}}); err != nil {
+		t.Fatal(err)
+	}
+	request.Expected.StateRef = next
+	request.Originals[2].ExpectedBaseSHA = unrelated
+
+	if err = engine.Replan(ctx, f.P, request); err == nil || !strings.Contains(err.Error(), "not an ancestor") {
+		t.Fatalf("base-only original with an unrelated saved base was accepted: %v", err)
+	}
+	after, err := f.P.Git.RemoteHead(ctx, "aih-state")
+	if err != nil || after != next {
+		t.Fatalf("unrelated saved-base rejection acquired a lease: before=%s after=%s err=%v", next, after, err)
+	}
+	if successor, err := f.P.Git.RemoteHead(ctx, "aih/"+request.Replacement.ID); err != nil || successor != "" {
+		t.Fatalf("unrelated saved-base rejection published successor: %q %v", successor, err)
+	}
+}
+
 func TestReplanAllowsOverlappingOwnerSerializedThroughSupersededOriginal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -284,10 +403,10 @@ func replanFixture(t *testing.T, ctx context.Context) (*demo.Fixture, engine.Rep
 		// source checkpoint. The successor must start without either approval.
 		task.Preflight = &model.Preflight{Phase: "ready", BaseSHA: base, HeadSHA: task.HeadSHA, Config: f.P.Config.Hash, Rules: roles.Hash(), Completed: []string{"designer"}}
 	}
-	// This accepted plan has never received a worktree, source ref, worker
-	// attempt, or approval. It is superseded with its started siblings but does
-	// not contribute a source checkpoint to replay.
-	s.Tasks["queued"] = &model.Task{ID: "queued", ObjectiveID: "batch", Title: "queued", Objective: "fixture", Acceptance: []string{"done"}, Dependencies: []string{"alpha", "bravo", "external"}, Areas: []string{"feature-queued.txt"}, AssignedAreas: []string{"feature-queued.txt"}, AssignedAreaKinds: map[string]string{"feature-queued.txt": model.AreaFile}, Domains: []string{"queued"}, Risk: "low", State: model.Ready, Branch: "aih/queued", FixCycles: map[string]int{}}
+	// This accepted planning task is bound to canonical main but has never
+	// received a worktree, source ref, worker attempt, or approval. It is
+	// superseded with its started siblings but contributes no source checkpoint.
+	s.Tasks["queued"] = &model.Task{ID: "queued", ObjectiveID: "batch", Title: "queued", Objective: "fixture", Acceptance: []string{"done"}, Dependencies: []string{"alpha", "bravo", "external"}, Areas: []string{"feature-queued.txt"}, AssignedAreas: []string{"feature-queued.txt"}, AssignedAreaKinds: map[string]string{"feature-queued.txt": model.AreaFile}, Domains: []string{"queued"}, Risk: "low", State: model.Ready, Branch: "aih/queued", BaseSHA: base, FixCycles: map[string]int{}}
 	s.Tasks["external"] = &model.Task{ID: "external", ObjectiveID: "batch", Title: "external", Objective: "fixture", Acceptance: []string{"done"}, Areas: []string{"feature-external.txt"}, AssignedAreas: []string{"feature-external.txt"}, AssignedAreaKinds: map[string]string{"feature-external.txt": model.AreaFile}, Domains: []string{"external"}, Risk: "low", State: model.Done, Branch: "aih/external", FixCycles: map[string]int{}}
 	next, err := f.P.Git.StateCommit(ctx, stateHead, s)
 	if err != nil {

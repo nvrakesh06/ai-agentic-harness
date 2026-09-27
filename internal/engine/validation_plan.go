@@ -166,6 +166,10 @@ func focusedGoCheck(check config.Check, pkg string) (config.Check, bool) {
 }
 
 func makeValidationPlan(ctx context.Context, e config.Effective, toolDir, gitDir, head, gate, reason, pkg string, checks []config.Check) (validationPlan, error) {
+	checks, err := applicableValidationChecks(checks)
+	if err != nil {
+		return validationPlan{}, err
+	}
 	toolchain, err := toolchainIdentity(toolDir, checks)
 	if err != nil {
 		return validationPlan{}, err
@@ -184,6 +188,23 @@ func makeValidationPlan(ctx context.Context, e config.Effective, toolDir, gitDir
 	}{head, e.Hash, gate, reason, pkg, toolchain, inputs, command})
 	hash := sha256.Sum256(payload)
 	return validationPlan{Gate: gate, Reason: reason, Package: pkg, Toolchain: toolchain, TestInputs: inputs, Input: hex.EncodeToString(hash[:]), Checks: checks}, nil
+}
+
+// applicableValidationChecks keeps validation-plan identity aligned with execution. A
+// foreign-platform command is neither resolved nor hashed because Verify will
+// not run it on this host. Return a fresh slice so callers retain the complete
+// configured policy for a different platform.
+func applicableValidationChecks(checks []config.Check) ([]config.Check, error) {
+	selected := make([]config.Check, 0, len(checks))
+	for _, check := range checks {
+		if applicable(check) {
+			selected = append(selected, check)
+		}
+	}
+	if len(selected) == 0 {
+		return nil, errors.New("no applicable verification checks; configure .aih/project.yaml on main")
+	}
+	return selected, nil
 }
 
 func toolchainIdentity(dir string, checks []config.Check) (string, error) {

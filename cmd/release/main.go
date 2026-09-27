@@ -29,10 +29,14 @@ import (
 const releaseTestTimeout = "15m"
 
 const releasePermitWait = 2 * time.Minute
+const releaseYieldRetries = 3
 
 var releaseTestCommand = func() (string, []string) {
 	return "go", []string{"test", "-json", "-p=1", "./...", "-count=1", "-failfast", "-timeout", releaseTestTimeout}
 }
+
+var acquireReleaseMachinePermitFn = acquireReleaseMachinePermit
+var runCompleteReleaseTestsFn = runCompleteReleaseTests
 
 func main() {
 	if e := release(); e != nil {
@@ -63,20 +67,12 @@ func release() error {
 			return fmt.Errorf("HEAD must be tagged v%s", model.Version)
 		}
 	}
-	releaseMachine, machine, verificationDir, e := acquireReleaseMachinePermit()
+	ctx, cancel, releasePermit, e := runReleaseTestsWithYieldRetry()
 	if e != nil {
 		return e
 	}
-	releasePermit := sync.OnceFunc(releaseMachine)
-	defer releasePermit()
-	ctx, cancel := releaseYieldContext(verificationDir, machine)
 	defer cancel()
-	// Serialize package workers: the suite intentionally exercises real Git and
-	// process lifecycles, and concurrent package runs can make its bounded
-	// Windows timings unreliable on a constrained development machine.
-	if e := runCompleteReleaseTests(ctx); e != nil {
-		return e
-	}
+	defer releasePermit()
 	if e := run(ctx, nil, "go", "vet", "./..."); e != nil {
 		return e
 	}
@@ -128,6 +124,34 @@ func release() error {
 	return nil
 }
 
+// runReleaseTestsWithYieldRetry releases the shared slot only after the
+// current managed process has observed cancellation. Completed exact-identity
+// groups are recorded by runCompleteReleaseTests; a yielded current group has
+// no receipt and is rerun after reacquiring normal shared capacity.
+func runReleaseTestsWithYieldRetry() (context.Context, context.CancelFunc, func(), error) {
+	for attempt := 0; attempt < releaseYieldRetries; attempt++ {
+		releaseMachine, machine, verificationDir, err := acquireReleaseMachinePermitFn()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		releasePermit := sync.OnceFunc(releaseMachine)
+		ctx, cancel := releaseYieldContext(verificationDir, machine)
+		err = runCompleteReleaseTestsFn(ctx)
+		if !errors.Is(err, errReleaseYielded) {
+			if err != nil {
+				cancel()
+				releasePermit()
+				return nil, nil, nil, err
+			}
+			return ctx, cancel, releasePermit, nil
+		}
+		cancel()
+		releasePermit()
+		fmt.Fprintf(os.Stderr, "release gate yielded to priority work; resuming completed exact-identity groups (%d/%d)\n", attempt+1, releaseYieldRetries)
+	}
+	return nil, nil, nil, fmt.Errorf("release gate yielded %d times; retry later", releaseYieldRetries)
+}
+
 // runReleaseTests stops the serial suite when go test reports that a package
 // failed. The JSON stream distinguishes package results from arbitrary test
 // output, so a log line containing the word "fail" cannot cancel the gate.
@@ -137,6 +161,10 @@ func runReleaseTests(ctx context.Context) error {
 }
 
 func runReleaseTestCommand(ctx context.Context, name string, args []string, expected []string) error {
+	return runReleaseTestGroupCommand(ctx, name, args, expected, nil)
+}
+
+func runReleaseTestGroupCommand(ctx context.Context, name string, args []string, expectedTests, expectedPackages []string) error {
 	fmt.Println(name, strings.Join(args, " "))
 	process, err := platform.StartManaged(ctx, "", nil, name, args...)
 	if err != nil {
@@ -149,7 +177,9 @@ func runReleaseTestCommand(ctx context.Context, name string, args []string, expe
 	go func() { <-ctx.Done(); process.Close() }()
 
 	var failedPackage string
-	completed := map[string]bool{}
+	var failedTest string
+	completedTests := map[string]string{}
+	completedPackages := map[string]string{}
 	scanner := bufio.NewScanner(process.Stdout)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
@@ -164,12 +194,19 @@ func runReleaseTestCommand(ctx context.Context, name string, args []string, expe
 			continue
 		}
 		if event.Action == "pass" || event.Action == "skip" {
-			completed[event.Test] = true
+			if event.Test != "" {
+				completedTests[event.Test] = event.Action
+			} else if event.Package != "" {
+				completedPackages[event.Package] = event.Action
+			}
 		}
 		if event.Action == "fail" && event.Package != "" && event.Test == "" {
 			failedPackage = event.Package
 			process.Close()
 			break
+		}
+		if event.Action == "fail" && event.Package != "" && event.Test != "" && failedTest == "" {
+			failedTest = event.Package + "/" + event.Test
 		}
 	}
 	scanErr := scanner.Err()
@@ -180,6 +217,9 @@ func runReleaseTestCommand(ctx context.Context, name string, args []string, expe
 	if failedPackage != "" {
 		return fmt.Errorf("go test reported failure for %s; cancelled remaining package tests: %w", failedPackage, waitErr)
 	}
+	if failedTest != "" {
+		return fmt.Errorf("go test reported failure for %s before its package terminal event: %w", failedTest, waitErr)
+	}
 	if errors.Is(context.Cause(ctx), errReleaseYielded) {
 		return errReleaseYielded
 	}
@@ -189,9 +229,17 @@ func runReleaseTestCommand(ctx context.Context, name string, args []string, expe
 	if waitErr != nil {
 		return waitErr
 	}
-	for _, test := range expected {
-		if !completed[test] {
+	for _, test := range expectedTests {
+		if !releaseTerminalAccepted(test, completedTests[test]) {
+			if completedTests[test] == "skip" {
+				return fmt.Errorf("release browser test %s was skipped while AIH_REAL_PLAYWRIGHT=1", test)
+			}
 			return fmt.Errorf("release test inventory incomplete: %s has no terminal pass/skip event", test)
+		}
+	}
+	for _, pkg := range expectedPackages {
+		if action := completedPackages[pkg]; action != "pass" && action != "skip" {
+			return fmt.Errorf("release package inventory incomplete: %s has no terminal pass/skip event", pkg)
 		}
 	}
 	return nil
@@ -273,7 +321,16 @@ func releaseMachinePermit(ctx context.Context) (func(), config.Machine, string, 
 	}
 }
 
-var errReleaseYielded = errors.New("release gate yielded to queued supervisor native check; incomplete gate, rerun the entire uncached release gate")
+var errReleaseYielded = errors.New("release gate yielded to queued supervisor native check")
+
+// releaseYieldCancellation preserves the yield sentinel only for cancellation
+// caused by a priority yield. Concrete test/package failures remain dominant.
+func releaseYieldCancellation(ctx context.Context, err error) error {
+	if errors.Is(context.Cause(ctx), errReleaseYielded) && errors.Is(err, context.Canceled) {
+		return errReleaseYielded
+	}
+	return nil
+}
 
 func releaseYieldContext(dir string, machine config.Machine) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancelCause(context.Background())
