@@ -18,7 +18,7 @@ import (
 )
 
 const Version = "1.0.0"
-const StateSchema = 11
+const StateSchema = 13
 const RulesVersion = 1
 const RoleSchema = 1
 const CapacityTransitionLimit = 20
@@ -27,6 +27,7 @@ const MaxGuidanceBytes = 1600
 const MaxScopeRecoveryReasonBytes = 1600
 const MaxScopeRecoveryRecords = 8
 const maxScopeRecoveryRecordBytes = 16 * 1024
+const MaxDependencyCycleRecoveryReceipts = 8
 
 // MaxVisualEvidenceArtifacts includes up to eight screenshots and one shared diagnostic log.
 const MaxVisualEvidenceArtifacts = 9
@@ -102,6 +103,25 @@ func scopeRecoveryRecordCount(t *Task) int {
 		}
 	}
 	return count
+}
+
+// DependencyCycleRecoveryReceipt is a supervisor-issued, typed receipt for one
+// narrowly audited dependency deletion. It lives in Snapshot rather than a
+// provider-authored task decision, so an answer cannot forge idempotence.
+type DependencyCycleRecoveryReceipt struct {
+	Operation              string `json:"operation"`
+	Digest                 string `json:"digest"`
+	OwnerID                string `json:"owner_id"`
+	DependencyID           string `json:"dependency_id"`
+	BeforeDependenciesHash string `json:"before_dependencies_hash"`
+	AfterDependenciesHash  string `json:"after_dependencies_hash"`
+	StateRef               string `json:"state_ref"`
+	MainSHA                string `json:"main_sha"`
+	PolicyHash             string `json:"policy_hash"`
+	RulesHash              string `json:"rules_hash"`
+	OwnerState             State  `json:"owner_state"`
+	OwnerBaseSHA           string `json:"owner_base_sha"`
+	OwnerHeadSHA           string `json:"owner_head_sha"`
 }
 
 type State string
@@ -183,9 +203,20 @@ type Task struct {
 	ReadOnlyRetries   map[string]ReadOnlyRetry    `json:"read_only_retries,omitempty"`
 	Evidence          *Evidence                   `json:"evidence,omitempty"`
 	ReviewProvenance  map[string]ReviewProvenance `json:"review_provenance,omitempty"`
-	VisualRequired    *VisualRequirement          `json:"visual_required,omitempty"`
-	Updated           time.Time                   `json:"updated"`
-	Timing            *TaskTiming                 `json:"timing,omitempty"`
+	// ReviewFindingProvenance is supervisor-issued source attribution for
+	// retained review defects. It is deliberately separate from Finding, which
+	// is part of the provider result schema and must never carry trusted state.
+	ReviewFindingProvenance []ReviewFindingProvenance `json:"review_finding_provenance,omitempty"`
+	// ReviewFindingReceiptOverflow preserves every finding while declining the
+	// bounded repair-first exception when its receipt ledger is incomplete.
+	ReviewFindingReceiptOverflow bool `json:"review_finding_receipt_overflow,omitempty"`
+	// RepairFirst records the one unchanged-head repair admission consumed for
+	// an exact attributable review input. A no-op writer therefore falls back to
+	// ordinary native verification instead of cycling indefinitely.
+	RepairFirst    *RepairFirstRecovery `json:"repair_first_recovery,omitempty"`
+	VisualRequired *VisualRequirement   `json:"visual_required,omitempty"`
+	Updated        time.Time            `json:"updated"`
+	Timing         *TaskTiming          `json:"timing,omitempty"`
 }
 
 // ReadOnlyRetry fences the one narrower retry available to a timed-out
@@ -493,6 +524,31 @@ type Finding struct {
 	BaselineEvidence string `json:"baseline_evidence,omitempty"`
 }
 
+// ReviewFindingProvenance binds one retained review finding to the exact
+// supervisor-owned review input that produced it. Finding is a hash of the
+// normalized persisted finding; it is never accepted from a provider result.
+type ReviewFindingProvenance struct {
+	Finding           string `json:"finding"`
+	SourceTask        string `json:"source_task"`
+	Base              string `json:"base"`
+	Head              string `json:"head"`
+	Config            string `json:"config"`
+	Rules             string `json:"rules"`
+	Role              string `json:"role"`
+	ControllerSummary bool   `json:"controller_summary,omitempty"`
+}
+
+// RepairFirstRecovery consumes the narrow unchanged-head repair route. It
+// contains only immutable input identities, not a review approval or a gate
+// result; every changed head returns to the normal native and review path.
+type RepairFirstRecovery struct {
+	Base     string   `json:"base"`
+	Head     string   `json:"head"`
+	Config   string   `json:"config"`
+	Rules    string   `json:"rules"`
+	Findings []string `json:"findings"`
+}
+
 const (
 	FindingChanged  = "changed"
 	FindingCausal   = "causal"
@@ -652,10 +708,13 @@ type Snapshot struct {
 	// Always encode this initialized receipt ledger. Clone uses the portable JSON
 	// representation, so omitting an empty ledger would turn it into nil before
 	// the first accepted replan and lose the write-ready provenance invariant.
-	Replans            map[string]ReplanReceipt `json:"replan_receipts"`
-	Improvements       []string                 `json:"improvement_candidates,omitempty"`
-	IntegrationBlocked string                   `json:"integration_blocked,omitempty"`
-	IntegrationBatch   *IntegrationBatch        `json:"integration_batch,omitempty"`
+	Replans map[string]ReplanReceipt `json:"replan_receipts"`
+	// DependencyCycleRecoveryReceipts is a separate supervisor-owned operation
+	// ledger. It never derives authority from provider-authored task decisions.
+	DependencyCycleRecoveryReceipts map[string]DependencyCycleRecoveryReceipt `json:"dependency_cycle_recovery_receipts"`
+	Improvements                    []string                                  `json:"improvement_candidates,omitempty"`
+	IntegrationBlocked              string                                    `json:"integration_blocked,omitempty"`
+	IntegrationBatch                *IntegrationBatch                         `json:"integration_batch,omitempty"`
 }
 
 // IntegrationBatch is a portable reservation for the deliberately small first
@@ -708,7 +767,7 @@ type IntegrationBatchTask struct {
 
 func NewSnapshot(project string) *Snapshot {
 	return &Snapshot{Schema: StateSchema, CreatedBy: Version, Project: project,
-		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}, Replans: map[string]ReplanReceipt{}}
+		Objectives: map[string]*Objective{}, Backlog: []string{}, Tasks: map[string]*Task{}, Applied: map[string]bool{}, Replans: map[string]ReplanReceipt{}, DependencyCycleRecoveryReceipts: map[string]DependencyCycleRecoveryReceipt{}}
 }
 
 const (
@@ -780,6 +839,15 @@ func ID() string {
 	}
 	return hex.EncodeToString(b[:])
 }
+func dependencyCycleRecoveryOwnerState(state State) bool {
+	switch state {
+	case Ready, Fix, SyncRequired, Blocked:
+		return true
+	default:
+		return false
+	}
+}
+
 func Clone(s *Snapshot) *Snapshot {
 	b, _ := json.Marshal(s)
 	var out Snapshot
@@ -871,6 +939,25 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 			}
 		}
 	}
+	if s.Schema <= 11 {
+		// Schema 12 adds supervisor-issued review-finding receipts and the
+		// one-shot repair-first consumption record. Historical findings have no
+		// independent review-result linkage, so never infer either from a task
+		// head, evidence summary, provider run, local cache, or human answer.
+		for _, task := range s.Tasks {
+			if task != nil {
+				task.ReviewFindingProvenance = nil
+				task.ReviewFindingReceiptOverflow = false
+				task.RepairFirst = nil
+			}
+		}
+	}
+	if s.Schema <= 12 {
+		// Schema 13 adds supervisor-owned dependency-cycle recovery receipts.
+		// Decisions are provider-authored history, so no historical marker can
+		// establish replay authority; initialize an empty ledger instead.
+		s.DependencyCycleRecoveryReceipts = map[string]DependencyCycleRecoveryReceipt{}
+	}
 	if migrated {
 		if s.Schema <= 10 {
 			// Earlier records have no transition clock or pinned run context.
@@ -906,6 +993,25 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 	}
 	if s.Replans == nil {
 		s.Replans = map[string]ReplanReceipt{}
+	}
+	if s.DependencyCycleRecoveryReceipts == nil {
+		s.DependencyCycleRecoveryReceipts = map[string]DependencyCycleRecoveryReceipt{}
+	}
+	if len(s.DependencyCycleRecoveryReceipts) > MaxDependencyCycleRecoveryReceipts {
+		return nil, false, errors.New("dependency cycle recovery receipt limit exceeded")
+	}
+	for id, receipt := range s.DependencyCycleRecoveryReceipts {
+		owner := s.Tasks[receipt.OwnerID]
+		if !stateIdentifierPattern.MatchString(id) || !s.Applied[id] || receipt.Operation != "dependency-cycle-recover" ||
+			!stateHashPattern.MatchString(receipt.Digest) || !stateIdentifierPattern.MatchString(receipt.OwnerID) ||
+			!stateIdentifierPattern.MatchString(receipt.DependencyID) || receipt.OwnerID == receipt.DependencyID ||
+			!stateHashPattern.MatchString(receipt.BeforeDependenciesHash) || !stateHashPattern.MatchString(receipt.AfterDependenciesHash) ||
+			!stateRevisionPattern.MatchString(receipt.StateRef) || !stateRevisionPattern.MatchString(receipt.MainSHA) ||
+			!stateHashPattern.MatchString(receipt.PolicyHash) || !stateHashPattern.MatchString(receipt.RulesHash) ||
+			!stateRevisionPattern.MatchString(receipt.OwnerBaseSHA) || !stateRevisionPattern.MatchString(receipt.OwnerHeadSHA) ||
+			!dependencyCycleRecoveryOwnerState(receipt.OwnerState) || owner == nil || s.Tasks[receipt.DependencyID] == nil {
+			return nil, false, errors.New("invalid dependency cycle recovery receipt")
+		}
 	}
 	for id, receipt := range s.Replans {
 		if !stateIdentifierPattern.MatchString(id) || !s.Applied[id] || !stateHashPattern.MatchString(receipt.Digest) || !stateIdentifierPattern.MatchString(receipt.ReplacementID) || s.Tasks[receipt.ReplacementID] == nil {
@@ -1010,6 +1116,34 @@ func Decode(b []byte) (*Snapshot, bool, error) {
 		for role, provenance := range t.ReviewProvenance {
 			if err := validReviewProvenance(role, provenance); err != nil {
 				return nil, false, err
+			}
+		}
+		if len(t.ReviewFindingProvenance) > 64 {
+			return nil, false, errors.New("too many review finding provenance receipts")
+		}
+		for _, provenance := range t.ReviewFindingProvenance {
+			if !stateHashPattern.MatchString(provenance.Finding) ||
+				!stateIdentifierPattern.MatchString(provenance.SourceTask) ||
+				!stateRevisionPattern.MatchString(provenance.Base) ||
+				!stateRevisionPattern.MatchString(provenance.Head) ||
+				!stateHashPattern.MatchString(provenance.Config) ||
+				!stateHashPattern.MatchString(provenance.Rules) ||
+				!stateRolePattern.MatchString(provenance.Role) {
+				return nil, false, errors.New("invalid review finding provenance")
+			}
+		}
+		if recovery := t.RepairFirst; recovery != nil {
+			if !stateRevisionPattern.MatchString(recovery.Base) || !stateRevisionPattern.MatchString(recovery.Head) ||
+				!stateHashPattern.MatchString(recovery.Config) || !stateHashPattern.MatchString(recovery.Rules) ||
+				len(recovery.Findings) == 0 || len(recovery.Findings) > 64 {
+				return nil, false, errors.New("invalid repair-first recovery")
+			}
+			seen := map[string]bool{}
+			for _, finding := range recovery.Findings {
+				if !stateHashPattern.MatchString(finding) || seen[finding] {
+					return nil, false, errors.New("invalid repair-first recovery findings")
+				}
+				seen[finding] = true
 			}
 		}
 		if t.Evidence != nil {
@@ -1295,7 +1429,15 @@ func batchValidationAccepted(evidence *Evidence) bool {
 // Passed native checks are recorded by engine.passedCheckEvidence. Batch
 // admission parses that closed record shape rather than trusting arbitrary
 // strings that merely claim an exit result.
-var passedNativeCheckRecord = regexp.MustCompile(`^stage=native check="(?:[^"\\]|\\.)+" command="(?:[^"\\]|\\.)+" command_id=[a-f0-9]{12} exit=0 pass_counts="(?:[^"\\]|\\.)+" stdout=(captured|empty) stdout_bytes=(0|[1-9][0-9]*) stdout_lines=(0|[1-9][0-9]*)$`)
+var passedNativeCheckRecord = regexp.MustCompile(`^stage=native check="(?:[^"\\]|\\.)+" command="(?:[^"\\]|\\.)+" command_id=[a-f0-9]{12} exit=0 pass_counts="(?:[^"\\]|\\.)+" stdout=(captured|empty) stdout_bytes=(0|[1-9][0-9]*) stdout_lines=(0|[1-9][0-9]*)( artifact=[a-zA-Z0-9][a-zA-Z0-9_-]{15,95}\.[a-f0-9]{64})?$`)
+
+// ValidPassedNativeCheckRecord exposes the existing closed portable-check
+// grammar to local receipt consumers. It does not make a local receipt part of
+// portable state; it only prevents a consumer from accepting a suffix attached
+// to arbitrary text.
+func ValidPassedNativeCheckRecord(record string) bool {
+	return passedNativeCheckRecord.MatchString(record)
+}
 
 func completedDependencies(s *Snapshot, task *Task) bool {
 	for _, id := range task.Dependencies {

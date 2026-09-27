@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -245,6 +246,47 @@ func TestReplanRejectsCycleIntroducedBySuccessorLink(t *testing.T) {
 	next := &model.Task{ID: "replacement", State: model.Ready, Dependencies: []string{"downstream"}}
 	if !prospectiveReplanCycle(s, next, []ReplanOriginal{{TaskID: "original"}}) {
 		t.Fatal("replacement edge cycle was accepted")
+	}
+}
+
+func TestReplanIgnoresUnrelatedExistingDependencyCycle(t *testing.T) {
+	s := model.NewSnapshot("project123")
+	s.Tasks["old"] = &model.Task{ID: "old", State: model.Blocked}
+	s.Tasks["cycle-a"] = &model.Task{ID: "cycle-a", State: model.Ready, Dependencies: []string{"cycle-b"}}
+	s.Tasks["cycle-b"] = &model.Task{ID: "cycle-b", State: model.Ready, Dependencies: []string{"cycle-a"}}
+	before := model.Clone(s)
+	next := &model.Task{ID: "replacement", State: model.Ready}
+	if prospectiveReplanCycle(s, next, []ReplanOriginal{{TaskID: "old"}}) {
+		t.Fatal("unrelated existing dependency cycle blocked an independent replacement")
+	}
+	if !reflect.DeepEqual(s, before) {
+		t.Fatalf("prospective cycle check changed existing state: before=%#v after=%#v", before, s)
+	}
+}
+
+func TestReplanIgnoresUnrelatedExistingSupersessionCycle(t *testing.T) {
+	s := model.NewSnapshot("project123")
+	s.Tasks["old"] = &model.Task{ID: "old", State: model.Blocked}
+	s.Tasks["cycle-a"] = &model.Task{ID: "cycle-a", State: model.Superseded, SupersededBy: "cycle-b"}
+	s.Tasks["cycle-b"] = &model.Task{ID: "cycle-b", State: model.Superseded, SupersededBy: "cycle-a"}
+	before := model.Clone(s)
+	next := &model.Task{ID: "replacement", State: model.Ready}
+	if prospectiveReplanCycle(s, next, []ReplanOriginal{{TaskID: "old"}}) {
+		t.Fatal("unrelated existing supersession cycle blocked an independent replacement")
+	}
+	if !reflect.DeepEqual(s, before) {
+		t.Fatalf("prospective cycle check changed existing state: before=%#v after=%#v", before, s)
+	}
+}
+
+func TestReplanRejectsSuccessorThatReachesExistingCycle(t *testing.T) {
+	s := model.NewSnapshot("project123")
+	s.Tasks["old"] = &model.Task{ID: "old", State: model.Blocked}
+	s.Tasks["cycle-a"] = &model.Task{ID: "cycle-a", State: model.Ready, Dependencies: []string{"cycle-b"}}
+	s.Tasks["cycle-b"] = &model.Task{ID: "cycle-b", State: model.Ready, Dependencies: []string{"cycle-a"}}
+	next := &model.Task{ID: "replacement", State: model.Ready, Dependencies: []string{"cycle-a"}}
+	if !prospectiveReplanCycle(s, next, []ReplanOriginal{{TaskID: "old"}}) {
+		t.Fatal("successor dependency on an existing cyclic component was accepted")
 	}
 }
 

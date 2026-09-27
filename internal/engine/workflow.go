@@ -264,8 +264,12 @@ func passedCheckEvidence(check config.Check, output string) string {
 			lines++
 		}
 	}
-	commandID := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(check.Command, "\x00"))))[:12]
+	commandID := nativeCheckCommandID(check)
 	return fmt.Sprintf("stage=native check=%q command=%q command_id=%s exit=0 pass_counts=%q stdout=%s stdout_bytes=%d stdout_lines=%d", check.Name, filepath.Base(check.Command[0]), commandID, verificationPassCounts(output), state, len([]byte(output)), lines)
+}
+
+func nativeCheckCommandID(check config.Check) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(check.Command, "\x00"))))[:12]
 }
 
 type reviewOutcome struct {
@@ -746,6 +750,37 @@ func (c *Controller) recordReadOnlyDeadline(e config.Effective, stage string, r 
 	return retry, nil
 }
 
+// workerExitCause is local observability only. It classifies the live role
+// error without retaining provider diagnostics, paths, command arguments, or
+// output in the event record. Deadline and cancellation take precedence over
+// an InvocationError wrapper because they describe the actual termination.
+type workerExitCause string
+
+const (
+	workerExitNone           workerExitCause = "none"
+	workerExitDeadline       workerExitCause = "deadline"
+	workerExitCanceled       workerExitCause = "canceled"
+	workerExitProcessFailure workerExitCause = "process_failure"
+	workerExitAdapterFailure workerExitCause = "adapter_failure"
+)
+
+func classifyWorkerExit(err error) workerExitCause {
+	if err == nil {
+		return workerExitNone
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return workerExitDeadline
+	}
+	if errors.Is(err, context.Canceled) {
+		return workerExitCanceled
+	}
+	var invocation *provider.InvocationError
+	if errors.As(err, &invocation) {
+		return workerExitProcessFailure
+	}
+	return workerExitAdapterFailure
+}
+
 func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effective, r roles.Role, t *model.Task, dir, objective, diff, evidence string, complete func(*model.Snapshot, provider.Result, error) error, explicitReadRef string) (provider.Result, error) {
 	if r.Name != "implementer" {
 		select {
@@ -938,7 +973,7 @@ func (c *Controller) roleWithCompletionAtRef(ctx context.Context, e config.Effec
 			return result, saveErr
 		}
 	}
-	_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "worker_exit", fmt.Sprintf("outcome=%s capability=%s effective_model=%s", outcome, resolved.Capability, resolved.EffectiveModel))
+	_ = c.P.DB.Event(taskID, id, r.Name, e.Project.Provider, "worker_exit", fmt.Sprintf("outcome=%s capability=%s effective_model=%s cause=%s", outcome, resolved.Capability, resolved.EffectiveModel, classifyWorkerExit(err)))
 	return result, err
 }
 
@@ -1316,6 +1351,9 @@ func (c *Controller) checkpointAtBase(ctx context.Context, id, immutableBase str
 			task.SyncBase = ""
 		}
 		task.Evidence = nil
+		task.ReviewFindingProvenance = nil
+		task.ReviewFindingReceiptOverflow = false
+		task.RepairFirst = nil
 		if task.VisualRequired != nil {
 			task.VisualRequired.Head = sha
 		}
@@ -1392,7 +1430,14 @@ func (c *Controller) recoveredCheckpoint(ctx context.Context, id string, result 
 	resumed := false
 	err = c.save(ctx, func(s *model.Snapshot) error {
 		task := s.Tasks[id]
+		priorHead := task.HeadSHA
 		task.HeadSHA = sha
+		if sha != priorHead {
+			task.Evidence = nil
+			task.ReviewFindingProvenance = nil
+			task.ReviewFindingReceiptOverflow = false
+			task.RepairFirst = nil
+		}
 		if pendingMerge {
 			task.BaseSHA = immutableBase
 			task.SyncBase = ""
@@ -1980,7 +2025,15 @@ func (c *Controller) retry(id, kind, reason string) {
 				return nil
 			}
 		}
-		task.Findings = append(task.Findings, model.Finding{Severity: "high", Category: kind, Reason: reason, Role: kind})
+		summaryFinding := model.Finding{Severity: "high", Category: kind, Reason: reason, Role: kind, Relevance: model.FindingChanged}
+		task.Findings = append(task.Findings, summaryFinding)
+		// A blocking completed review is retained both as its concrete provider
+		// findings and as this controller-generated retry summary. Record the
+		// latter separately so a future recovery can ignore only this redundant
+		// marker; provider-supplied unlocated findings never receive that status.
+		if task.State == model.Review && task.Evidence != nil && task.Evidence.Reviews[kind] == reason && slices.Contains(task.Evidence.ReviewRoster, kind) && hasAttributedConcreteReviewFinding(task, task.Evidence, kind, effective) {
+			appendReviewFindingReceipts(task, reviewFindingReceipts(task, task.Evidence, []model.Finding{summaryFinding}, true))
+		}
 		task.State = model.Fix
 		if preflightErr == nil {
 			reusePreflightForFix(task.Preflight, task, effective, preflightRoles)
@@ -2055,6 +2108,17 @@ func (c *Controller) syncTask(ctx context.Context, id string) (config.Effective,
 			task.VisualRequired.Config = effective.Hash
 			task.VisualRequired.Rules = roles.Hash()
 		}
+		// Synchronization, checkpointing, and immutable-scope validation above
+		// are deliberately unconditional. Only after they preserve the exact
+		// reviewed input may a supervisor-issued retained finding run one normal
+		// FIX before another unchanged-head native gate.
+		if head == t.HeadSHA && base == t.BaseSHA {
+			if recovery := repairFirstRecovery(task, effective); recovery != nil {
+				task.State = model.Fix
+				task.RepairFirst = recovery
+				return nil
+			}
+		}
 		task.State = model.Verifying
 		// A retry of the same exact task head and canonical base may retain only
 		// already-published partial review artifacts. Any changed source, base,
@@ -2081,11 +2145,19 @@ func Verify(ctx context.Context, e config.Effective, dir string) ([]string, erro
 	return verifyWithPermit(ctx, e, dir, nil)
 }
 func verifyWithPermit(ctx context.Context, e config.Effective, dir string, permit func(context.Context, config.Check) (func(), error)) ([]string, error) {
-	return verifyChecksWithPermit(ctx, e.Project.Checks, dir, permit)
+	return verifyChecksWithPermit(ctx, e.Project.Checks, dir, permit, nil)
 }
-func verifyChecksWithPermit(ctx context.Context, configured []config.Check, dir string, permit func(context.Context, config.Check) (func(), error)) ([]string, error) {
+func verifyChecksWithPermit(ctx context.Context, configured []config.Check, dir string, permit func(context.Context, config.Check) (func(), error), artifacts *nativeArtifactContext) ([]string, error) {
 	var checked []string
-	for _, check := range configured {
+	pending := make([]*nativeArtifactPending, 0)
+	defer func() {
+		for _, item := range pending {
+			if item != nil && item.cleanup != nil {
+				item.cleanup()
+			}
+		}
+	}()
+	for index, check := range configured {
 		if !applicable(check) {
 			continue
 		}
@@ -2097,10 +2169,24 @@ func verifyChecksWithPermit(ctx context.Context, configured []config.Check, dir 
 				return checked, err
 			}
 		}
-		out, err, report := runVerificationCheck(ctx, check, dir)
+		item, beginErr := beginNativeArtifacts(ctx, check, index, dir, artifacts)
+		if beginErr != nil {
+			release()
+			return checked, beginErr
+		}
+		artifactDir := ""
+		if item != nil {
+			artifactDir = item.staging
+			item.evidence = len(checked)
+			pending = append(pending, item)
+		}
+		out, err, report := runVerificationCheckWithArtifacts(ctx, check, dir, artifactDir)
 		release()
 		if err != nil {
 			return checked, &checkFailure{name: check.Name, command: filepath.Base(check.Command[0]), err: err, output: boundedFailureDiagnostic(safety.Redact(out)), check: check, report: report}
+		}
+		if finishErr := finishNativeArtifacts(ctx, item, dir, artifacts); finishErr != nil {
+			return checked, finishErr
 		}
 		checked = append(checked, passedCheckEvidence(check, out))
 	}
@@ -2114,17 +2200,38 @@ func verifyChecksWithPermit(ctx context.Context, configured []config.Check, dir 
 	if dirty != "" {
 		return checked, errors.New("verification modified source or created unignored files; evidence invalid")
 	}
+	if len(pending) != 0 {
+		if identityErr := finalNativeArtifactIdentity(ctx, dir, artifacts, pending); identityErr != nil {
+			return checked, identityErr
+		}
+	}
+	for _, item := range pending {
+		receipt, sealErr := sealNativeArtifacts(item, artifacts)
+		if sealErr != nil {
+			return checked, fmt.Errorf("retain native check artifacts: %w", sealErr)
+		}
+		if receipt != "" {
+			if item.evidence < 0 || item.evidence >= len(checked) {
+				return checked, errors.New("native artifact receipt lost check binding")
+			}
+			checked[item.evidence] += " artifact=" + receipt
+		}
+	}
 	return checked, nil
 }
 
 func runVerificationCheck(ctx context.Context, check config.Check, dir string) (string, error, *nativeFailureReport) {
+	return runVerificationCheckWithArtifacts(ctx, check, dir, "")
+}
+
+func runVerificationCheckWithArtifacts(ctx context.Context, check config.Check, dir, artifacts string) (string, error, *nativeFailureReport) {
 	reportPath, cleanup, setupErr := nativeFailureReportPath(check)
 	if setupErr != nil {
 		return "", setupErr, nil
 	}
 	defer cleanup()
 	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(check.Timeout)*time.Second)
-	out, err := platform.Run(checkCtx, dir, nativeFailureEnvironment(cleanEnvironment(), reportPath), "", check.Command[0], check.Command[1:]...)
+	out, err := platform.Run(checkCtx, dir, nativeCheckEnvironment(cleanEnvironment(), reportPath, artifacts), "", check.Command[0], check.Command[1:]...)
 	cancel()
 	if err == nil || reportPath == "" {
 		return out, err, nil
@@ -2144,9 +2251,10 @@ func (c *Controller) checks(ctx context.Context, e config.Effective, dir, taskID
 	})
 }
 func (c *Controller) checksForPlan(ctx context.Context, dir, taskID string, plan validationPlan) ([]string, error) {
+	artifacts := &nativeArtifactContext{ExpectedHead: plan.ExpectedHead, Config: plan.ExpectedConfig, Rules: roles.Hash(), PlanInput: plan.Input, Toolchain: plan.Toolchain, Project: c.P.Config.Project.ID, Task: taskID, StateRoot: c.P.Dir, SourceRoot: c.P.Root, SealRoot: filepath.Join(c.P.Dir, "native-check-artifacts")}
 	return verifyChecksWithPermit(ctx, plan.Checks, dir, func(ctx context.Context, check config.Check) (func(), error) {
 		return c.checkPermit(ctx, taskID, check)
-	})
+	}, artifacts)
 }
 
 func reviewPromptTask(task *model.Task, paths []string) *model.Task {
@@ -2208,7 +2316,7 @@ func completedWaveBlocksOrigin(task *model.Task, paths []string, required []role
 // built-in QA role completed exact-head peer artifacts. Publishing after each
 // wave makes an interrupted QA retry resume only the missing role, not rerun
 // already-completed reviewers on unchanged source and policy inputs.
-func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Task, paths []string, dir, diff string, evidence *model.Evidence, attempt int, required []roles.Role) ([]reviewOutcome, error) {
+func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Task, paths []string, dir, diff string, plan validationPlan, nativeArtifacts nativeArtifactReviewInventory, evidence *model.Evidence, attempt int, required []roles.Role) ([]reviewOutcome, error) {
 	outcomes := make([]reviewOutcome, len(required))
 	promptTask := reviewPromptTask(task, paths)
 	waves := reviewWaves(required)
@@ -2218,6 +2326,7 @@ func (c *Controller) runReviewAttempt(effective config.Effective, task *model.Ta
 			qaWave = qaWave || required[index].Name == "qa"
 		}
 		payload := reviewEvidencePayloadWithPeers(evidence, attempt, qaWave)
+		payload += nativeArtifactReviewPayload(plan, nativeArtifacts)
 		if evidence.Visual != nil {
 			payload += "\nVISUAL ARTIFACT ROOT (local, read-only): " + filepath.Join(c.P.Dir, filepath.FromSlash(filepath.Dir(evidence.Visual.Manifest))) + "\nInspect the screenshot and diagnostics listed in visual.artifacts. A capture artifact is evidence, not a visual pass.\n"
 		}
@@ -2276,12 +2385,20 @@ func visualRequirementMatches(task *model.Task, effective config.Effective) bool
 	return requirement.Base == effective.BaseSHA && requirement.Head == task.HeadSHA && requirement.Config == effective.Hash && requirement.Rules == roles.Hash()
 }
 
-func (c *Controller) preserveReviewFindings(id string, findings []model.Finding) error {
+func (c *Controller) preserveReviewFindings(id string, evidence *model.Evidence, findings []model.Finding) error {
 	if len(findings) == 0 {
 		return nil
 	}
 	return c.mutate(func(s *model.Snapshot) error {
-		s.Tasks[id].Findings = appendUniqueFindings(s.Tasks[id].Findings, findings)
+		task := s.Tasks[id]
+		task.Findings = appendUniqueFindings(task.Findings, findings)
+		// Findings deduplicate by their established identity. A new provider
+		// outcome may therefore lose to an older retained value that differs in
+		// relevance, baseline, or resolution. Mint a receipt only when that
+		// exact normalized outcome survived persistence; otherwise it could
+		// incorrectly attribute the older finding to this review input.
+		persisted := retainedReviewFindingsForReceipts(task.Findings, findings)
+		appendReviewFindingReceipts(task, reviewFindingReceipts(task, evidence, persisted, false))
 		return nil
 	})
 }
@@ -2350,6 +2467,16 @@ func (c *Controller) verifyReview(id string) error {
 		return e
 	}
 	t = c.Snapshot().Tasks[id]
+	// syncTask may have selected the one bounded repair-first route only after
+	// ordinary synchronization and scope validation. Do not fall through into
+	// the unchanged-head native gate in this worker; the scheduler will admit
+	// the normal FIX writer and its changed checkpoint returns here afterward.
+	if t == nil {
+		return errors.New("task disappeared after synchronization")
+	}
+	if t.State == model.Fix {
+		return nil
+	}
 	dir := c.P.TaskPath(t)
 	diff, paths, e := c.P.Git.Diff(c.ctx, t.BaseSHA, t.HeadSHA)
 	if e != nil {
@@ -2435,12 +2562,26 @@ func (c *Controller) verifyReview(id string) error {
 		}
 	}
 	evidence := &model.Evidence{Base: t.BaseSHA, Head: t.HeadSHA, Config: effective.Hash, Rules: roles.Hash(), Checks: checks, ValidationGate: plan.Gate, ValidationReason: plan.Reason, ValidationInput: plan.Input, Toolchain: plan.Toolchain, TestInputs: plan.TestInputs, Reviews: priorReviews, ReviewRoster: roster, ReviewRosterReason: rosterReason, ReviewScope: scope, ReviewDispositions: dispositions, At: time.Now().UTC()}
+	nativeArtifacts, nativeArtifactErr := c.reviewNativeArtifactInventory(plan, t, evidence)
+	if nativeArtifactErr != nil {
+		var readiness *NativeArtifactReadinessError
+		if errors.As(nativeArtifactErr, &readiness) {
+			c.nativeArtifactReadinessBlock(id, readiness)
+			return nil
+		}
+		return nativeArtifactErr
+	}
 	if e = c.mutate(func(s *model.Snapshot) error {
 		task := s.Tasks[id]
 		task.State = model.Review
 		task.UI = t.UI
 		task.Security = t.Security
 		task.Findings = nil
+		task.ReviewFindingProvenance = nil
+		task.ReviewFindingReceiptOverflow = false
+		if task.RepairFirst != nil && (task.RepairFirst.Base != task.BaseSHA || task.RepairFirst.Head != task.HeadSHA) {
+			task.RepairFirst = nil
+		}
 		task.Verification = nil
 		task.Evidence = evidence
 		return nil
@@ -2461,12 +2602,12 @@ func (c *Controller) verifyReview(id string) error {
 		return e
 	}
 	c.mirror(id)
-	outcomes, reviewErr := c.runReviewAttempt(effective, t, paths, dir, diff, evidence, 1, activeRequired)
+	outcomes, reviewErr := c.runReviewAttempt(effective, t, paths, dir, diff, plan, nativeArtifacts, evidence, 1, activeRequired)
 	if reviewErr != nil {
 		return reviewErr
 	}
 	assessment := assessReviews(activeRequired, outcomes, reviewFindingBlocksOrigin(t, paths, activeRequired))
-	if e = c.preserveReviewFindings(id, assessment.findings); e != nil {
+	if e = c.preserveReviewFindings(id, evidence, assessment.findings); e != nil {
 		return e
 	}
 	if reviewAuthenticationFailure(outcomes) {
@@ -2519,6 +2660,8 @@ func (c *Controller) verifyReview(id string) error {
 		acceptReviewDispositions(evidence, t, effective, activeRequired, outcomes)
 	}
 	if len(assessment.evidence) > 0 {
+		refreshPlan := plan
+		refreshArtifacts := nativeArtifacts
 		refreshRoles := make([]roles.Role, 0, len(assessment.evidence))
 		names := make([]string, 0, len(assessment.evidence))
 		visualRequested := false
@@ -2530,9 +2673,6 @@ func (c *Controller) verifyReview(id string) error {
 			sourceRequested = sourceRequested || sourceEvidenceRequest(outcomes[index].result)
 		}
 		_ = c.P.DB.Event(id, t.RunID, "verification", "native", "review_evidence_refresh_requested", "roles="+strings.Join(names, ",")+" head="+t.HeadSHA)
-		if visualRequested {
-			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_queued", "head="+t.HeadSHA+" workload="+visualCaptureWorkload(effective, t))
-		}
 		if !visualRequested || sourceRequested {
 			plan, planErr := fullValidationPlan(c.ctx, effective, dir, t.HeadSHA, "reviewer requested source evidence refresh")
 			if planErr != nil {
@@ -2546,8 +2686,19 @@ func (c *Controller) verifyReview(id string) error {
 			if e = applyValidationEvidence(evidence, plan, checks); e != nil {
 				return e
 			}
+			refreshPlan = plan
+			refreshArtifacts, nativeArtifactErr = c.reviewNativeArtifactInventory(refreshPlan, t, evidence)
+			if nativeArtifactErr != nil {
+				var readiness *NativeArtifactReadinessError
+				if errors.As(nativeArtifactErr, &readiness) {
+					c.nativeArtifactReadinessBlock(id, readiness)
+					return nil
+				}
+				return nativeArtifactErr
+			}
 		}
 		if visualRequested {
+			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_queued", "head="+t.HeadSHA+" workload="+visualCaptureWorkload(effective, t))
 			_ = c.P.DB.Event(id, t.RunID, "verification", "native", "visual_capture_running", "head="+t.HeadSHA+" workload="+visualCaptureWorkload(effective, t))
 			visual, visualErr := c.captureVisual(c.ctx, effective, t, dir)
 			if visualErr != nil {
@@ -2569,12 +2720,12 @@ func (c *Controller) verifyReview(id string) error {
 		if e = c.publishReviewProgress(id, evidence); e != nil {
 			return e
 		}
-		refreshed, refreshErr := c.runReviewAttempt(effective, t, paths, dir, diff, evidence, 2, refreshRoles)
+		refreshed, refreshErr := c.runReviewAttempt(effective, t, paths, dir, diff, refreshPlan, refreshArtifacts, evidence, 2, refreshRoles)
 		if refreshErr != nil {
 			return refreshErr
 		}
 		refreshAssessment := assessReviews(refreshRoles, refreshed, reviewFindingBlocksOrigin(t, paths, refreshRoles))
-		if e = c.preserveReviewFindings(id, refreshAssessment.findings); e != nil {
+		if e = c.preserveReviewFindings(id, evidence, refreshAssessment.findings); e != nil {
 			return e
 		}
 		if reviewAuthenticationFailure(refreshed) {

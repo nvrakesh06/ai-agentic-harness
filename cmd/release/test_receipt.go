@@ -242,8 +242,12 @@ func releaseReceiptIdentityWithRun(ctx context.Context, groups []releaseTestGrou
 		Inventory:   releaseHash(string(plan)),
 		Toolchain:   releaseHash(goVersion + "\n" + goEnv.identity() + "\n" + gitVersion),
 		Environment: releaseHash(strings.Join(environment, "\n")),
-		Resources:   releaseHash(fmt.Sprintf("timeout=%s\nengine_group_size=%d\npackage_parallelism=1\nfailfast=true", releaseTestTimeout, releaseIntegrationGroupSize)),
+		Resources:   releaseHash(releaseResourcePolicy()),
 	}, nil
+}
+
+func releaseResourcePolicy() string {
+	return fmt.Sprintf("timeout=%s\nunit_watchdog=%s\nengine_group_size=%d\npackage_parallelism=1\nfailfast=true\nboundary_policy=completed-unit-v1\nno_progress_limit=%d", releaseTestTimeout, releaseUnitWatchdog, releaseIntegrationGroupSize, releaseNoProgressLimit)
 }
 
 func releaseGoEnvironmentFromJSON(value string) (releaseGoEnvironment, error) {

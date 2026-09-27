@@ -76,6 +76,96 @@ func init() {
 		time.Sleep(10 * time.Second)
 		os.Exit(0)
 	}
+	if mode := os.Getenv("AIH_HELPER_MODE"); strings.HasPrefix(mode, "codex-terminal-") {
+		switch mode {
+		case "codex-terminal-captured-prefix", "codex-terminal-capture-minus-one":
+			target := maxCodexTerminalJSONLBytes
+			if mode == "codex-terminal-capture-minus-one" {
+				target--
+			}
+			fmt.Print(sizedTerminalJSONL(target))
+			if mode == "codex-terminal-captured-prefix" {
+				fmt.Println(`{"type":"turn.failed","error":{"message":"discarded fixture tail"}}`)
+			}
+			os.Exit(0)
+		case "codex-terminal-4097-events":
+			message, _ := json.Marshal(Result{Schema: 1, Status: "completed", Summary: "event-boundary result"})
+			fmt.Println(`{"type":"thread.started"}`)
+			fmt.Println(`{"type":"turn.started"}`)
+			for range 4093 {
+				fmt.Println(`{"type":"item.started"}`)
+			}
+			fmt.Println(terminalAgentMessageEvent(string(message)))
+			fmt.Print(`{"type":"turn.completed"}`)
+			os.Exit(0)
+		}
+		result := Result{Schema: 1, Status: "completed", Summary: "terminal JSONL result"}
+		if mode == "codex-terminal-sensitive" {
+			result.Summary = "token=abcdefghijklmnopqrstuvwxyz0123456789"
+		}
+		message, _ := json.Marshal(result)
+		if mode == "codex-terminal-malformed" {
+			message = []byte("not-json")
+		}
+		if mode == "codex-terminal-unknown-field" {
+			message = []byte(`{"schema_version":1,"status":"completed","summary":"fixture","unknown":true}`)
+		}
+		if mode == "codex-terminal-missing-field" {
+			message = []byte(`{"schema_version":1,"status":"completed"}`)
+		}
+		fileResult := []byte(nil)
+		if mode == "codex-terminal-file-precedence" {
+			fileResult, _ = json.Marshal(Result{Schema: 1, Status: "completed", Summary: "result file is authoritative"})
+		}
+		if mode == "codex-terminal-invalid-file" {
+			fileResult = []byte("not-json")
+		}
+		for i, a := range os.Args {
+			if a != "--output-last-message" {
+				continue
+			}
+			if mode == "codex-terminal-directory-file" {
+				_ = os.MkdirAll(os.Args[i+1], 0700)
+			} else if fileResult != nil {
+				_ = os.WriteFile(os.Args[i+1], fileResult, 0600)
+			}
+		}
+		fmt.Println(`{"type":"thread.started"}`)
+		fmt.Println(`{"type":"turn.started"}`)
+		fmt.Println(terminalAgentMessageEvent(string(message)))
+		switch mode {
+		case "codex-terminal-no-terminal":
+			os.Exit(0)
+		case "codex-terminal-failed":
+			fmt.Println(`{"type":"turn.failed","error":{"message":"fixture"}}`)
+			os.Exit(0)
+		case "codex-terminal-error":
+			fmt.Println(`{"type":"error","message":"fixture"}`)
+			os.Exit(0)
+		case "codex-terminal-ambiguous":
+			fmt.Println(`{"type":"turn.completed"}`)
+			fmt.Println(`{"type":"turn.completed"}`)
+			os.Exit(0)
+		case "codex-terminal-second-turn":
+			fmt.Println(`{"type":"turn.completed"}`)
+			fmt.Println(`{"type":"turn.started"}`)
+			os.Exit(0)
+		case "codex-terminal-truncated":
+			fmt.Println(`{"type":"turn.completed"}`)
+			fmt.Print(`{"type":`)
+			os.Exit(0)
+		case "codex-terminal-timeout":
+			fmt.Println(`{"type":"turn.completed"}`)
+			time.Sleep(10 * time.Second)
+			os.Exit(0)
+		case "codex-terminal-nonzero-exit":
+			fmt.Println(`{"type":"turn.completed"}`)
+			os.Exit(2)
+		default:
+			fmt.Println(`{"type":"turn.completed"}`)
+			os.Exit(0)
+		}
+	}
 	r := Result{Schema: 1, Status: "completed", Summary: "fixture result"}
 	if os.Getenv("AIH_HELPER_MODE") == "late-in-progress" {
 		r = Result{Schema: 1, Status: "in_progress", Summary: "safe checkpoint before timeout"}
@@ -103,6 +193,23 @@ func init() {
 		fmt.Fprintln(os.Stderr, "benign provider diagnostic")
 	}
 	os.Exit(0)
+}
+
+func sizedTerminalJSONL(size int) string {
+	prefix := "{\"type\":\"thread.started\"}\n{\"type\":\"turn.started\"}\n"
+	terminal := "\n{\"type\":\"turn.completed\"}"
+	result := Result{Schema: 1, Status: "completed"}
+	message, _ := json.Marshal(result)
+	event := []byte(terminalAgentMessageEvent(string(message)))
+	result.Summary = strings.Repeat("x", size-len(prefix)-len(event)-len(terminal))
+	message, _ = json.Marshal(result)
+	event = []byte(terminalAgentMessageEvent(string(message)))
+	return prefix + string(event) + terminal
+}
+
+func terminalAgentMessageEvent(message string) string {
+	event, _ := json.Marshal(map[string]any{"type": "item.completed", "item": map[string]any{"type": "agent_message", "text": message}})
+	return string(event)
 }
 
 func TestAdaptersPassConfiguredModelExactly(t *testing.T) {
@@ -288,6 +395,56 @@ func TestAdaptersLaunchAndFailures(t *testing.T) {
 						}
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestCodexTerminalJSONLResultFallback(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AIH_PROVIDER_HELPER", "1")
+	c := CLI{Kind: "codex", Executable: exe}
+	for _, test := range []struct {
+		name    string
+		mode    string
+		want    string
+		ok      bool
+		timeout time.Duration
+	}{
+		{name: "absent file falls back to terminal JSONL", mode: "codex-terminal-success", want: "terminal JSONL result", ok: true, timeout: time.Second},
+		{name: "one byte below captured output limit", mode: "codex-terminal-capture-minus-one", ok: true, timeout: time.Second},
+		{name: "captured prefix cannot hide later provider output", mode: "codex-terminal-captured-prefix", timeout: time.Second},
+		{name: "4097 events exceed fallback limit", mode: "codex-terminal-4097-events", timeout: time.Second},
+		{name: "result file remains authoritative", mode: "codex-terminal-file-precedence", want: "result file is authoritative", ok: true, timeout: time.Second},
+		{name: "malformed final result", mode: "codex-terminal-malformed", timeout: time.Second},
+		{name: "unknown final result field", mode: "codex-terminal-unknown-field", timeout: time.Second},
+		{name: "missing final result field", mode: "codex-terminal-missing-field", timeout: time.Second},
+		{name: "no terminal completion", mode: "codex-terminal-no-terminal", timeout: time.Second},
+		{name: "failed turn", mode: "codex-terminal-failed", timeout: time.Second},
+		{name: "error event", mode: "codex-terminal-error", timeout: time.Second},
+		{name: "ambiguous terminal completion", mode: "codex-terminal-ambiguous", timeout: time.Second},
+		{name: "second turn is rejected", mode: "codex-terminal-second-turn", timeout: time.Second},
+		{name: "truncated tail", mode: "codex-terminal-truncated", timeout: time.Second},
+		{name: "timeout does not fall back", mode: "codex-terminal-timeout", timeout: 100 * time.Millisecond},
+		{name: "nonzero exit does not fall back", mode: "codex-terminal-nonzero-exit", timeout: time.Second},
+		{name: "invalid existing result file fails closed", mode: "codex-terminal-invalid-file", timeout: time.Second},
+		{name: "unreadable existing result file fails closed", mode: "codex-terminal-directory-file", timeout: time.Second},
+		{name: "sensitive result remains rejected", mode: "codex-terminal-sensitive", timeout: time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("AIH_HELPER_MODE", test.mode)
+			result, err := c.Run(context.Background(), Request{Directory: t.TempDir(), Runtime: filepath.Join(t.TempDir(), "run"), Role: "reviewer", Prompt: "fixture", Timeout: test.timeout})
+			if test.ok {
+				if err != nil || (test.want != "" && result.Summary != test.want) {
+					t.Fatalf("result = %#v, err = %v", result, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("mode %s unexpectedly succeeded: %#v", test.mode, result)
 			}
 		})
 	}

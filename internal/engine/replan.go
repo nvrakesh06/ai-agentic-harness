@@ -846,6 +846,12 @@ func projectSupervisorLock(project *Project) string {
 
 func prospectiveReplanCycle(s *model.Snapshot, successor *model.Task, originals []ReplanOriginal) bool {
 	probe := prospectiveReplanSnapshot(s, successor, originals)
+	// applyReplan has already established that successor is a fresh task ID and
+	// that every successor dependency names a known task. The prospective graph
+	// adds only successor and rewrites the selected originals to point at it, so
+	// every cycle introduced by this operation must be reachable from successor.
+	// An older corrupt component that successor reaches still fails closed here;
+	// an unrelated pre-existing component cannot make this replacement unsafe.
 	visiting, done := map[string]bool{}, map[string]bool{}
 	var visit func(string) bool
 	visit = func(id string) bool {
@@ -873,12 +879,7 @@ func prospectiveReplanCycle(s *model.Snapshot, successor *model.Task, originals 
 		done[id] = true
 		return false
 	}
-	for id := range probe.Tasks {
-		if visit(id) {
-			return true
-		}
-	}
-	return false
+	return visit(successor.ID)
 }
 
 func prospectiveReplanSnapshot(s *model.Snapshot, successor *model.Task, originals []ReplanOriginal) *model.Snapshot {

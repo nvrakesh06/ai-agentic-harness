@@ -43,6 +43,11 @@ type Provider interface {
 }
 type CLI struct{ Kind, Executable string }
 
+// This must stay at or below platform.maxCapturedOutputBytes. RunObserved
+// returns only the retained prefix for a successful process, so an output at
+// this boundary is indistinguishable from a transcript with discarded events.
+const maxCodexTerminalJSONLBytes = 8 * 1024 * 1024
+
 type InvocationError struct {
 	Cause        error
 	LastActivity time.Time
@@ -224,10 +229,13 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 	out := observed.Stdout
 	if c.Kind == "codex" {
 		b, re := os.ReadFile(resultPath)
-		if re != nil {
+		if re == nil {
+			out = string(b)
+		} else if os.IsNotExist(re) {
+			return codexTerminalJSONLResult(observed.Stdout, r.Role)
+		} else {
 			return result, fmt.Errorf("missing Codex structured result: %w", re)
 		}
-		out = string(b)
 	} else {
 		var envelope struct {
 			Structured json.RawMessage `json:"structured_output"`
@@ -247,6 +255,94 @@ func (c CLI) Run(parent context.Context, r Request) (Result, error) {
 		}
 	}
 	return Parse(out, r.Role)
+}
+
+// codexTerminalJSONLResult recovers only a complete successful Codex JSONL
+// transcript. The output-last-message file remains authoritative whenever it
+// exists, including when it is malformed or unreadable. This fallback is used
+// only after RunObserved has returned a successful process exit and the file is
+// definitively absent.
+func codexTerminalJSONLResult(stdout, role string) (Result, error) {
+	if len(stdout) == 0 || len(stdout) >= maxCodexTerminalJSONLBytes {
+		return Result{}, errors.New("missing Codex structured result and terminal JSONL is unavailable")
+	}
+	lines := strings.Split(stdout, "\n")
+	if len(lines) > 4097 { // 4,096 events plus one trailing newline.
+		return Result{}, errors.New("missing Codex structured result and terminal JSONL has too many events")
+	}
+	threadStarted, turnStarted, turnCompleted := false, false, false
+	lastEventWasAgentMessage := false
+	lastAgentMessage := ""
+	eventCount := 0
+	for lineIndex, line := range lines {
+		if line == "" && lineIndex == len(lines)-1 {
+			continue // JSONL commonly ends with one newline.
+		}
+		if strings.TrimSpace(line) == "" {
+			return Result{}, errors.New("missing Codex structured result and terminal JSONL contains an empty event")
+		}
+		eventCount++
+		if eventCount > 4096 {
+			return Result{}, errors.New("missing Codex structured result and terminal JSONL has too many events")
+		}
+		var event struct {
+			Type string          `json:"type"`
+			Item json.RawMessage `json:"item"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil || event.Type == "" {
+			return Result{}, errors.New("missing Codex structured result and terminal JSONL is malformed")
+		}
+		if turnCompleted {
+			return Result{}, errors.New("missing Codex structured result and terminal JSONL has events after completion")
+		}
+		switch event.Type {
+		case "thread.started":
+			if threadStarted || turnStarted {
+				return Result{}, errors.New("missing Codex structured result and terminal JSONL has an invalid thread start")
+			}
+			threadStarted = true
+			lastEventWasAgentMessage = false
+		case "turn.started":
+			if !threadStarted || turnStarted {
+				return Result{}, errors.New("missing Codex structured result and terminal JSONL has an invalid turn start")
+			}
+			turnStarted = true
+			lastEventWasAgentMessage = false
+		case "item.started", "item.updated":
+			if !turnStarted {
+				return Result{}, errors.New("missing Codex structured result and terminal JSONL has an item outside a turn")
+			}
+			lastEventWasAgentMessage = false
+		case "item.completed":
+			if !turnStarted {
+				return Result{}, errors.New("missing Codex structured result and terminal JSONL has an item outside a turn")
+			}
+			var item struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(event.Item, &item); err != nil || item.Type == "" {
+				return Result{}, errors.New("missing Codex structured result and terminal JSONL has a malformed completed item")
+			}
+			lastEventWasAgentMessage = item.Type == "agent_message"
+			if lastEventWasAgentMessage {
+				lastAgentMessage = item.Text
+			}
+		case "turn.completed":
+			if !turnStarted || !lastEventWasAgentMessage || lastAgentMessage == "" {
+				return Result{}, errors.New("missing Codex structured result and terminal JSONL has no final completed agent message")
+			}
+			turnCompleted = true
+		case "turn.failed", "error":
+			return Result{}, errors.New("missing Codex structured result and terminal JSONL did not complete successfully")
+		default:
+			return Result{}, errors.New("missing Codex structured result and terminal JSONL has an unsupported event")
+		}
+	}
+	if eventCount == 0 || !threadStarted || !turnStarted || !turnCompleted {
+		return Result{}, errors.New("missing Codex structured result and terminal JSONL did not complete")
+	}
+	return Parse(lastAgentMessage, role)
 }
 
 func (c CLI) invocationError(cause error, observed platform.Observation) error {
