@@ -341,10 +341,19 @@ func parsedFollowupSourcePaths(location string, legacySanitize bool) []string {
 		for strings.HasPrefix(candidate, "./") {
 			candidate = strings.TrimPrefix(candidate, "./")
 		}
-		// Reviewers sometimes put prose such as "current-head browser captures"
-		// in Location. Do not turn that phrase into a fake source-file issue.
 		lower := strings.ToLower(candidate)
-		if strings.ContainsAny(candidate, " \t") || (!strings.Contains(candidate, ".") && !strings.HasPrefix(lower, "src/") && !strings.HasPrefix(lower, "internal/") && !strings.HasPrefix(lower, "pkg/") && !strings.HasPrefix(lower, "lib/") && !strings.HasPrefix(lower, "app/") && !strings.HasPrefix(lower, "tests/") && !strings.HasPrefix(lower, "docs/") && !strings.HasPrefix(lower, "projects/")) {
+		sourceLike := strings.Contains(candidate, ".") || strings.Contains(candidate, "/") || followupSourcePrefix(lower)
+		if strings.ContainsAny(candidate, " \t") {
+			// Reviewers sometimes put prose such as "current-head browser
+			// captures" in Location. Leave that non-source prose ungrouped, but
+			// fail ownership closed when a source-like path has unsupported
+			// whitespace instead of silently accepting a neighboring path.
+			if !legacySanitize && sourceLike {
+				return nil
+			}
+			continue
+		}
+		if !sourceLike {
 			continue
 		}
 		sanitized := strings.Map(func(r rune) rune {
@@ -370,6 +379,15 @@ func parsedFollowupSourcePaths(location string, legacySanitize bool) []string {
 	}
 	sort.Strings(sources)
 	return slices.Compact(sources)
+}
+
+func followupSourcePrefix(candidate string) bool {
+	for _, prefix := range []string{"src/", "internal/", "pkg/", "lib/", "app/", "tests/", "docs/", "projects/"} {
+		if strings.HasPrefix(candidate, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 var followupParenLine = regexp.MustCompile(`(?i)\s*\(lines?\s+\d+(?:\s*[-–]\s*\d+)?\)$`)
