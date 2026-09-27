@@ -138,8 +138,10 @@ func TestRepairFirstAnswerSynchronizesBeforeWriterAndRechecksChangedHead(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	beforeBlock := model.Clone(snapshot)
 	task := snapshot.Tasks["planner"]
 	model.BlockWithOrigin(task, "Confirm the immutable-owner repair can resume.", "owner routing completed while native verification was unavailable", model.SyncRequired, model.BlockerOriginVerificationOnly)
+	model.AccountTaskTransitions(beforeBlock, snapshot, time.Now().UTC())
 	next, err = f.P.Git.StateCommit(ctx, stateRef, snapshot)
 	if err != nil {
 		t.Fatal(err)
