@@ -112,7 +112,19 @@ completed guidance for a bounded `FIX` retry or an implementer's durable
 reuse reason recorded. A human unblock keeps that guidance only for the exact
 structured acknowledgement `AIH-CONTINUE CHECKPOINT <full-head-sha>`; any other
 answer can introduce a decision and receives fresh specialist guidance.
-Exact-head native checks and final independent reviews are never reused.
+Exact-head native checks and final independent reviews are never reused. After
+ordinary synchronization preserves an exact reviewed task input, one bounded
+FIX may run before a redundant unchanged-head native check only when the
+supervisor previously stored a schema-12 receipt for every retained critical or
+high change-attributed finding, every concrete location remains inside the
+current immutable assignment, and the receipt's exact evidence still matches
+current policy. The receipt is not provider output or approval. Unknown,
+baseline, unlocated, outside-scope, stale, missing, or overflowed receipts take
+the ordinary native route. The controller may recognize its own redundant
+review-retry summary only when it was emitted beside an attributed concrete
+finding from that same review outcome. One consumed unchanged-head route remains
+consumed through no-op and evidence-reset recovery; a changed source head still
+must run the normal native, security, reviewer, QA, and visual gates.
 Shutdown and takeover clear interrupted reader ownership while preserving completed
 guidance eligibility and its reuse counter across verification recovery.
 The scheduler admits only prepared tasks to `RUNNING` after rechecking dependencies
@@ -128,7 +140,7 @@ environment and recheck without starting another implementer.
 
 ## Schema compatibility and migrations
 
-The current runtime uses remote schema 11, role schema 1, rules version 1, and
+The current runtime uses remote schema 12, role schema 1, rules version 1, and
 local schema 1. Unknown newer schemas fail closed before writes. Legacy schema 0
 gains version metadata and missing maps; schema 1 reconstructs the authorized
 objective backlog deterministically. Schema 2 drops unowned verification-resource
@@ -147,11 +159,17 @@ head. Positive historical provider durations remain usable, while unrecorded zer
 durations remain unavailable. Interrupted recovery durations use the expired lease
 boundary and are explicitly estimates.
 
+Schema 12 adds supervisor-issued retained-review finding receipts and a one-shot
+repair-first consumption record. Migration deliberately leaves both empty: older
+findings, review summaries, run contexts, local caches, and human answers do not
+prove which reviewed source produced a retained finding. Publishing schema 12 is
+a one-way deployment boundary; older runtimes reject it.
+
 All migrated snapshots then undergo current validation. The first subsequent state
 commit keeps the original remote commit as its parent, preserving the pre-migration
-backup in Git history. Publishing schema 11 is a one-way deployment boundary: older
+backup in Git history. Publishing schema 12 is a one-way deployment boundary: older
 runtimes reject it. Upgrade every machine that may attach, resume, or take over
-before the first schema-11 save. No automatic major-version migration exists.
+before the first schema-12 save. No automatic major-version migration exists.
 
 Remote task identities and branches are constrained before use as filesystem or
 Git targets. Schema changes require tests for old fixtures and new-runtime refusal.
