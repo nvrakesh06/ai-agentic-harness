@@ -190,17 +190,22 @@ func Canonical(ctx context.Context, g gitx.Git) (config.Effective, error) {
 		return config.Effective{}, e
 	}
 	files := map[string]string{}
+	initial := []string{}
 	for _, n := range names {
 		if strings.HasPrefix(n, ".aih/") || filepath.Base(n) == "AGENTS.md" {
-			b, e := g.Show(ctx, ref, n)
-			if e != nil {
-				return config.Effective{}, e
-			}
-			if len(b) > 128*1024 {
-				return config.Effective{}, fmt.Errorf("canonical instruction file too large: %s", n)
-			}
-			files[n] = b
+			initial = append(initial, n)
 		}
+	}
+	batch, e := g.ShowMany(ctx, ref, initial)
+	if e != nil {
+		return config.Effective{}, e
+	}
+	for _, n := range initial {
+		b := batch[n]
+		if len(b) > 128*1024 {
+			return config.Effective{}, fmt.Errorf("canonical instruction file too large: %s", n)
+		}
+		files[n] = b
 	}
 	effective, e := config.Parse(files)
 	if e != nil {
@@ -210,6 +215,8 @@ func Canonical(ctx context.Context, g gitx.Git) (config.Effective, error) {
 	if e != nil {
 		return effective, e
 	}
+	contexts := []string{}
+	seen := map[string]bool{}
 	for _, role := range all {
 		for _, name := range role.Context {
 			if strings.HasPrefix(name, "/") || strings.Contains(name, "..") || strings.ContainsAny(name, `\:`) {
@@ -218,15 +225,22 @@ func Canonical(ctx context.Context, g gitx.Git) (config.Effective, error) {
 			if _, ok := files[name]; ok {
 				continue
 			}
-			b, err := g.Show(ctx, ref, name)
-			if err != nil {
-				return effective, fmt.Errorf("required context %s: %w", name, err)
+			if !seen[name] {
+				seen[name] = true
+				contexts = append(contexts, name)
 			}
-			if len(b) > 128*1024 {
-				return effective, fmt.Errorf("context too large: %s", name)
-			}
-			files[name] = b
 		}
+	}
+	batch, e = g.ShowMany(ctx, ref, contexts)
+	if e != nil {
+		return effective, fmt.Errorf("required context: %w", e)
+	}
+	for _, name := range contexts {
+		b := batch[name]
+		if len(b) > 128*1024 {
+			return effective, fmt.Errorf("context too large: %s", name)
+		}
+		files[name] = b
 	}
 	effective, e = config.Parse(files)
 	effective.BaseSHA = ref
